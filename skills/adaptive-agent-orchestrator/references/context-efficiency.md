@@ -24,12 +24,16 @@ being read into model context.
 ## Context selection gate
 
 Reject placeholder or project-wide inputs such as `path:.`, `path:*`,
-`ref:all`, `source:all`, an entire repository, or a full conversation. A
-worker that needs broad discovery should first receive a bounded directory,
-file pattern, or source index rather than the whole project. The controller
-may record a one-line `context.selection_reason` for borderline discovery or
-overlap cases; it is optional diagnostic metadata and never enters a worker
-packet.
+`ref:all`, `source:all`, an entire repository, or a full conversation.
+`New-WorkerPacket.ps1` enforces local packet inputs at render time: `ref:`
+must resolve to a plan field, `path:` must resolve inside the workspace without
+crossing a reparse point, and a future `artifact:` must be owned by a declared
+dependency. `source:` identifiers are syntactically checked but must still be
+verified through their source tool by the Worker. A worker that needs broad
+discovery should first receive a bounded directory, file pattern, or source
+index rather than the whole project. The controller may record a one-line
+`context.selection_reason` for borderline discovery or overlap cases; it is
+optional diagnostic metadata and never enters a worker packet.
 
 Do not create a context index for ordinary work. A durable project may keep a
 small machine-readable artifact catalog only when many later workstreams will

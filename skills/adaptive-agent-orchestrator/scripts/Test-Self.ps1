@@ -308,6 +308,22 @@ try {
     Assert-True ($tooFastEmptyResult.decision -eq 'unknown') (
         'Nearly simultaneous empty snapshots must not prove non-materialization.'
     )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1') `
+            -InputPath $endedEmptyPath -OutputPath (
+                Join-Path $reconcileRun 'receipts/unsafe-delay.thread-reconciliation.json'
+            ) -MinVisibilityDelaySeconds 1 | Out-Null
+    } 'MinVisibilityDelaySeconds' (
+        'The visibility delay may be increased but must never be reduced below five seconds.'
+    )
+    $longDelayResult = & (
+        Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1'
+    ) -InputPath $endedEmptyPath -OutputPath (
+        Join-Path $reconcileRun 'receipts/long-delay.thread-reconciliation.json'
+    ) -MinVisibilityDelaySeconds 15 | ConvertFrom-Json -Depth 20
+    Assert-True ($longDelayResult.decision -eq 'no_match') (
+        'A longer platform visibility delay should remain supported.'
+    )
 
     $multiple = Get-Content -LiteralPath $reconcileInputPath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 20
@@ -1054,6 +1070,96 @@ try {
     )
     Assert-True ($packet -like '*Do not restate inputs*') (
         'Rendered packets should make context-minimization rules operational.'
+    )
+    $missingRefPlan = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $missingRefPlan.nodes[0].context.inputs = @(
+        'ref:plan.goal',
+        'ref:plan.missing_field'
+    )
+    $missingRefPlanPath = Join-Path $testRoot 'packet-missing-ref-plan.json'
+    $missingRefPlan | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $missingRefPlanPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-WorkerPacket.ps1') `
+            -PlanPath $missingRefPlanPath -NodeId 'draft' `
+            -WorkspaceRoot $testRoot | Out-Null
+    } 'does not resolve to an existing plan field' (
+        'Worker packets must reject plan references that do not exist.'
+    )
+
+    $missingPathPlan = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $missingPathPlan.nodes[0].context.inputs = @(
+        'ref:plan.goal',
+        'path:missing-input.md'
+    )
+    $missingPathPlanPath = Join-Path $testRoot 'packet-missing-path-plan.json'
+    $missingPathPlan | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $missingPathPlanPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-WorkerPacket.ps1') `
+            -PlanPath $missingPathPlanPath -NodeId 'draft' `
+            -WorkspaceRoot $testRoot | Out-Null
+    } 'does not exist at packet-render time' (
+        'Worker packets must reject missing local path inputs.'
+    )
+
+    $unsafePathPlan = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $unsafePathPlan.nodes[0].context.inputs = @(
+        'ref:plan.goal',
+        'path:../outside.md'
+    )
+    $unsafePathPlanPath = Join-Path $testRoot 'packet-unsafe-path-plan.json'
+    $unsafePathPlan | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $unsafePathPlanPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-WorkerPacket.ps1') `
+            -PlanPath $unsafePathPlanPath -NodeId 'draft' `
+            -WorkspaceRoot $testRoot | Out-Null
+    } 'unsafe path' (
+        'Worker packets must reject traversal in local path inputs.'
+    )
+
+    $unownedArtifactPlan = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $unownedArtifactPlan.nodes[1].context.inputs = @(
+        'artifact:artifacts/unowned/output.md',
+        'ref:plan.completion'
+    )
+    $unownedArtifactPlanPath = Join-Path $testRoot (
+        'packet-unowned-artifact-plan.json'
+    )
+    $unownedArtifactPlan | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $unownedArtifactPlanPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-WorkerPacket.ps1') `
+            -PlanPath $unownedArtifactPlanPath -NodeId 'review' `
+            -WorkspaceRoot $testRoot | Out-Null
+    } 'neither exists nor is produced by a declared dependency' (
+        'Future artifact inputs must belong to a declared dependency write scope.'
+    )
+
+    $existingInputPath = Join-Path $testRoot 'bounded-input.md'
+    'bounded input' | Set-Content -LiteralPath $existingInputPath
+    $existingPathPlan = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $existingPathPlan.nodes[0].context.inputs = @(
+        'ref:plan.goal',
+        'path:bounded-input.md'
+    )
+    $existingPathPlanPath = Join-Path $testRoot (
+        'packet-existing-path-plan.json'
+    )
+    $existingPathPlan | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $existingPathPlanPath
+    $existingPathPacket = & (
+        Join-Path $scriptRoot 'New-WorkerPacket.ps1'
+    ) -PlanPath $existingPathPlanPath -NodeId 'draft' `
+        -WorkspaceRoot $testRoot
+    Assert-True ($existingPathPacket -like '*path:bounded-input.md*') (
+        'A bounded existing project-relative path should render successfully.'
     )
     $startupRetryPlan = Get-Content -LiteralPath $examplePath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 100

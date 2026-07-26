@@ -8,6 +8,12 @@
 4. Snapshot the intended write scopes and preserve unrelated user changes.
 5. Reserve verification and recovery capacity.
 
+Before the first dispatch on an execution surface, make one read-only
+enumeration call. For a wave of two or more Workers, use the first real,
+low-risk, independently useful workstream as the canary and verify its receipt
+before dispatching the rest. Never create a synthetic canary Worker solely to
+test the platform. See [platform-codex.md](platform-codex.md).
+
 ## Materialization gate
 
 For a durable background thread:
@@ -25,6 +31,7 @@ For a durable background thread:
    before continuing.
 5. Require two captured task-list snapshots, at least five seconds apart, and
    a final snapshot at the visibility-window end before declaring no match.
+   A platform-specific delay may increase this minimum but never reduce it.
 6. Write the immutable reconciliation receipt with
    `Resolve-ThreadReconciliation.ps1`.
 7. Retry only when the receipt confirms no match and its raw input, activation
@@ -36,8 +43,9 @@ For a durable background thread:
 A confirmed no-match replacement uses a distinct attempt activation key; an
 existing reservation always blocks a second creation call for the same key.
 
-Do not retry by switching to projectless. Do not edit Codex SQLite state. A
-client-side error is not proof that no worker exists.
+Codex-specific scope, tool, and internal-state rules live in
+[platform-codex.md](platform-codex.md). A client-side error is not proof that
+no worker exists.
 
 ## Result collection gate
 
@@ -142,3 +150,18 @@ The journal uses ordered sequence numbers and a SHA-256 hash chain. Treat a
 sequence gap or hash mismatch as corruption and stop recovery. `unknown` is
 fail-closed: reconcile it manually or reject it; never recreate it
 automatically.
+
+## Main-agent compaction recovery
+
+The main agent's conversation is not durable orchestration state. After each
+adopted wave, derive compact state with `Get-OrchestrationState.ps1`; keep the
+plan, journal, receipts, handoffs, and referenced artifacts as the recovery
+source.
+
+After context compaction, restart, or a missing-decision symptom:
+
+1. read derived state first;
+2. read only the receipts and artifacts required for the next action;
+3. re-read any in-flight Worker through its normal collection path;
+4. treat a Worker that cannot be re-derived as `unknown`;
+5. never replay the full journal or reconstruct state from remembered chat.

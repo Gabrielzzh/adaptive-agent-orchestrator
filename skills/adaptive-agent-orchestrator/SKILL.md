@@ -1,6 +1,6 @@
 ---
 name: adaptive-agent-orchestrator
-description: Improve task efficiency across research, coding, writing, analysis, creative, and operational work by keeping the main agent productive while isolating genuinely independent work in native subagents or durable background threads. Use when selective delegation, high-output context isolation, reusable project knowledge, independent verification, or durable ownership can reduce repeated reading, reasoning, or elapsed time. Keep small, sequential, high-overlap tasks in the main agent.
+description: Decide whether and how to delegate work while keeping the main agent productive and total context small. Use before creating any agent, or when the user asks for subagents, background tasks, parallel work, agent roles, independent verification, reusable project knowledge, or durable cross-turn ownership. Keep small, sequential, high-overlap work in the main agent; isolate only independently checkable workstreams.
 ---
 
 # Adaptive Agent Orchestrator
@@ -8,9 +8,9 @@ description: Improve task efficiency across research, coding, writing, analysis,
 Act as the only orchestrator. The product goal is lower total task Token use,
 not more agents and not a user-configured Token budget.
 
-GPT-5.6 already decomposes work, chooses tools, and summarizes results. Do not
-add generic reasoning rituals or repeat model-native instructions. Add only
-controls that prevent duplicated context, ownership conflicts, runaway
+The host model already decomposes work, chooses tools, and summarizes results.
+Do not add generic reasoning rituals or repeat model-native instructions. Add
+only controls that prevent duplicated context, ownership conflicts, runaway
 delegation, unverifiable completion, or lost recovery state.
 
 Never let a worker create another worker or invoke this Skill.
@@ -54,7 +54,10 @@ Load references only when their path is active:
   durable run;
 - read [role-system.md](references/role-system.md) only for stored, custom,
   reused, or industry roles. A direct temporary native subagent uses the
-  compact fields in this file and does not load the role manual.
+  compact fields in this file and does not load the role manual;
+- read [platform-codex.md](references/platform-codex.md) only when resolving a
+  concrete model ID, selecting a Codex execution surface, or handling a
+  platform-specific failure.
 
 ## Explain every Worker before creation
 
@@ -71,7 +74,10 @@ explicitly authorized automatic teaming, wait for approval or a requested
 change. Durable
 nodes record `user:<message-or-request>` for explicit approval or
 `policy:path:<project-relative-policy-file>` for automatic authorization;
-never infer authority from the plan itself. Render the exact preview with:
+never infer authority from the plan itself. A platform may still require direct
+user confirmation for a user-owned execution surface; follow
+[platform-codex.md](references/platform-codex.md). Render the exact preview
+with:
 
 ```powershell
 pwsh -File scripts/New-RoleActivationPreview.ps1 `
@@ -97,32 +103,15 @@ consume active slots. Keep a separate cumulative
 materialization ceiling for later waves and retries. If recovery cannot
 reconcile the root-task count, launch no new Worker.
 
-A creation-call error is not proof that no Worker was created. Before retrying
-any failed or ambiguous materialization, reconcile the recent task list using
-the source task, creation window, and task summary. Adopt one matching task;
-stop and archive extras if duplicates exist. Make only one creation call per
-stable activation key. Retry only when reconciliation confirms that no matching
-task materialized; if reconciliation is unavailable or ambiguous, stop and
-report `unknown` instead of retrying. Atomically reserve the activation key
-with `New-ThreadActivationReservation.ps1` and the saved role-preview path
-before the creation call, then
-produce the reconciliation decision with `Resolve-ThreadReconciliation.ps1`;
-do not infer it from the creation-call status alone. A confirmed no-match
-retry uses a new attempt activation key. Put the exact
-`<activation_key>...</activation_key>` and
-`<source_thread_id>...</source_thread_id>` markers in the background task
-prompt so the visible task-list preview can be matched without guessing.
-
-An independent background agent does not automatically return its result to
-the parent task. Register its thread ID and use `read_thread` as the primary
-result-collection path. `wait_threads` is only an optional background-thread
-wait optimization; it is not the native-subagent wait mechanism. If its
-handler is unavailable, fall back once to bounded thread reads rather than
-retrying the wait call. Native subagents use `list_agents` and `wait_agent`;
-independent background agents use `list_threads` and `read_thread`.
-Record the final turn and adopted/rejected findings with
-`New-ThreadResultReceipt.ps1`; do not treat silence as completion or continue
-final integration without the receipt.
+A creation-call error is not proof that no Worker was created, and silence is
+not completion. Reserve one stable activation key before a durable creation
+call, make exactly one call per key, and reconcile the visible task list before
+any retry. If reconciliation is unavailable or ambiguous, stop and report
+`unknown`. Collect every background result through the platform read path and
+record it with `New-ThreadResultReceipt.ps1` before integration. Follow the
+exact tool, marker, collection, and failure rules in
+[platform-codex.md](references/platform-codex.md) and
+[safety-and-lifecycle.md](references/safety-and-lifecycle.md).
 
 Use industry role packs only when a professional responsibility would improve
 the result. First list the compact catalog, then load only the selected
@@ -201,17 +190,21 @@ context-overlap, progressive-dispatch, or delta-retry rules to force a team.
   handoff and verified hash. Otherwise use a fresh session.
 - Use only execution tools actually available. If materialization or read-back
   fails, stop dispatch and continue safely in the main agent.
+- The bundled scripts require PowerShell 7 (`pwsh`). If it is unavailable,
+  skip durable script-backed control, keep work in the main agent or one direct
+  temporary Worker, and report which guarantees were skipped.
 
 Resolve `auto`, capacity, and verification profile with
 `Resolve-OrchestrationPreset.ps1`. Resolve the dispatch model with
 `Resolve-WorkerModel.ps1`. Before every launch, use
 `Resolve-WorkerCapacity.ps1` with observed active persistent and transient
-counts; registered but idle agents do not count. Automatically use Luna only
-for bounded mechanical work and Sol for ordinary judgment, implementation,
-writing, or review. Treat Terra as explicit and experimental. Before any model
-or effort escalation, explain the change and obtain user confirmation unless a
-bounded policy already authorizes it. Ultra always needs explicit per-node
-confirmation.
+counts; registered but idle agents do not count. Automatically use the
+`economy` class only for bounded mechanical work and `standard` for ordinary
+judgment, implementation, writing, or review. Resolve concrete model IDs with
+[platform-codex.md](references/platform-codex.md). Treat experimental models as
+explicit-request-only. Before any model or effort escalation, explain the
+change and obtain user confirmation unless a bounded policy already authorizes
+it. Ultra always needs explicit per-node confirmation.
 
 ## Execute progressively
 

@@ -1,8 +1,12 @@
 {
   "schema_version": "1.0",
-  "policy_version": "0.6.0",
+  "policy_version": "0.6.1",
   "run_id": "example-review-001",
   "goal": "Draft and independently verify a bounded architecture proposal.",
+  "constraints": [
+    "Keep final integration in the main agent.",
+    "Do not permit recursive delegation."
+  ],
   "mode": "workflow",
   "risk": "medium",
   "orchestrator": {
@@ -127,7 +131,7 @@
         "inputs": [
           "ref:plan.goal",
           "ref:plan.constraints",
-          "ref:plan.completion.acceptance"
+          "ref:plan.completion"
         ],
         "excluded": ["Unrelated project conversations", "Prior reviewer reasoning"],
         "handoff_required": false,
@@ -166,7 +170,7 @@
         "max_prior_turns": 0,
         "inputs": [
           "artifact:artifacts/draft/output.md",
-          "ref:plan.completion.acceptance"
+          "ref:plan.completion"
         ],
         "excluded": ["Implementer's hidden reasoning", "Unrelated project conversations"],
         "handoff_required": false,

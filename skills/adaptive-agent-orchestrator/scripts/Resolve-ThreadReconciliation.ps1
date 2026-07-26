@@ -4,7 +4,10 @@ param(
     [string] $InputPath,
 
     [Parameter(Mandatory)]
-    [string] $OutputPath
+    [string] $OutputPath,
+
+    [ValidateRange(5, 300)]
+    [int] $MinVisibilityDelaySeconds = 5
 )
 
 Set-StrictMode -Version Latest
@@ -259,7 +262,7 @@ if ($uniqueMatches.Count -eq 1) {
         )
     }
 } elseif ($snapshots.Count -ge 2 -and
-    $visibilityDelaySeconds -ge 5 -and
+    $visibilityDelaySeconds -ge $MinVisibilityDelaySeconds -and
     $snapshotTimes[$snapshotTimes.Count - 1] -ge $windowEnd) {
     $decision = 'no_match'
 }

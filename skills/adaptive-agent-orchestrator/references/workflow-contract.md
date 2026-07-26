@@ -5,10 +5,11 @@
 A durable plan is a JSON object with:
 
 - `schema_version`: currently `"1.0"`;
-- `policy_version`: currently `"0.6.0"`, used to validate and replay the run;
+- `policy_version`: currently `"0.6.1"`, used to validate and replay the run;
 - `run_id`: unique, stable identifier;
 - `orchestrator`: the single controller identity and delegation authority;
 - `goal`: concrete outcome;
+- optional `constraints`: stable task constraints referenced by Worker packets;
 - `mode`: `auto`, `quick`, `team`, or `workflow`;
 - `risk`: `low`, `medium`, or `high`;
 - `limits`: bounded concurrency, total nodes, attempts, reserves, depth, and
@@ -55,7 +56,7 @@ Each node contains:
     "max_prior_turns": 0,
     "inputs": [
       "artifact:artifacts/proposal.md",
-      "ref:plan.completion.acceptance"
+      "ref:plan.completion"
     ],
     "excluded": ["Unrelated project conversations"],
     "handoff_required": false,
@@ -114,7 +115,7 @@ conversation authority cryptographically. Scripts do verify that a
 
 Every agent node also declares the model resolved at dispatch:
 
-- `model`: an available GPT-5.6 Worker model;
+- `model`: a Worker model available on the selected platform;
 - `model_reason`: a short task-specific reason;
 - `model_authorization`: `not-required`, `user-confirmed`,
   `policy-confirmed`, or `experimental-user-request`.
@@ -122,7 +123,8 @@ Every agent node also declares the model resolved at dispatch:
   use `user:<message-or-request>` or a verified
   `policy:path:<project-relative-policy-file>`.
 
-The default automatic pool contains Luna and Sol. Terra requires
+The default automatic Codex pool is defined in
+[platform-codex.md](platform-codex.md). Terra requires
 `experimental-user-request`. Model or effort escalation requires
 `user-confirmed` or a verified bounded `policy-confirmed` authorization.
 Creation reports the actual model; it never treats the planned model as proof
@@ -161,7 +163,9 @@ only an independent quality gate.
 - optional `selection_reason`: controller-only diagnostic justification for
   borderline discovery or overlap cases; never render it into a worker packet;
 - `inputs`: typed `ref:`, `path:`, `source:`, or `artifact:` references that
-  the worker may open on demand;
+  the worker may open on demand. `New-WorkerPacket.ps1` validates local plan,
+  path, and artifact references before rendering; `source:` identifiers remain
+  subject to the source tool's own lookup;
 - `excluded`: nearby context that must not be inherited;
 - `handoff_required`: whether a later session must resume or reuse this work;
 - when `handoff_required` is true, `handoff_path` is a unique compact state
@@ -201,9 +205,9 @@ reuse-only field.
 - A race must define `winner_condition` and `cancel_losers: true`.
 - A human gate must define the default safe action for timeout or absence.
 - An Ultra node sets both `capability` and `effort` to `ultra`, remains
-  read-only, and records `ultra_authorization` as `user-requested`. v0.4 never
-  upgrades to Ultra automatically: a failed cheaper attempt is evidence, not
-  authority to spend more.
+  read-only, and records `ultra_authorization` as `user-requested`. The
+  controller never upgrades to Ultra automatically: a failed cheaper attempt
+  is evidence, not authority to spend more.
 
 ## Ownership rules
 

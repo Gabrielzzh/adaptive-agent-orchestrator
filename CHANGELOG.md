@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.1 - Unreleased
+
+Context and platform-hardening candidate. Plan policy advances to `0.6.1`.
+
+- Trigger the Skill before any Worker creation while keeping ordinary
+  main-agent work on the fast path.
+- Add an explicit Codex platform adapter for model bindings, native subagents,
+  user-owned tasks, result collection, and failure handling.
+- Use the first real low-risk workstream as a platform canary; never create a
+  disposable canary Worker.
+- Validate packet references, local paths, future dependency artifacts, path
+  traversal, and reparse-point boundaries before dispatch.
+- Permit platform visibility delays above five seconds without allowing a
+  caller to weaken the duplicate-prevention floor.
+- Restore orchestration state from compact project artifacts after context
+  compaction instead of replaying transcripts.
+
 ## 0.6.0 - 2026-07-26
 
 General task-efficiency release. Plan policy advances to `0.6.0`.
