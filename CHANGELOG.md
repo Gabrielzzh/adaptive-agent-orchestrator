@@ -1,5 +1,130 @@
 # Changelog
 
+## 0.7.0 - 2026-07-27
+
+Major context-efficiency, delegation, and task-reliability release.
+
+- Keep the main agent productive while dispatching only bounded,
+  independently checkable workstreams.
+- Start native subagents with compact context by default; use durable
+  background tasks only when independent history, recovery, or reuse matters.
+- Protect a six-Worker active-capacity target as four durable tasks plus two
+  reserved transient-subagent slots, clamped to the host runtime.
+- Explain every Worker before creation, including its role, necessity,
+  execution form, inputs, output, permissions, and model; report the actual
+  identity and model after materialization.
+- Reconcile every durable creation call against visible task state. A returned
+  task ID remains authoritative while visibility catches up; ambiguous state
+  never triggers blind retry.
+- Require hash-bound result receipts before adopting required durable-task
+  results, and use delta repair rather than replaying unchanged context.
+- Treat Worker results, handoffs, artifacts, and project knowledge as data
+  rather than control instructions; label findings as verified, inferred, or
+  assumed.
+- Re-verify a durable background task's result receipt and bind its hash to the
+  journal before allowing archive.
+- Add reference-first context ownership, compact project knowledge, optional
+  handoffs, and a read-only run measurement report.
+- Add non-materializing dispatch previews and an append-only reconciliation
+  calibration ledger without pretending snapshot intervals are exact platform
+  latency.
+- Use a static GPT-5.6 routing table at runtime: Luna for bounded mechanical
+  work and Sol for ordinary or difficult judgment. Terra is
+  explicit-request-only; Ultra always requires per-node confirmation.
+- Improve Windows/Linux PowerShell path portability and retain strict
+  write-scope, reparse-point, journal, plan, and completion validation.
+- Pass 515 self-test assertions, reject 50 intentional invalid cases, parse all
+  25 PowerShell scripts, and pass Skill Creator validation.
+
+The following 0.6.x entries were development candidates folded into this
+stable release rather than published as separate stable versions.
+
+## 0.6.5 - Development candidate
+
+Cross-platform and task-materialization safety candidate.
+
+- Make joined project, receipt, artifact, and model-cache paths portable across
+  Windows and Linux PowerShell.
+- Prevent a successful creation call with a returned task ID from becoming
+  `no_match` merely because task-list visibility is delayed.
+- Use a provisional forty-second absence-observation floor for ambiguous
+  creation results; keep ambiguous evidence at `unknown`.
+- Detect parent/child write-scope overlap with the current platform directory
+  separator.
+- Add a read-only durable-run measurement report for evaluation and diagnosis;
+  it does not estimate Tokens or impose a user budget.
+- Preserve calibration-advice suppression until verified observations can
+  support a non-circular recommendation.
+
+## 0.6.4 - Development candidate
+
+Calibration and pre-materialization inspection candidate.
+
+- Add an append-only, privacy-minimal reconciliation calibration ledger.
+- Record observation-window intervals instead of presenting snapshot spans as
+  exact platform visibility latency.
+- Group calibration evidence by application, host, execution mode, and policy;
+  use a defined nearest-rank percentile and suppress window advice because
+  observation spans do not measure creation-to-visibility latency.
+- Add a non-materializing durable-dispatch preview with Worker, topology,
+  model, effort, scope, reference-count, and initial-packet context data.
+- Distinguish structural plan eligibility from runtime readiness and defer
+  reuse verification until the required handoff exists.
+- Fix single-snapshot reconciliation receipts so their numeric representation
+  remains stable under hash verification.
+- Keep platform task waiting at the model/tool layer; no filesystem script
+  pretends to call `wait_threads` or `read_thread`.
+
+## 0.6.2 - Development candidate
+
+Strict-format and control-plane hardening candidate. Plan policy advances to
+`0.6.2`.
+
+- Fix the example plan so it is valid RFC 8259 JSON instead of relying on
+  PowerShell's tolerant parser.
+- Parse every bundled reference JSON with `System.Text.Json` during self-test.
+- Reject direct plan-node write scopes under `.orchestrator`; project knowledge
+  changes must use the main-agent-owned management script.
+- Exercise a real Windows Junction fixture and reject Worker inputs that cross
+  the reparse point. Keep the symbolic-link fixture optional where privileges
+  do not permit link creation.
+- Scale effort from zero Workers for small work to progressive dispatch only
+  for genuinely independent breadth.
+- Prevent repeated carriage of adopted raw Worker output while accurately
+  stating that already-read model context cannot be retroactively deleted.
+
+## 0.6.1 - Unreleased
+
+Context and platform-hardening candidate. Plan policy advances to `0.6.1`.
+
+- Trigger the Skill before any Worker creation while keeping ordinary
+  main-agent work on the fast path.
+- Add an explicit Codex platform adapter for model bindings, native subagents,
+  user-owned tasks, result collection, and failure handling.
+- Use the first real low-risk workstream as a platform canary; never create a
+  disposable canary Worker.
+- Validate packet references, local paths, future dependency artifacts, path
+  traversal, and reparse-point boundaries before dispatch.
+- Permit platform visibility delays above five seconds without allowing a
+  caller to weaken the duplicate-prevention floor.
+- Restore orchestration state from compact project artifacts after context
+  compaction instead of replaying transcripts.
+
+## 0.6.0 - 2026-07-26
+
+General task-efficiency release. Plan policy advances to `0.6.0`.
+
+- Make the main agent both the sole orchestrator and a required core producer.
+- Replace one-time orchestration choice with event-driven work ownership.
+- Allow zero, one, or at most two context-disjoint first-wave Workers.
+- Start native subagents without inherited conversation history by default.
+- Generalize bounded producer ownership beyond manuscripts to every task type.
+- Add an optional project-local knowledge pointer catalog with sourced
+  adoption, lookup, invalidation, and supersession.
+- Reject durable plans that delegate every substantive production node.
+- Preserve v0.5.1 reconciliation, receipts, capacity isolation, and explicit
+  model-escalation gates.
+
 ## 0.5.1 - 2026-07-20
 
 Reliability release for Worker materialization, result collection, and

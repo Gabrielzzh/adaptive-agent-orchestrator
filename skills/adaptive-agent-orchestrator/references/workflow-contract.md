@@ -5,10 +5,11 @@
 A durable plan is a JSON object with:
 
 - `schema_version`: currently `"1.0"`;
-- `policy_version`: currently `"0.5.1"`, used to validate and replay the run;
+- `policy_version`: currently `"0.7.0"`, used to validate and replay the run;
 - `run_id`: unique, stable identifier;
 - `orchestrator`: the single controller identity and delegation authority;
 - `goal`: concrete outcome;
+- optional `constraints`: stable task constraints referenced by Worker packets;
 - `mode`: `auto`, `quick`, `team`, or `workflow`;
 - `risk`: `low`, `medium`, or `high`;
 - `limits`: bounded concurrency, total nodes, attempts, reserves, depth, and
@@ -19,7 +20,9 @@ A durable plan is a JSON object with:
 - `nodes`: work items;
 - `completion`: global success and stopping criteria.
 
-Every agent node declares a positive `wave`. Read
+Every agent node declares a positive `wave`. A durable run that contains agent
+nodes also contains at least one substantive `main` node unless its goal is
+explicitly coordination-only or review-only. Read
 [context-efficiency.md](context-efficiency.md) before dispatch. A structurally
 valid graph is still rejected when it repeats context, front-loads multiple
 workers, or bypasses progressive dispatch.
@@ -53,7 +56,7 @@ Each node contains:
     "max_prior_turns": 0,
     "inputs": [
       "artifact:artifacts/proposal.md",
-      "ref:plan.completion.acceptance"
+      "ref:plan.completion"
     ],
     "excluded": ["Unrelated project conversations"],
     "handoff_required": false,
@@ -112,7 +115,7 @@ conversation authority cryptographically. Scripts do verify that a
 
 Every agent node also declares the model resolved at dispatch:
 
-- `model`: an available GPT-5.6 Worker model;
+- `model`: a Worker model available on the selected platform;
 - `model_reason`: a short task-specific reason;
 - `model_authorization`: `not-required`, `user-confirmed`,
   `policy-confirmed`, or `experimental-user-request`.
@@ -120,7 +123,8 @@ Every agent node also declares the model resolved at dispatch:
   use `user:<message-or-request>` or a verified
   `policy:path:<project-relative-policy-file>`.
 
-The default automatic pool contains Luna and Sol. Terra requires
+The default automatic Codex pool is defined in
+[platform-codex.md](platform-codex.md). Terra requires
 `experimental-user-request`. Model or effort escalation requires
 `user-confirmed` or a verified bounded `policy-confirmed` authorization.
 Creation reports the actual model; it never treats the planned model as proof
@@ -159,7 +163,9 @@ only an independent quality gate.
 - optional `selection_reason`: controller-only diagnostic justification for
   borderline discovery or overlap cases; never render it into a worker packet;
 - `inputs`: typed `ref:`, `path:`, `source:`, or `artifact:` references that
-  the worker may open on demand;
+  the worker may open on demand. `New-WorkerPacket.ps1` validates local plan,
+  path, and artifact references before rendering; `source:` identifiers remain
+  subject to the source tool's own lookup;
 - `excluded`: nearby context that must not be inherited;
 - `handoff_required`: whether a later session must resume or reuse this work;
 - when `handoff_required` is true, `handoff_path` is a unique compact state
@@ -199,12 +205,17 @@ reuse-only field.
 - A race must define `winner_condition` and `cancel_losers: true`.
 - A human gate must define the default safe action for timeout or absence.
 - An Ultra node sets both `capability` and `effort` to `ultra`, remains
-  read-only, and records `ultra_authorization` as `user-requested`. v0.4 never
-  upgrades to Ultra automatically: a failed cheaper attempt is evidence, not
-  authority to spend more.
+  read-only, and records `ultra_authorization` as `user-requested`. The
+  controller never upgrades to Ultra automatically: a failed cheaper attempt
+  is evidence, not authority to spend more.
 
 ## Ownership rules
 
+- The main agent owns at least one substantive production node in a durable
+  run unless the goal explicitly states coordination-only or review-only.
+- A Worker owns one bounded artifact, investigation, section, module, dataset,
+  design surface, or verification result.
+- The main agent continues dependency-ready production while Workers run.
 - `read_only: true` requires an empty `write_scope`.
 - A `read-only` or `proposal-only` role may bind only to a read-only node.
 - A node may be more restrictive than its role, never less restrictive.
@@ -213,6 +224,8 @@ reuse-only field.
   syntax, and resolved against real paths before dispatch to detect links.
 - Concurrent writable nodes may not overlap scopes.
 - The main agent owns final integration even when workers write disjoint files.
+- Return a defect to the original producer when possible; do not create a new
+  integrator Worker to restate or merge results.
 
 ## Completion contract
 

@@ -63,6 +63,143 @@ if ($isDeltaRetry) {
     }
 }
 
+if (-not $isDeltaRetry) {
+    $lintRoot = (Resolve-Path -LiteralPath $WorkspaceRoot).Path.TrimEnd('\', '/')
+    $dependencyScopes = @()
+    foreach ($dependencyId in @($node.depends_on)) {
+        $dependencyNode = @(
+            $plan.nodes | Where-Object { $_.id -eq $dependencyId }
+        ) | Select-Object -First 1
+        if ($null -ne $dependencyNode -and
+            $null -ne $dependencyNode.PSObject.Properties['write_scope']) {
+            $dependencyScopes += @($dependencyNode.write_scope | ForEach-Object {
+                ([string]$_ -replace '\\', '/').TrimEnd('/')
+            })
+        }
+    }
+
+    function Test-PlanReference {
+        param($Plan, [string] $DottedPath)
+        $cursor = $Plan
+        foreach ($segment in ($DottedPath -split '\.')) {
+            if ($null -eq $cursor -or
+                $null -eq $cursor.PSObject.Properties[$segment]) {
+                return $false
+            }
+            $cursor = $cursor.$segment
+        }
+        return $true
+    }
+
+    function Resolve-ContextPath {
+        param(
+            [string] $Root,
+            [string] $Target,
+            [string] $Entry
+        )
+        if ([IO.Path]::IsPathRooted($Target)) {
+            throw "Node '$NodeId' input '$Entry' must be project-relative."
+        }
+        $segments = $Target -split '[\\/]'
+        if (@($segments | Where-Object {
+            $_ -in @('', '.', '..') -or
+            $_ -match '[\. ]$' -or
+            $_.Contains(':')
+        }).Count -gt 0) {
+            throw "Node '$NodeId' input '$Entry' has an unsafe path."
+        }
+        $candidate = [IO.Path]::GetFullPath((Join-Path $Root $Target))
+        if (-not $candidate.StartsWith(
+            $Root + [IO.Path]::DirectorySeparatorChar,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw "Node '$NodeId' input '$Entry' escapes WorkspaceRoot."
+        }
+        $cursor = $Root
+        foreach ($segment in $segments) {
+            $cursor = Join-Path $cursor $segment
+            if (Test-Path -LiteralPath $cursor) {
+                $item = Get-Item -LiteralPath $cursor -Force
+                if (($item.Attributes -band
+                    [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw (
+                        "Node '$NodeId' input '$Entry' crosses a link or " +
+                        'reparse point.'
+                    )
+                }
+            }
+        }
+        return $candidate
+    }
+
+    foreach ($packetInput in @($node.context.inputs)) {
+        $entry = [string]$packetInput
+        if ($entry -notmatch '^(ref|path|source|artifact):(.+)$') {
+            throw (
+                "Node '$NodeId' input '$entry' is not a typed reference " +
+                '(ref:, path:, source:, or artifact:).'
+            )
+        }
+        $scheme = $Matches[1]
+        $target = $Matches[2]
+        if ([string]::IsNullOrWhiteSpace($target) -or
+            $target -ne $target.Trim() -or
+            $target -in @('.', '*', 'all') -or
+            $target.Contains('*')) {
+            throw "Node '$NodeId' input '$entry' is broad or malformed."
+        }
+        switch ($scheme) {
+            'ref' {
+                if ($target -notmatch '^plan\.\S+$') {
+                    throw (
+                        "Node '$NodeId' input '$entry' must reference " +
+                        'ref:plan.<field>.'
+                    )
+                }
+                if (-not (Test-PlanReference $plan $target.Substring(5))) {
+                    throw (
+                        "Node '$NodeId' input '$entry' does not resolve to " +
+                        'an existing plan field.'
+                    )
+                }
+            }
+            'path' {
+                $candidate = Resolve-ContextPath $lintRoot $target $entry
+                if (-not (Test-Path -LiteralPath $candidate)) {
+                    throw (
+                        "Node '$NodeId' input '$entry' does not exist at " +
+                        'packet-render time.'
+                    )
+                }
+            }
+            'artifact' {
+                $candidate = Resolve-ContextPath $lintRoot $target $entry
+                $normalizedTarget = $target -replace '\\', '/'
+                $producedByDependency = @(
+                    $dependencyScopes | Where-Object {
+                        $normalizedTarget -eq $_ -or
+                        $normalizedTarget.StartsWith(
+                            $_ + '/',
+                            [StringComparison]::OrdinalIgnoreCase
+                        )
+                    }
+                ).Count -gt 0
+                if (-not (Test-Path -LiteralPath $candidate) -and
+                    -not $producedByDependency) {
+                    throw (
+                        "Node '$NodeId' input '$entry' neither exists nor " +
+                        'is produced by a declared dependency.'
+                    )
+                }
+            }
+            'source' {
+                # External source IDs cannot be resolved locally. Their source
+                # tool remains responsible for lookup and evidence.
+            }
+        }
+    }
+}
+
 function Join-Bullets {
     param([object[]] $Items)
     return (@($Items) | ForEach-Object { "- $_" }) -join [Environment]::NewLine
@@ -185,6 +322,9 @@ $(Join-Bullets @($node.acceptance))
 Evidence:
 $(Join-Bullets @($role.evidence_rules))
 
+Prefix substantive findings with [verified], [inferred], or [assumed].
+Assumptions cannot satisfy acceptance checks.
+
 Return: conclusion; evidence/changes; validation; unresolved risks; questions.
 
 ## Authority
@@ -276,6 +416,10 @@ risks, and questions.
 ## Evidence rules
 
 $(Join-Bullets @($role.evidence_rules))
+
+Prefix substantive findings with [verified], [inferred], or [assumed].
+Verified findings cite reproducible evidence; assumptions cannot satisfy
+acceptance checks.
 
 Acceptance checks:
 $(Join-Bullets @($node.acceptance))

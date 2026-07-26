@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $skillRoot = Split-Path -Parent $scriptRoot
 . (Join-Path $scriptRoot 'Orchestration.Common.ps1')
-$examplePath = Join-Path $skillRoot 'references\example-plan.json'
+$examplePath = Join-Path $skillRoot 'references/example-plan.json'
 $script:assertionCount = 0
 $script:invalidPlanCount = 0
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) (
@@ -106,6 +106,44 @@ try {
         'Role activation preview should render the selected role ID exactly.'
     )
 
+    $knowledgeProject = Join-Path $testRoot 'knowledge-project'
+    $null = New-Item -ItemType Directory -Path $knowledgeProject
+    $knowledgeSource = Join-Path $knowledgeProject 'decision.md'
+    'Keep final integration in the main agent.' |
+        Set-Content -LiteralPath $knowledgeSource -Encoding utf8
+    $knowledgeManager = Join-Path $scriptRoot 'Manage-ProjectKnowledge.ps1'
+    $knowledgeInit = & $knowledgeManager -Action Initialize `
+        -ProjectRoot $knowledgeProject | ConvertFrom-Json
+    Assert-True $knowledgeInit.initialized (
+        'Durable project knowledge should initialize explicitly.'
+    )
+    $knowledgeEntry = & $knowledgeManager -Action Adopt `
+        -ProjectRoot $knowledgeProject -Id 'decision-main-integration' `
+        -Type 'decision' -Summary 'Keep final integration in the main agent.' `
+        -Tags @('ownership', 'integration') `
+        -SourceRefs @('path:decision.md') | ConvertFrom-Json
+    Assert-True ($knowledgeEntry.status -eq 'adopted') (
+        'The main agent should be able to adopt a sourced knowledge entry.'
+    )
+    $knowledgeFind = & $knowledgeManager -Action Find `
+        -ProjectRoot $knowledgeProject -Query 'ownership' -Limit 5 |
+        ConvertFrom-Json
+    Assert-True ($knowledgeFind.count -eq 1) (
+        'Knowledge lookup should return the selected adopted entry.'
+    )
+    'Changed source.' | Set-Content -LiteralPath $knowledgeSource -Encoding utf8
+    $knowledgeStale = & $knowledgeManager -Action Validate `
+        -ProjectRoot $knowledgeProject -RefreshStale | ConvertFrom-Json
+    Assert-True (-not $knowledgeStale.valid) (
+        'A changed local source should make project knowledge stale.'
+    )
+    $knowledgeAfterStale = & $knowledgeManager -Action Find `
+        -ProjectRoot $knowledgeProject -Query 'ownership' -Limit 5 |
+        ConvertFrom-Json
+    Assert-True ($knowledgeAfterStale.count -eq 0) (
+        'Default lookup should exclude stale project knowledge.'
+    )
+
     $reconcileSummary = 'Review the candidate release.'
     $reconcileRun = Join-Path $testRoot 'thread-reconcile-run'
     $null = New-Item -ItemType Directory -Path $reconcileRun
@@ -177,7 +215,7 @@ try {
     $reconciled = & (
         Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1'
     ) -InputPath $reconcileInputPath -OutputPath (
-        Join-Path $reconcileRun 'receipts\adopted.thread-reconciliation.json'
+        Join-Path $reconcileRun 'receipts/adopted.thread-reconciliation.json'
     ) | ConvertFrom-Json -Depth 20
     Assert-True (
         $reconciled.decision -eq 'adopted' -and
@@ -203,7 +241,7 @@ try {
     $wrongActivationResult = & (
         Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1'
     ) -InputPath $wrongActivationPath -OutputPath (
-        Join-Path $reconcileRun 'receipts\wrong.thread-reconciliation.json'
+        Join-Path $reconcileRun 'receipts/wrong.thread-reconciliation.json'
     ) | ConvertFrom-Json -Depth 20
     Assert-True ($wrongActivationResult.decision -eq 'unknown') (
         'A different activation key must not match or prove absence before the window ends.'
@@ -218,7 +256,7 @@ try {
     $singleEmptyResult = & (
         Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1'
     ) -InputPath $singleEmptyPath -OutputPath (
-        Join-Path $reconcileRun 'receipts\single.thread-reconciliation.json'
+        Join-Path $reconcileRun 'receipts/single.thread-reconciliation.json'
     ) | ConvertFrom-Json -Depth 20
     Assert-True ($singleEmptyResult.decision -eq 'unknown') (
         'One empty snapshot must not prove that no task materialized.'
@@ -233,7 +271,7 @@ try {
     $doubleEmptyResult = & (
         Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1'
     ) -InputPath $doubleEmptyPath -OutputPath (
-        Join-Path $reconcileRun 'receipts\empty.thread-reconciliation.json'
+        Join-Path $reconcileRun 'receipts/empty.thread-reconciliation.json'
     ) | ConvertFrom-Json -Depth 20
     Assert-True ($doubleEmptyResult.decision -eq 'unknown') (
         'Two empty snapshots before the visibility-window end remain unknown.'
@@ -249,10 +287,30 @@ try {
     $endedEmptyResult = & (
         Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1'
     ) -InputPath $endedEmptyPath -OutputPath (
-        Join-Path $reconcileRun 'receipts\window-ended.thread-reconciliation.json'
+        Join-Path $reconcileRun 'receipts/window-ended.thread-reconciliation.json'
     ) | ConvertFrom-Json -Depth 20
     Assert-True ($endedEmptyResult.decision -eq 'no_match') (
         'Only repeated empty snapshots through the visibility-window end prove no match.'
+    )
+    $successfulButInvisible = Get-Content -LiteralPath $endedEmptyPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 20
+    $successfulButInvisible.create_call.status = 'success'
+    $successfulButInvisible.create_call.returned_thread_id = 'returned-thread-1'
+    $successfulButInvisiblePath = Join-Path $reconcileRun (
+        'thread-reconcile-success-returned-id-invisible.json'
+    )
+    $successfulButInvisible | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $successfulButInvisiblePath
+    $successfulButInvisibleResult = & (
+        Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1'
+    ) -InputPath $successfulButInvisiblePath -OutputPath (
+        Join-Path $reconcileRun (
+            'receipts/success-returned-id-invisible.thread-reconciliation.json'
+        )
+    ) | ConvertFrom-Json -Depth 20
+    Assert-True ($successfulButInvisibleResult.decision -eq 'unknown') (
+        'A successful create call with a returned task ID must never be ' +
+        'converted into no_match merely because list visibility is delayed.'
     )
     $tooFastEmpty = Get-Content -LiteralPath $doubleEmptyPath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 20
@@ -265,10 +323,26 @@ try {
     $tooFastEmptyResult = & (
         Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1'
     ) -InputPath $tooFastEmptyPath -OutputPath (
-        Join-Path $reconcileRun 'receipts\too-fast.thread-reconciliation.json'
+        Join-Path $reconcileRun 'receipts/too-fast.thread-reconciliation.json'
     ) | ConvertFrom-Json -Depth 20
     Assert-True ($tooFastEmptyResult.decision -eq 'unknown') (
         'Nearly simultaneous empty snapshots must not prove non-materialization.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1') `
+            -InputPath $endedEmptyPath -OutputPath (
+                Join-Path $reconcileRun 'receipts/unsafe-delay.thread-reconciliation.json'
+            ) -MinVisibilityDelaySeconds 1 | Out-Null
+    } 'MinVisibilityDelaySeconds' (
+        'The visibility delay may be increased but must never be reduced below five seconds.'
+    )
+    $longDelayResult = & (
+        Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1'
+    ) -InputPath $endedEmptyPath -OutputPath (
+        Join-Path $reconcileRun 'receipts/long-delay.thread-reconciliation.json'
+    ) -MinVisibilityDelaySeconds 15 | ConvertFrom-Json -Depth 20
+    Assert-True ($longDelayResult.decision -eq 'no_match') (
+        'A longer platform visibility delay should remain supported.'
     )
 
     $multiple = Get-Content -LiteralPath $reconcileInputPath -Raw |
@@ -298,13 +372,223 @@ try {
     $multipleResult = & (
         Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1'
     ) -InputPath $multiplePath -OutputPath (
-        Join-Path $reconcileRun 'receipts\duplicates.thread-reconciliation.json'
+        Join-Path $reconcileRun 'receipts/duplicates.thread-reconciliation.json'
     ) | ConvertFrom-Json -Depth 20
     Assert-True (
         $multipleResult.decision -eq 'duplicates_pending' -and
         $multipleResult.adopted_thread_id -eq 'review-thread-2' -and
         'review-thread-1' -in @($multipleResult.duplicate_thread_ids)
     ) 'The matching create-call ID must be canonical when duplicates exist.'
+
+    $calibrationProject = Join-Path $testRoot 'calibration-project'
+    $null = New-Item -ItemType Directory -Path $calibrationProject
+    $calibrationScript = Join-Path $scriptRoot 'Manage-CalibrationLedger.ps1'
+    $verifiedReceiptCount = @(
+        Get-ChildItem -LiteralPath (Join-Path $reconcileRun 'receipts') `
+            -Recurse -File |
+            Where-Object Name -Like '*.thread-reconciliation.json'
+    ).Count
+    $uniqueReceiptHashCount = @(
+        Get-ChildItem -LiteralPath (Join-Path $reconcileRun 'receipts') `
+            -Recurse -File |
+            Where-Object Name -Like '*.thread-reconciliation.json' |
+            ForEach-Object {
+                (Get-Content -LiteralPath $_.FullName -Raw |
+                    ConvertFrom-Json -Depth 30).receipt_hash
+            } |
+            Select-Object -Unique
+    ).Count
+    $calibrationAdd = & $calibrationScript -Action Add `
+        -ProjectRoot $calibrationProject -RunDirectory $reconcileRun `
+        -MinWindowUsed 20 -AppVersion '26.7.26' -HostKind 'desktop' `
+        -ExecutionMode local -PolicyVersion '0.7.0' |
+        ConvertFrom-Json -Depth 30
+    Assert-True (
+        $verifiedReceiptCount -gt 0 -and
+        $calibrationAdd.added -eq $uniqueReceiptHashCount -and
+        $calibrationAdd.total_samples -eq $uniqueReceiptHashCount
+    ) 'Calibration should add each verified reconciliation receipt once.'
+    $calibrationLedgerPath = Join-Path (
+        Join-Path $calibrationProject '.orchestrator'
+    ) 'calibration.jsonl'
+    $calibrationLedgerRaw = Get-Content -LiteralPath $calibrationLedgerPath -Raw
+    Assert-True (
+        $calibrationLedgerRaw -like '*observation_window_span_seconds*' -and
+        $calibrationLedgerRaw -notlike '*visibility_delay_seconds*' -and
+        $calibrationLedgerRaw -notlike '*review-thread-*' -and
+        $calibrationLedgerRaw -notlike "*$reconcileSummary*"
+    ) (
+        'Calibration must store interval observations without task text or ' +
+        'thread identifiers.'
+    )
+    $calibrationRepeat = & $calibrationScript -Action Add `
+        -ProjectRoot $calibrationProject -RunDirectory $reconcileRun `
+        -MinWindowUsed 20 -AppVersion '26.7.26' -HostKind 'desktop' `
+        -ExecutionMode local -PolicyVersion '0.7.0' |
+        ConvertFrom-Json -Depth 30
+    Assert-True (
+        $calibrationRepeat.added -eq 0 -and
+        $calibrationRepeat.skipped_duplicates -eq $verifiedReceiptCount
+    ) 'Calibration Add must be idempotent by reconciliation receipt hash.'
+    $adoptedReceiptPath = Join-Path $reconcileRun (
+        'receipts/adopted.thread-reconciliation.json'
+    )
+    $adoptedReceiptRaw = Get-Content -LiteralPath $adoptedReceiptPath -Raw
+    $tamperedReceipt = $adoptedReceiptRaw |
+        ConvertFrom-Json -AsHashtable -Depth 30
+    $tamperedReceipt.snapshot_count = 99
+    $tamperedReceipt | ConvertTo-Json -Depth 30 |
+        Set-Content -LiteralPath $adoptedReceiptPath
+    Assert-ThrowsLike {
+        & $calibrationScript -Action Add -ProjectRoot $calibrationProject `
+            -RunDirectory $reconcileRun -AppVersion '26.7.26' `
+            -HostKind 'desktop' -ExecutionMode local `
+            -PolicyVersion '0.7.0' | Out-Null
+    } 'hash mismatch' 'Calibration must reject a tampered receipt.'
+    Set-Content -LiteralPath $adoptedReceiptPath -Value $adoptedReceiptRaw
+
+    $seedCalibrationProject = Join-Path $testRoot 'seed-calibration-project'
+    $seedCalibrationRoot = Join-Path $seedCalibrationProject '.orchestrator'
+    $null = New-Item -ItemType Directory -Path $seedCalibrationRoot -Force
+    $seedCalibrationPath = Join-Path $seedCalibrationRoot 'calibration.jsonl'
+    $seedCalibrationLines = [Collections.Generic.List[string]]::new()
+    for ($index = 1; $index -le 12; $index++) {
+        $seedCalibrationLines.Add(([ordered]@{
+            schema_version = '1.0'
+            run_directory_hash = ('a' * 62) + $index.ToString('x2')
+            reconciliation_receipt_hash = ('b' * 62) + $index.ToString('x2')
+            recorded_at_utc = '2026-07-26T00:00:00Z'
+            decision = 'no_match'
+            snapshot_count = 2
+            observation_window_span_seconds = [double](10 + $index)
+            min_window_used_seconds = 20
+            app_version = '26.7.26'
+            host_kind = 'desktop'
+            execution_mode = 'local'
+            policy_version = '0.7.0'
+        } | ConvertTo-Json -Compress))
+    }
+    $seedCalibrationLines.Add(([ordered]@{
+        schema_version = '1.0'
+        run_directory_hash = 'c' * 64
+        reconciliation_receipt_hash = 'd' * 64
+        recorded_at_utc = '2026-07-26T00:00:00Z'
+        decision = 'adopted'
+        snapshot_count = 2
+        observation_window_span_seconds = 60
+        min_window_used_seconds = 20
+        app_version = 'different'
+        host_kind = 'remote-host'
+        execution_mode = 'remote'
+        policy_version = 'other'
+    } | ConvertTo-Json -Compress))
+    $seedCalibrationLines | Set-Content -LiteralPath $seedCalibrationPath
+    $calibrationSummary = & $calibrationScript -Action Summary `
+        -ProjectRoot $seedCalibrationProject | ConvertFrom-Json -Depth 30
+    $localCalibrationGroup = @($calibrationSummary.groups | Where-Object {
+        $_.environment.app_version -eq '26.7.26'
+    })[0]
+    Assert-True (
+        $calibrationSummary.groups.Count -eq 2 -and
+        $calibrationSummary.percentile_algorithm -eq 'nearest-rank' -and
+        $localCalibrationGroup.sample_count -eq 12 -and
+        $localCalibrationGroup.observation_window_span_seconds.p90 -eq 21 -and
+        $localCalibrationGroup.recommendation -eq
+            'insufficient-visibility-evidence' -and
+        -not $localCalibrationGroup.recommendation_basis.exact_visibility_latency_claimed
+    ) (
+        'Calibration summary must isolate environments and reject a window ' +
+        'recommendation unsupported by observation spans.'
+    )
+    Add-Content -LiteralPath $seedCalibrationPath -Value '{bad json'
+    $degradedCalibration = & $calibrationScript -Action Summary `
+        -ProjectRoot $seedCalibrationProject | ConvertFrom-Json -Depth 30
+    Assert-True (
+        $degradedCalibration.integrity -eq 'degraded' -and
+        $degradedCalibration.bad_lines -eq 1 -and
+        @($degradedCalibration.groups | Where-Object {
+            $_.recommendation -ne 'suppressed-integrity-degraded'
+        }).Count -eq 0
+    ) 'Malformed calibration lines must suppress every recommendation.'
+
+    $dispatchPreviewScript = Join-Path $scriptRoot (
+        'Preview-OrchestrationDispatch.ps1'
+    )
+    $workspaceBeforePreview = @(
+        Get-ChildItem -LiteralPath $testRoot -Recurse -Force |
+            ForEach-Object { $_.FullName } |
+            Sort-Object
+    )
+    $waveOnePreview = & $dispatchPreviewScript -PlanPath $examplePath `
+        -WorkspaceRoot $testRoot -Wave 1 | ConvertFrom-Json -Depth 100
+    $workspaceAfterPreview = @(
+        Get-ChildItem -LiteralPath $testRoot -Recurse -Force |
+            ForEach-Object { $_.FullName } |
+            Sort-Object
+    )
+    Assert-True (
+        $waveOnePreview.worker_count -eq 1 -and
+        $waveOnePreview.workers[0].node_id -eq 'draft' -and
+        $waveOnePreview.workers[0].initial_packet_chars -gt 0 -and
+        $waveOnePreview.workers[0].reference_count -eq 3 -and
+        $waveOnePreview.workers[0].model -eq 'gpt-5.6-sol' -and
+        $waveOnePreview.workers[0].effort -eq 'high' -and
+        $waveOnePreview.workers[0].topology -eq 'background-thread' -and
+        $waveOnePreview.workers[0].runtime_readiness -eq 'not-evaluated'
+    ) 'Wave-one dispatch preview must report the bounded planned Worker.'
+    Assert-True (
+        ($workspaceBeforePreview -join "`n") -eq
+        ($workspaceAfterPreview -join "`n")
+    ) 'Dispatch preview must not change the workspace.'
+    Assert-True (
+        ($waveOnePreview.notes -join ' ') -notmatch '\btokens?\b' -and
+        ($waveOnePreview.notes -join ' ') -like
+            '*bounded context proxy, not total usage or monetary cost*'
+    ) 'Dispatch preview must not claim Token or monetary cost measurement.'
+    $waveTwoPreview = & $dispatchPreviewScript -PlanPath $examplePath `
+        -WorkspaceRoot $testRoot -Wave 2 | ConvertFrom-Json -Depth 100
+    Assert-True (
+        $waveTwoPreview.worker_count -eq 1 -and
+        $waveTwoPreview.workers[0].node_id -eq 'review' -and
+        $waveTwoPreview.workers[0].plan_eligible -and
+        $waveTwoPreview.workers[0].runtime_readiness -eq 'not-evaluated'
+    ) (
+        'Earlier-wave dependencies make a Worker plan-eligible without ' +
+        'claiming runtime readiness.'
+    )
+    $reusePreviewPlanPath = Join-Path $testRoot 'dispatch-preview-reuse.json'
+    $reusePreviewPlan = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -Depth 100
+    $reusePreviewNode = @($reusePreviewPlan.nodes | Where-Object {
+        $_.id -eq 'draft'
+    })[0]
+    $reusePreviewNode.context.session_policy = 'reuse'
+    $reusePreviewNode.context.max_prior_turns = 1
+    $reusePreviewNode.context | Add-Member `
+        -NotePropertyName prior_thread_id -NotePropertyValue 'not-materialized'
+    $reusePreviewNode.context | Add-Member `
+        -NotePropertyName prior_handoff `
+        -NotePropertyValue 'artifacts/missing-handoff.json'
+    $reusePreviewNode.context | Add-Member `
+        -NotePropertyName prior_handoff_hash -NotePropertyValue ('a' * 64)
+    $reusePreviewNode.context | Add-Member `
+        -NotePropertyName reuse_reason `
+        -NotePropertyValue 'Preview defers runtime reuse verification.'
+    $reusePreviewPlan | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $reusePreviewPlanPath
+    $reusePreview = & $dispatchPreviewScript `
+        -PlanPath $reusePreviewPlanPath -WorkspaceRoot $testRoot -Wave 1 |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        $reusePreview.workers[0].note -eq
+            'reuse-verification-deferred' -and
+        $null -eq $reusePreview.workers[0].initial_packet_chars
+    ) 'Dispatch preview must defer reuse verification without inventing size.'
+    Assert-ThrowsLike {
+        & $dispatchPreviewScript `
+            -PlanPath (Join-Path $testRoot 'missing-plan.json') `
+            -WorkspaceRoot $testRoot -Wave 1 | Out-Null
+    } 'Cannot find path' 'Dispatch preview must propagate plan validation failure.'
 
     $roleCatalog = Get-Content -LiteralPath (
         Join-Path $skillRoot 'references/role-pack-catalog.json'
@@ -810,6 +1094,61 @@ try {
         'An older completed turn cannot mask a newer running turn.'
     )
 
+    $reconciliationSource = Get-Content -LiteralPath (
+        Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1'
+    ) -Raw
+    Assert-True (
+        $reconciliationSource -match '\$MinVisibilityDelaySeconds = 40'
+    ) (
+        'The provisional creation-visibility safety floor must not drift silently.'
+    )
+    Assert-True (
+        $reconciliationSource -match '\$createReturnedStableId' -and
+        $reconciliationSource -match '-not \$createReturnedStableId'
+    ) (
+        'A successful create call with a returned task ID must block no-match retry.'
+    )
+
+    $planValidatorSource = Get-Content -LiteralPath (
+        Join-Path $scriptRoot 'Test-OrchestrationPlan.ps1'
+    ) -Raw
+    Assert-True (
+        $planValidatorSource -match '\[IO\.Path\]::DirectorySeparatorChar' -and
+        $planValidatorSource -notmatch 'StartsWith\(\$right \+ ''\\\\'''
+    ) (
+        'Write-scope overlap checks must use the current platform separator.'
+    )
+
+    foreach ($sourceFile in Get-ChildItem -LiteralPath $scriptRoot -Filter '*.ps1') {
+        $sourceLines = Get-Content -LiteralPath $sourceFile.FullName
+        for ($lineIndex = 0; $lineIndex -lt $sourceLines.Count; $lineIndex++) {
+            $sourceLine = $sourceLines[$lineIndex]
+            $previousLine = if ($lineIndex -gt 0) {
+                $sourceLines[$lineIndex - 1]
+            } else { '' }
+            if (($sourceLine -match 'Join-Path' -or
+                    $previousLine -match 'Join-Path') -and
+                $sourceLine -match "'[A-Za-z0-9._-]+\\[A-Za-z0-9._-]") {
+                Assert-True $false (
+                    "Windows-only backslash path literal in " +
+                    "$($sourceFile.Name):$($lineIndex + 1); use forward slashes " +
+                    'or nested Join-Path so the suite runs on Linux pwsh.'
+                )
+            }
+        }
+    }
+
+    $measureReport = & (
+        Join-Path $scriptRoot 'Measure-OrchestrationRun.ps1'
+    ) -RunDirectory $runDirectory -SkillRoot $skillRoot |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$measureReport.policy_version -eq '0.7.0' -and
+        @($measureReport.result_receipts).Count -ge 1
+    ) (
+        'Measure-OrchestrationRun must report the run policy version and receipts.'
+    )
+
     $waveBindingRun = Join-Path $testRoot 'wave-binding-run'
     & (Join-Path $scriptRoot 'New-OrchestrationRun.ps1') `
         -PlanPath $examplePath -RunDirectory $waveBindingRun `
@@ -937,7 +1276,7 @@ try {
         'Handoff creation should return a SHA-256 binding.'
     )
     Assert-True (Test-Path -LiteralPath (
-        Join-Path $testRoot 'artifacts\handoffs\draft.json'
+        Join-Path $testRoot 'artifacts/handoffs/draft.json'
     )) 'Handoff should be written to the declared project-relative path.'
     $handoffOverwriteCaught = $false
     try {
@@ -956,6 +1295,68 @@ try {
         -RunDirectory $runDirectory -NodeId 'draft' -Status 'adopted' `
         -Message 'adopted because the draft closes the required architecture gap' `
         -IdempotencyKey 'draft-1-adopted' | Out-Null
+    $missingArchiveReceiptPath = "$draftReceiptPath.archive-missing"
+    Move-Item -LiteralPath $draftReceiptPath -Destination $missingArchiveReceiptPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $runDirectory -NodeId 'draft' -Status 'archived' `
+            -Message 'archive without collected result' `
+            -IdempotencyKey 'draft-archive-missing-receipt' | Out-Null
+    } 'result receipt does not exist' (
+        'A durable background task cannot be archived after its result receipt disappears.'
+    )
+    Move-Item -LiteralPath $missingArchiveReceiptPath -Destination $draftReceiptPath
+    $archiveReceiptOriginal = Get-Content -LiteralPath $draftReceiptPath -Raw
+    $archiveReceiptTampered = $archiveReceiptOriginal |
+        ConvertFrom-Json -AsHashtable -Depth 20
+    $archiveReceiptTampered.adopted_findings = @('embedded redirect')
+    $archiveReceiptTampered | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $draftReceiptPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $runDirectory -NodeId 'draft' -Status 'archived' `
+            -Message 'archive with tampered result' `
+            -IdempotencyKey 'draft-archive-tampered-receipt' | Out-Null
+    } 'receipt hash mismatch' (
+        'A durable background task cannot be archived with a tampered result receipt.'
+    )
+    Set-Content -LiteralPath $draftReceiptPath `
+        -Value $archiveReceiptOriginal -NoNewline
+    $draftArchiveEvent = & (
+        Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1'
+    ) -RunDirectory $runDirectory -NodeId 'draft' -Status 'archived' `
+        -Message 'result collected and adopted' `
+        -IdempotencyKey 'draft-1-archived' | ConvertFrom-Json
+    Assert-True (
+        $draftArchiveEvent.result_receipt_hash -eq $draftReceipt.receipt_hash -and
+        $draftArchiveEvent.result_receipt_path -eq $draftReceiptRelative
+    ) 'Archive events must bind the verified thread result receipt.'
+    $archiveJournalPath = Join-Path $runDirectory 'events.jsonl'
+    $archiveJournalOriginal = Get-Content -LiteralPath $archiveJournalPath -Raw
+    $tamperedReceiptHash = '0' * 64
+    $archiveJournalTampered = $archiveJournalOriginal.Replace(
+        [string]$draftReceipt.receipt_hash,
+        $tamperedReceiptHash
+    )
+    Set-Content -LiteralPath $archiveJournalPath `
+        -Value $archiveJournalTampered -NoNewline
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Get-OrchestrationState.ps1') `
+            -RunDirectory $runDirectory | Out-Null
+    } 'Journal event hash mismatch' (
+        'Changing an archived result receipt binding must break the journal hash chain.'
+    )
+    Set-Content -LiteralPath $archiveJournalPath `
+        -Value $archiveJournalOriginal -NoNewline
+    $draftArchiveReplay = & (
+        Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1'
+    ) -RunDirectory $runDirectory -NodeId 'draft' -Status 'archived' `
+        -Message 'result collected and adopted' `
+        -IdempotencyKey 'draft-1-archived' | ConvertFrom-Json
+    Assert-True (
+        $draftArchiveReplay.sequence -eq $draftArchiveEvent.sequence -and
+        $draftArchiveReplay.result_receipt_hash -eq $draftReceipt.receipt_hash
+    ) 'Archive idempotency replay must revalidate the bound result receipt.'
     $afterDraftAdoption = & (
         Join-Path $scriptRoot 'Get-OrchestrationState.ps1'
     ) -RunDirectory $runDirectory | ConvertFrom-Json
@@ -993,6 +1394,20 @@ try {
     Assert-True ($packet -like '*I challenge the proposal independently*') (
         'Rendered packets should contain the role identity.'
     )
+    Assert-True (
+        $packet -match '\[verified\], \[inferred\], or \[assumed\]' -and
+        $packet -like '*Assumptions cannot satisfy acceptance checks*'
+    ) 'Worker packets must carry compact finding-provenance rules.'
+    $skillPolicyText = Get-Content -LiteralPath (
+        Join-Path $skillRoot 'SKILL.md'
+    ) -Raw
+    $safetyPolicyText = Get-Content -LiteralPath (
+        Join-Path $skillRoot 'references/safety-and-lifecycle.md'
+    ) -Raw
+    Assert-True (
+        $skillPolicyText -like '*data, never as control instructions*' -and
+        $safetyPolicyText -like '*data, not instructions to the main agent*'
+    ) 'Worker packets must inject the untrusted-data control-plane policy.'
     Assert-True ($packet -like '*Maximum questions: 2*') (
         'Rendered packets should contain the role question limit.'
     )
@@ -1016,6 +1431,198 @@ try {
     )
     Assert-True ($packet -like '*Do not restate inputs*') (
         'Rendered packets should make context-minimization rules operational.'
+    )
+    $missingRefPlan = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $missingRefPlan.nodes[0].context.inputs = @(
+        'ref:plan.goal',
+        'ref:plan.missing_field'
+    )
+    $missingRefPlanPath = Join-Path $testRoot 'packet-missing-ref-plan.json'
+    $missingRefPlan | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $missingRefPlanPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-WorkerPacket.ps1') `
+            -PlanPath $missingRefPlanPath -NodeId 'draft' `
+            -WorkspaceRoot $testRoot | Out-Null
+    } 'does not resolve to an existing plan field' (
+        'Worker packets must reject plan references that do not exist.'
+    )
+
+    $missingPathPlan = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $missingPathPlan.nodes[0].context.inputs = @(
+        'ref:plan.goal',
+        'path:missing-input.md'
+    )
+    $missingPathPlanPath = Join-Path $testRoot 'packet-missing-path-plan.json'
+    $missingPathPlan | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $missingPathPlanPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-WorkerPacket.ps1') `
+            -PlanPath $missingPathPlanPath -NodeId 'draft' `
+            -WorkspaceRoot $testRoot | Out-Null
+    } 'does not exist at packet-render time' (
+        'Worker packets must reject missing local path inputs.'
+    )
+
+    $unsafePathPlan = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $unsafePathPlan.nodes[0].context.inputs = @(
+        'ref:plan.goal',
+        'path:../outside.md'
+    )
+    $unsafePathPlanPath = Join-Path $testRoot 'packet-unsafe-path-plan.json'
+    $unsafePathPlan | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $unsafePathPlanPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-WorkerPacket.ps1') `
+            -PlanPath $unsafePathPlanPath -NodeId 'draft' `
+            -WorkspaceRoot $testRoot | Out-Null
+    } 'unsafe path' (
+        'Worker packets must reject traversal in local path inputs.'
+    )
+
+    # ConvertFrom-Json accepts some non-standard input. Parse every bundled
+    # reference with System.Text.Json so strict consumers see valid JSON too.
+    foreach ($jsonFile in Get-ChildItem -LiteralPath (
+        Join-Path $skillRoot 'references'
+    ) -Filter '*.json') {
+        $strictJsonValid = $true
+        $strictJsonError = ''
+        $jsonDocument = $null
+        try {
+            $rawJson = Get-Content -LiteralPath $jsonFile.FullName -Raw
+            $jsonDocument = [System.Text.Json.JsonDocument]::Parse($rawJson)
+        }
+        catch {
+            $strictJsonValid = $false
+            $strictJsonError = $_.Exception.Message
+        }
+        finally {
+            if ($null -ne $jsonDocument) {
+                $jsonDocument.Dispose()
+            }
+        }
+        Assert-True $strictJsonValid (
+            "Reference JSON '$($jsonFile.Name)' is not strict JSON: " +
+            $strictJsonError
+        )
+    }
+
+    $linkTarget = Join-Path $testRoot 'link-target.md'
+    Set-Content -LiteralPath $linkTarget -Value 'link fixture target'
+    $linkPath = Join-Path $testRoot 'linked-input.md'
+    $linkCreated = $false
+    try {
+        $null = New-Item -ItemType SymbolicLink -Path $linkPath `
+            -Target $linkTarget -ErrorAction Stop
+        $linkCreated = $true
+    }
+    catch {
+        Write-Host (
+            'Symbolic-link fixture skipped: link creation is not permitted ' +
+            'in this environment.'
+        )
+    }
+    if ($linkCreated) {
+        $linkedInputPlan = Get-Content -LiteralPath $examplePath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        $linkedInputPlan.nodes[0].context.inputs = @(
+            'ref:plan.goal',
+            'path:linked-input.md'
+        )
+        $linkedInputPlanPath = Join-Path $testRoot (
+            'packet-linked-input-plan.json'
+        )
+        $linkedInputPlan | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $linkedInputPlanPath
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot 'New-WorkerPacket.ps1') `
+                -PlanPath $linkedInputPlanPath -NodeId 'draft' `
+                -WorkspaceRoot $testRoot | Out-Null
+        } 'crosses a link or reparse point' (
+            'Worker packets must reject inputs that cross symbolic links.'
+        )
+    }
+
+    $junctionTarget = Join-Path $testRoot 'junction-target'
+    $null = New-Item -ItemType Directory -Path $junctionTarget -Force
+    Set-Content -LiteralPath (
+        Join-Path $junctionTarget 'payload.md'
+    ) -Value 'junction fixture target'
+    $junctionPath = Join-Path $testRoot 'junction-input'
+    $junctionCreated = $false
+    try {
+        $null = New-Item -ItemType Junction -Path $junctionPath `
+            -Target $junctionTarget -ErrorAction Stop
+        $junctionCreated = $true
+    }
+    catch {
+        Write-Host (
+            'Junction fixture skipped: junction creation is not permitted ' +
+            'in this environment.'
+        )
+    }
+    if ($junctionCreated) {
+        $junctionInputPlan = Get-Content -LiteralPath $examplePath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        $junctionInputPlan.nodes[0].context.inputs = @(
+            'ref:plan.goal',
+            'path:junction-input/payload.md'
+        )
+        $junctionInputPlanPath = Join-Path $testRoot (
+            'packet-junction-input-plan.json'
+        )
+        $junctionInputPlan | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $junctionInputPlanPath
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot 'New-WorkerPacket.ps1') `
+                -PlanPath $junctionInputPlanPath -NodeId 'draft' `
+                -WorkspaceRoot $testRoot | Out-Null
+        } 'crosses a link or reparse point' (
+            'Worker packets must reject inputs that cross Windows junctions.'
+        )
+    }
+
+    $unownedArtifactPlan = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $unownedArtifactPlan.nodes[1].context.inputs = @(
+        'artifact:artifacts/unowned/output.md',
+        'ref:plan.completion'
+    )
+    $unownedArtifactPlanPath = Join-Path $testRoot (
+        'packet-unowned-artifact-plan.json'
+    )
+    $unownedArtifactPlan | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $unownedArtifactPlanPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-WorkerPacket.ps1') `
+            -PlanPath $unownedArtifactPlanPath -NodeId 'review' `
+            -WorkspaceRoot $testRoot | Out-Null
+    } 'neither exists nor is produced by a declared dependency' (
+        'Future artifact inputs must belong to a declared dependency write scope.'
+    )
+
+    $existingInputPath = Join-Path $testRoot 'bounded-input.md'
+    'bounded input' | Set-Content -LiteralPath $existingInputPath
+    $existingPathPlan = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $existingPathPlan.nodes[0].context.inputs = @(
+        'ref:plan.goal',
+        'path:bounded-input.md'
+    )
+    $existingPathPlanPath = Join-Path $testRoot (
+        'packet-existing-path-plan.json'
+    )
+    $existingPathPlan | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $existingPathPlanPath
+    $existingPathPacket = & (
+        Join-Path $scriptRoot 'New-WorkerPacket.ps1'
+    ) -PlanPath $existingPathPlanPath -NodeId 'draft' `
+        -WorkspaceRoot $testRoot
+    Assert-True ($existingPathPacket -like '*path:bounded-input.md*') (
+        'A bounded existing project-relative path should render successfully.'
     )
     $startupRetryPlan = Get-Content -LiteralPath $examplePath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 100
@@ -1048,7 +1655,7 @@ try {
         source_thread_id = 'startup-source-thread'
         task_summary = 'Materialize the draft worker.'
         window_start_utc = '2026-07-20T00:00:00Z'
-        window_end_utc = '2026-07-20T00:00:10Z'
+        window_end_utc = '2026-07-20T00:00:45Z'
         reservation_path = $startupActivation.reservation_path
         create_call = [ordered]@{ status = 'error' }
         snapshots = @(
@@ -1057,7 +1664,7 @@ try {
                 threads = @()
             },
             [ordered]@{
-                captured_at = '2026-07-20T00:00:10Z'
+                captured_at = '2026-07-20T00:00:45Z'
                 threads = @()
             }
         )
@@ -1341,7 +1948,41 @@ try {
         ConvertFrom-Json -AsHashtable -Depth 100
     $crowdedFirstWave.nodes[1].wave = 1
     Assert-InvalidPlan $crowdedFirstWave 'crowded-first-wave' (
-        'Wave 1 may contain only one worker'
+        "must be in a later wave than dependency 'draft'"
+    )
+
+    $twoWorkerFirstWave = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $twoWorkerFirstWave.mode = 'team'
+    $twoWorkerFirstWave.nodes[1].wave = 1
+    $twoWorkerFirstWave.nodes[1].depends_on = @()
+    $twoWorkerFirstWave.nodes[1].context.inputs = @(
+        'source:independent-review-rules'
+    )
+    $twoWorkerFirstWave.nodes[2].depends_on = @('draft', 'review')
+    $twoWorkerPlanPath = Join-Path $testRoot 'two-worker-first-wave.json'
+    $twoWorkerFirstWave | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $twoWorkerPlanPath
+    $twoWorkerValid = & (
+        Join-Path $scriptRoot 'Test-OrchestrationPlan.ps1'
+    ) -PlanPath $twoWorkerPlanPath -WorkspaceRoot $skillRoot |
+        ConvertFrom-Json
+    Assert-True $twoWorkerValid.valid (
+        'Two ready Wave 1 workers with disjoint context should be valid.'
+    )
+
+    $missingMainOwner = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $missingMainOwner.nodes = @(
+        $missingMainOwner.nodes | Where-Object { $_.kind -ne 'main' }
+    )
+    $missingMainOwner.completion.required_nodes = @('draft', 'review')
+    $missingMainOwner.completion.evidence_checks = @(
+        $missingMainOwner.completion.evidence_checks |
+            Where-Object { $_.node_id -ne 'integrate' }
+    )
+    Assert-InvalidPlan $missingMainOwner 'missing-main-owner' (
+        'requires a substantive main-agent node'
     )
 
     $missingRoleActivation = Get-Content -LiteralPath $examplePath -Raw |
@@ -1713,6 +2354,22 @@ try {
     $pathTraversal.nodes[0].write_scope = @('artifacts/../secrets')
     Assert-InvalidPlan $pathTraversal 'path-traversal' "cannot traverse with '..'"
 
+    $controlPlaneWriter = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $controlPlaneWriter.nodes[0].write_scope = @('.orchestrator/knowledge')
+    Assert-InvalidPlan $controlPlaneWriter 'control-plane-writer' (
+        'cannot target control-plane state'
+    )
+
+    $mainControlPlaneWriter = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $mainControlPlaneWriter.nodes[2].write_scope = @(
+        '.orchestrator/knowledge'
+    )
+    Assert-InvalidPlan $mainControlPlaneWriter 'main-control-plane-writer' (
+        'cannot target control-plane state'
+    )
+
     $invalidGate = Get-Content -LiteralPath $examplePath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 100
     $invalidGate.nodes += @{
@@ -1923,7 +2580,7 @@ try {
     Assert-True $missingArtifactCaught (
         'Completion must fail when a required artifact is missing.'
     )
-    $finalDirectory = Join-Path $testRoot 'artifacts\final'
+    $finalDirectory = Join-Path $testRoot 'artifacts/final'
     $null = New-Item -ItemType Directory -Path $finalDirectory
     $emptyDirectoryCaught = $false
     try {
@@ -2051,7 +2708,9 @@ try {
         ConvertFrom-Json -AsHashtable -Depth 100
     $questionPlan.run_id = 'question-limit-001'
     $questionPlan.roles[0].question_policy.max_questions = 0
-    $questionPlan.nodes = @($questionPlan.nodes[0])
+    $questionMainNode = $questionPlan.nodes[2]
+    $questionMainNode.depends_on = @('draft')
+    $questionPlan.nodes = @($questionPlan.nodes[0], $questionMainNode)
     $questionPlan.completion.required_nodes = @('draft')
     $questionPlan.completion.evidence_checks = @(
         @{ node_id = 'draft'; minimum_entries = 1 }
@@ -2121,7 +2780,9 @@ try {
     $reusePlan = Get-Content -LiteralPath $examplePath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 100
     $reusePlan.run_id = 'reuse-thread-001'
-    $reusePlan.nodes = @($reusePlan.nodes[0])
+    $reuseMainNode = $reusePlan.nodes[2]
+    $reuseMainNode.depends_on = @('draft')
+    $reusePlan.nodes = @($reusePlan.nodes[0], $reuseMainNode)
     $reusePlan.nodes[0].context.session_policy = 'reuse'
     $reusePlan.nodes[0].context.max_prior_turns = 2
     $reusePlan.nodes[0].context.prior_thread_id = 'declared-prior-thread'
@@ -2162,7 +2823,12 @@ try {
     $boundReusePlan = Get-Content -LiteralPath $examplePath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 100
     $boundReusePlan.run_id = 'bound-reuse-001'
-    $boundReusePlan.nodes = @($boundReusePlan.nodes[0])
+    $boundReuseMainNode = $boundReusePlan.nodes[2]
+    $boundReuseMainNode.depends_on = @('draft')
+    $boundReusePlan.nodes = @(
+        $boundReusePlan.nodes[0],
+        $boundReuseMainNode
+    )
     $boundReusePlan.nodes[0].context.session_policy = 'reuse'
     $boundReusePlan.nodes[0].context.max_prior_turns = 2
     $boundReusePlan.nodes[0].context.prior_thread_id = 'test-thread-draft'
@@ -2191,7 +2857,12 @@ try {
     $freshRetryPlan = Get-Content -LiteralPath $examplePath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 100
     $freshRetryPlan.run_id = 'fresh-retry-001'
-    $freshRetryPlan.nodes = @($freshRetryPlan.nodes[0])
+    $freshRetryMainNode = $freshRetryPlan.nodes[2]
+    $freshRetryMainNode.depends_on = @('draft')
+    $freshRetryPlan.nodes = @(
+        $freshRetryPlan.nodes[0],
+        $freshRetryMainNode
+    )
     $freshRetryPlan.nodes[0].max_attempts = 2
     $freshRetryPlan.completion.required_nodes = @('draft')
     $freshRetryPlan.completion.evidence_checks = @(
@@ -2277,6 +2948,8 @@ try {
         usage_diagnostics_verified = $true
         role_activation_verified = $true
         industry_role_packs_verified = $true
+        calibration_ledger_verified = $true
+        dispatch_preview_verified = $true
     } | ConvertTo-Json -Depth 5
 }
 finally {

@@ -137,7 +137,7 @@ if ($Capability -eq 'ultra' -or $resolvedEffort -eq 'ultra') {
 $supportedEfforts = $null
 if (-not $AvailableModelIds) {
     if (-not $ModelsCachePath) {
-        $ModelsCachePath = Join-Path $env:USERPROFILE '.codex\models_cache.json'
+        $ModelsCachePath = Join-Path $HOME '.codex/models_cache.json'
     }
     if (-not (Test-Path -LiteralPath $ModelsCachePath -PathType Leaf)) {
         throw "Model cache not found: $ModelsCachePath"

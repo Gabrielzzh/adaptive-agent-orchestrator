@@ -7,6 +7,8 @@ release records.
 
 | Version | Channel | Focus | Details |
 | --- | --- | --- | --- |
+| `v0.7.0` | Stable | Context-efficient delegation, reliable task materialization, static model routing, release diagnostics | [Notes](v0.7.0.md) |
+| `v0.6.0` | Stable | General work ownership, isolated context, lightweight project knowledge | [Notes](v0.6.0.md) |
 | `v0.5.1` | Stable | Thread reconciliation, result receipts, deterministic retry guard | [Notes](v0.5.1.md) |
 | `v0.5.0` | Stable | Deterministic modes, model routing, protected 4+2 active capacity, reusable research evidence | [Notes](v0.5.0.md) |
 | `v0.4.2-beta.1` | Prerelease | Visible role activation, compact industry role packs, manuscript co-authorship | [Notes](v0.4.2-beta.1.md) |

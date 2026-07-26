@@ -102,8 +102,22 @@ foreach ($node in $agentNodes) {
         )
     }
 }
-if (@($agentNodes | Where-Object { [int]$_.wave -eq 1 }).Count -gt 1) {
-    $errors.Add('Wave 1 may contain only one worker; dispatch progressively.')
+$firstWave = @($agentNodes | Where-Object { [int]$_.wave -eq 1 })
+if ($firstWave.Count -gt 2) {
+    $errors.Add('Wave 1 may contain at most two workers.')
+}
+if ($firstWave.Count -eq 2) {
+    $firstWaveIds = @($firstWave | ForEach-Object { [string]$_.id })
+    if (@($firstWave | Where-Object {
+        @($_.depends_on | Where-Object { $_ -in $firstWaveIds }).Count -gt 0
+    }).Count -gt 0) {
+        $errors.Add('Wave 1 workers must be dependency-independent.')
+    }
+    $firstWaveOverlap = Get-OverlapRatio @($firstWave[0].context.inputs) `
+        @($firstWave[1].context.inputs)
+    if ($firstWaveOverlap -gt 0) {
+        $errors.Add('Two Wave 1 workers require disjoint context inputs.')
+    }
 }
 foreach ($node in $agentNodes | Where-Object { [int]$_.wave -gt 1 }) {
     $earlierAgents = @($agentNodes | Where-Object {

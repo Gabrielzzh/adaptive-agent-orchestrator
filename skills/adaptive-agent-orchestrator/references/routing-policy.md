@@ -10,12 +10,14 @@ Do not compare all mechanisms on one axis.
 | Workflow | direct, parallel, pipeline, DAG, loop, race, human gate | How do results and decisions depend on one another? |
 | Compute | model class and reasoning effort | How much capability is justified for this node? |
 
-The main agent is always the only orchestrator.
+The main agent is always the only orchestrator and a core producer. It owns the
+global spine, high-coupling work, final integration, and user-facing delivery.
+Do not create a persistent Router Agent.
 
 ## Model-native minimum
 
-Do not duplicate capabilities GPT-5.6 already supplies. The Skill should decide
-and enforce only what needs a durable or deterministic guarantee. Keep
+Do not duplicate capabilities the host model already supplies. The Skill should
+decide and enforce only what needs a durable or deterministic guarantee. Keep
 decomposition, prompt phrasing, and ordinary tool choice implicit unless a
 failure makes one of them material.
 
@@ -45,6 +47,23 @@ Profiles control verification, not team size:
 | `quality` | `always`, meaning one independent critical quality gate |
 
 Do not expose a mode-by-profile configuration matrix to ordinary users.
+
+## Effort scaling
+
+Scale the team to the question before selecting a topology:
+
+- a single lookup, small fix, or one-source summary: main agent only, zero
+  Workers;
+- a direct comparison or one bounded independent verification: at most one
+  Worker alongside continuing main-agent production;
+- genuinely divisible breadth with independent deliverables and disjoint
+  selected context: start within the first-wave limit and expand only through
+  progressive dispatch after adopted results.
+
+Each isolated Worker adds coordination and context cost, so its deliverable
+must provide value that a low-cost main-agent pass would not. When uncertain,
+start one level lower. Give every Worker an explicit objective, deliverable,
+and boundary; vague mandates produce duplicated or tangential work.
 
 ## Topology selection
 
@@ -86,20 +105,13 @@ Use capability classes in plans so the skill remains portable:
 | `ultra` | one exceptional escalation or final high-risk adjudication |
 
 Resolve a class to a currently available model with
-`Resolve-WorkerModel.ps1`. The automatic pool is deliberately small:
-
-| Class | Default |
-| --- | --- |
-| `economy` | `gpt-5.6-luna` / `medium` |
-| `standard` | `gpt-5.6-sol` / `medium` |
-| `strong` | `gpt-5.6-sol` / `high` |
-| `ultra` | `gpt-5.6-sol` / `ultra` |
-
-Terra is experimental. Use it only after an explicit user model request; do
-not select it automatically or use it as a fallback. Never invent an
-unavailable model ID. A Luna/Terra-to-Sol escalation, an effort increase, or
-an unavailable-model substitution requires user confirmation unless the user
-granted a bounded automatic-escalation policy. Ultra always requires explicit
+`Resolve-WorkerModel.ps1`. The Codex binding and supported execution surfaces
+are defined in [platform-codex.md](platform-codex.md). Experimental models are
+explicit-request-only: never select one automatically or as a fallback, and
+never invent an unavailable model ID. An escalation to a stronger class, an
+effort increase, or an unavailable-model substitution requires user
+confirmation unless the user granted a bounded automatic-escalation policy.
+Ultra always requires explicit
 per-node confirmation. Pass the confirming `user:` message pointer or verified
 `policy:path:` file into the resolver; a boolean switch cannot self-authorize
 an upgrade. A `user:` pointer remains a controller-checked audit reference,
@@ -144,8 +156,9 @@ multi-artifact run reserves verification only when cross-artifact consistency
 is a material risk. Low-risk lean runs set `verification_reserve` to zero.
 A worker may never consume a reserved slot without a revised, validated plan.
 
-These are safety ceilings, not targets. Start with one worker. A second worker
-must own disjoint context or independently reduce a material risk. In lean
+These are safety ceilings, not targets. Start zero Workers when delegation
+would not reduce duplicated reading, elapsed time, or material risk. Wave 1 may
+start one Worker, or two when both are ready and own disjoint context. In lean
 mode, do not use speculative races and do not allocate a reviewer to merely
 summarize or approve another worker.
 

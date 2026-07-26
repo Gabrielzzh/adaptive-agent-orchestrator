@@ -24,12 +24,16 @@ being read into model context.
 ## Context selection gate
 
 Reject placeholder or project-wide inputs such as `path:.`, `path:*`,
-`ref:all`, `source:all`, an entire repository, or a full conversation. A
-worker that needs broad discovery should first receive a bounded directory,
-file pattern, or source index rather than the whole project. The controller
-may record a one-line `context.selection_reason` for borderline discovery or
-overlap cases; it is optional diagnostic metadata and never enters a worker
-packet.
+`ref:all`, `source:all`, an entire repository, or a full conversation.
+`New-WorkerPacket.ps1` enforces local packet inputs at render time: `ref:`
+must resolve to a plan field, `path:` must resolve inside the workspace without
+crossing a reparse point, and a future `artifact:` must be owned by a declared
+dependency. `source:` identifiers are syntactically checked but must still be
+verified through their source tool by the Worker. A worker that needs broad
+discovery should first receive a bounded directory, file pattern, or source
+index rather than the whole project. The controller may record a one-line
+`context.selection_reason` for borderline discovery or overlap cases; it is
+optional diagnostic metadata and never enters a worker packet.
 
 Do not create a context index for ordinary work. A durable project may keep a
 small machine-readable artifact catalog only when many later workstreams will
@@ -43,7 +47,8 @@ context, changes one small file, or lacks an independently checkable output.
 
 When orchestration is justified:
 
-- launch one worker in wave 1;
+- launch zero, one, or at most two workers in wave 1;
+- use two only when both are ready and their selected context is disjoint;
 - give it one bounded workstream and explicit acceptance checks;
 - launch a later wave only after an earlier worker result is validated;
 - keep exact context-input overlap at or below the plan threshold;
@@ -59,6 +64,11 @@ The default packet contains only identity, task, boundaries, selected
 references, exclusions, acceptance checks, and handoff format. `-Full` exists
 for debugging, not routine dispatch.
 
+A native subagent starts without inherited conversation by default. Rebuild
+its context from the compact task packet and stable references. Inherit only a
+small explicit turn window when the user decision cannot be represented safely
+as a reference or constraint.
+
 Create a handoff only when a later session must resume or reuse the work.
 When required, handoffs contain:
 
@@ -72,6 +82,17 @@ worker. A handoff includes only selected evidence pointers relevant to its
 summary, decisions, risks, and next action; the selected pointers must be a
 subset of the machine-recorded node evidence. Let later workers open only the
 cited artifacts they need.
+
+Collect one compact result batch per Worker. Keep verbose logs, source extracts,
+and large drafts in referenced artifacts instead of returning them to the
+parent conversation.
+
+After a Worker result is validated and adopted, do not re-inject its raw output
+into later Worker packets, handoffs, or compaction recovery state. Preserve the
+receipt, referenced artifact, and adopted findings as the durable record.
+Re-open the artifact only when a later step needs its content. Content already
+read by the main agent cannot be removed from the current model context; this
+rule prevents repeated carriage, not retroactive deletion.
 
 ## Adoption check
 

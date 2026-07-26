@@ -1,7 +1,7 @@
 interface:
   display_name: "Adaptive Agent Orchestrator"
-  short_description: "Context-efficient bounded agent orchestration"
-  default_prompt: "Use $adaptive-agent-orchestrator only for genuinely independent workstreams; minimize copied context and dispatch progressively."
+  short_description: "Reduce context, duplication, and elapsed task time"
+  default_prompt: "Use $adaptive-agent-orchestrator to keep the main agent productive, isolate only independent work, and minimize repeated context."
 
 policy:
   allow_implicit_invocation: true

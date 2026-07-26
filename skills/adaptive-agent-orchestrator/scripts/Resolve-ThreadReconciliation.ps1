@@ -4,7 +4,10 @@ param(
     [string] $InputPath,
 
     [Parameter(Mandatory)]
-    [string] $OutputPath
+    [string] $OutputPath,
+
+    [ValidateRange(5, 300)]
+    [int] $MinVisibilityDelaySeconds = 40
 )
 
 Set-StrictMode -Version Latest
@@ -230,11 +233,15 @@ $returnedThreadId = if (
 $decision = 'unknown'
 $adoptedThread = $null
 $duplicateIds = @()
+$createReturnedStableId = (
+    [string]$input.create_call.status -eq 'success' -and
+    -not [string]::IsNullOrWhiteSpace($returnedThreadId)
+)
 $visibilityDelaySeconds = if ($snapshotTimes.Count -ge 2) {
     (
         $snapshotTimes[$snapshotTimes.Count - 1] - $snapshotTimes[0]
     ).TotalSeconds
-} else { 0 }
+} else { [double]0 }
 if ($uniqueMatches.Count -eq 1) {
     $decision = 'adopted'
     $adoptedThread = $uniqueMatches[0]
@@ -258,8 +265,9 @@ if ($uniqueMatches.Count -eq 1) {
                 Select-Object -ExpandProperty thread_id
         )
     }
-} elseif ($snapshots.Count -ge 2 -and
-    $visibilityDelaySeconds -ge 5 -and
+} elseif (-not $createReturnedStableId -and
+    $snapshots.Count -ge 2 -and
+    $visibilityDelaySeconds -ge $MinVisibilityDelaySeconds -and
     $snapshotTimes[$snapshotTimes.Count - 1] -ge $windowEnd) {
     $decision = 'no_match'
 }
