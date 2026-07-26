@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "policy_version": "0.6.1",
+  "policy_version": "0.7.0",
   "run_id": "example-review-001",
   "goal": "Draft and independently verify a bounded architecture proposal.",
   "constraints": [
@@ -191,7 +191,7 @@
       "write_scope": ["artifacts/final"],
       "acceptance": ["Every review finding has a disposition."],
       "max_attempts": 1,
-      "allow_delegation": false,
+      "allow_delegation": false
     }
   ],
   "gates": [],

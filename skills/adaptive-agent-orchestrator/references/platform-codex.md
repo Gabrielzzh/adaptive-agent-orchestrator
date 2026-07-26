@@ -20,6 +20,13 @@ automatic selection or fallback. `Resolve-WorkerModel.ps1`,
 contract and must be updated together if the supported pool changes. Never
 invent a model ID that the runtime does not expose.
 
+This binding is the current conservative runtime contract, not an inference
+from tier names. Select directly from this table during user work: do not run a
+benchmark, A/B test, or model-selection Worker first. Public benchmarks are
+release-development signals only. Change the table only during a Skill release
+after the offline protocol in [evaluation.md](evaluation.md) repeatedly
+demonstrates improvement without a material regression.
+
 ## Execution surfaces
 
 Use a native subagent for a subtask of the current request:
@@ -64,15 +71,32 @@ Put the exact markers
 <source_thread_id>...</source_thread_id>
 ```
 
-in every durable task prompt so visible task-list previews can be matched
-without guessing. Make one creation call for a reserved activation key, then
-reconcile recent tasks using source task, creation window, and task summary
-regardless of whether the call returned success or error.
+in every durable task prompt. If creation returns a task ID, read that ID
+directly and verify the full prompt markers instead of waiting for task-list
+visibility. Enumerate any remaining candidates with `list_threads`, then read
+each candidate to confirm the markers; a marker mismatch must never be
+declared from a list summary alone.
+
+Make one creation call for a reserved activation key, then reconcile recent
+tasks using source task, creation window, and task summary regardless of
+whether the call returned success or error. A successful creation result with
+a stable returned task ID may remain `unknown` if verification is unavailable,
+but it must never become `no_match` and must never authorize a replacement
+task.
+
+One Codex App 26.721 forward test observed that a successfully created task was
+still absent from `list_threads` nineteen seconds after creation and visible
+by thirty-seven seconds. Until multiple verified samples support calibration,
+use forty seconds as a provisional minimum absence-observation span for error,
+timeout, or unknown creation results. This is a safety floor, not a claim that
+visibility latency has been statistically calibrated. A single immediate list
+miss is normal and never authorizes a retry.
 
 - one match: adopt it;
 - multiple matches: stop, archive duplicates, and record disposition;
-- no match: retry only after the minimum visibility window and immutable
-  reconciliation receipt prove absence;
+- no match: retry only after the provisional visibility floor and immutable
+  reconciliation receipt prove absence, and never when creation reported
+  success with a stable returned task ID;
 - unavailable or ambiguous reconciliation: stop with `unknown`.
 
 A confirmed no-match retry uses a new attempt activation key. Never retry by
@@ -87,5 +111,9 @@ unavailable, fall back once to bounded reads; do not retry the unavailable
 handler. Native subagents never depend on `wait_threads`.
 
 Poll with bounded intervals while the main agent continues its own ready work.
-Do not stream unchanged snapshots into the parent context, and do not interpret
+The first read should normally occur about thirty seconds after materialized
+existence is confirmed, followed by sixty seconds and then five-minute
+intervals unless the node declares another cadence. Prefer `wait_threads` when
+its handler is available, but collect final evidence with `read_thread`. Do not
+stream unchanged snapshots into the parent context, and do not interpret
 silence as completion.

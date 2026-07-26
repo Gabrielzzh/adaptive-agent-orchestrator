@@ -1,6 +1,8 @@
 # Adaptive Agent Orchestrator
 
-[English](README.md) · [v0.6.0 更新说明](docs/releases/v0.6.0.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+[English](README.md) · [v0.7.0 正式版说明](docs/releases/v0.7.0.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+
+![Adaptive Agent Orchestrator v0.7.0 发布图](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
 `adaptive-agent-orchestrator` 是一个适用于研究、开发、写作、分析、创意和
 运营任务的 Codex Skill。主 Agent继续承担主线生产，只把可隔离、可验收且
@@ -35,10 +37,18 @@
   核对真实实体；未知状态不会触发盲目重试，重复实体会被识别并停止扩张。
 - **结果回收门：** 独立后台 Agent 的最终回答必须被显式读取并生成哈希回执，
   否则必需节点不能通过完成门。
+- **不可信结果边界：** 主 Agent 的控制面政策把 Worker 输出视为不可信数据，
+  而不是直接授权；已验证、推断和假设类发现采用不同的复核与采纳规则。
+- **回执绑定归档：** durable task 的结果回执消失或被修改后，不能进入归档。
+- **派遣前预览：** 可在创建持久 Worker 前查看角色、拓扑、模型、权限、引用
+  数量和初始任务包字符量，但不会把字符数冒充 Token 或金额。
+- **平台观测校准：** 项目内追加保存去标识化的 reconciliation 区间观测，
+  按运行环境分组提供诊断；现有证据不足时明确抑制窗口建议。
 - **受保护的活动容量：** 目标最多六个活动 Worker，其中四个可供常驻
   Worker 使用，另外两个保留给临时 subagent；实际数量服从运行时容量。
-- **自动模型路由：** Luna 处理边界明确的机械任务，Sol 负责判断、写作、
-  实现和审查；Terra 只作为用户明确选择的实验模型。
+- **静态模型路由：** Luna 处理边界明确的机械任务，Sol 负责判断、写作、
+  实现和审查；Terra 只在用户明确指定时使用，正式任务前不会额外启动模型
+  测试 Agent。
 - **确定性模式：** `auto` 在轻量快速路径、独立团队和可恢复工作流之间
   选择，不创建额外调度 Agent。
 - **可复用研究证据：** 只有多条下游工作流需要复用同一来源集时，才按需
@@ -85,45 +95,10 @@ v0.4 从 GitHub 一手来源中只吸收狭窄、可验证的机制：
 
 ```text
 skills/adaptive-agent-orchestrator/
-├── SKILL.md
-├── agents/openai.yaml
-├── references/
-│   ├── context-efficiency.md
-│   ├── evaluation.md
-│   ├── example-plan.json
-│   ├── project-knowledge.md
-│   ├── role-pack-catalog.json
-│   ├── role-system.md
-│   ├── roles-creative-production.json
-│   ├── roles-equity-research.json
-│   ├── roles-software-development.json
-│   ├── roles-supply-chain.json
-│   ├── routing-policy.md
-│   ├── safety-and-lifecycle.md
-│   └── workflow-contract.md
-└── scripts/
-    ├── Add-OrchestrationEvent.ps1
-    ├── Get-OrchestrationState.ps1
-    ├── Get-AgentRolePreset.ps1
-    ├── Manage-ProjectKnowledge.ps1
-    ├── New-AgentRole.ps1
-    ├── New-OrchestrationRun.ps1
-    ├── New-RoleActivationPreview.ps1
-    ├── New-ThreadActivationReservation.ps1
-    ├── New-ThreadHandoff.ps1
-    ├── New-ThreadResultReceipt.ps1
-    ├── New-WorkerPacket.ps1
-    ├── Orchestration.Common.ps1
-    ├── Resolve-OrchestrationPreset.ps1
-    ├── Resolve-ThreadReconciliation.ps1
-    ├── Resolve-WorkerCapacity.ps1
-    ├── Resolve-WorkerModel.ps1
-    ├── Test-OrchestrationBenchmark.ps1
-    ├── Test-OrchestrationBenchmarkSuite.ps1
-    ├── Test-OrchestrationCompletion.ps1
-    ├── Test-OrchestrationEfficiency.ps1
-    ├── Test-OrchestrationPlan.ps1
-    └── Test-Self.ps1
+├── SKILL.md          # 精简运行规则
+├── agents/           # Codex 展示元数据
+├── references/       # 只在相关路径按需加载的合同
+└── scripts/          # 确定性校验、状态和诊断工具
 ```
 
 ## 安装
@@ -207,13 +182,14 @@ $adaptive-agent-orchestrator。共享上下文留在主 Agent，Worker 只拿引
 
 ## 验证情况
 
-v0.6.0 正式版本通过：
+v0.7.0 正式版本通过：
 
-- 22 个 PowerShell 脚本语法解析；
-- 472 项自测断言；
-- 48 份故意构造的非法负面测试计划均被正确拦截；
+- 25 个 PowerShell 脚本语法解析；
+- 515 项自测断言；
+- 50 份故意构造的非法负面测试计划均被正确拦截；
 - 计划、元数据、日志、handoff、依赖、幂等、所有权、上下文重叠、渐进
   派遣、短任务包和完成门测试；
+- 严格 JSON 解析与真实 Windows Junction/reparse point 实体测试；
 - 一个合成的单案例 benchmark 测试。
 
 ```powershell
@@ -227,8 +203,9 @@ pwsh -NoProfile -File `
 - 自然语言排除项无法删除宿主已经注入的历史；应使用 fresh Worker 和明确
   输入引用。
 - 精确重叠检查无法发现“不同名称但语义相同”的材料，主 Agent 仍需拒绝。
-- 不同持久 run 之间没有共享机器账本；根任务总上限由主 Agent 执行，恢复
-  后必须先核对可见状态再继续创建 Worker。
+- 不同项目之间没有共享机器级校准账本；根任务总上限由主 Agent 执行，
+  恢复后必须先核对可见状态再继续创建 Worker。
+- 校准账本记录的是快照观测区间，不是精确平台可见延迟。
 - 只有执行面提供 telemetry 时，Token 用量才可用于诊断。
 - 中位数节省 20% 是发布 benchmark 目标，不是已经证实的生产声明；合成
   测试不能证明真实 Token 节省。

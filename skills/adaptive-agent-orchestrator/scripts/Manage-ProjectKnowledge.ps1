@@ -24,7 +24,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $root = (Resolve-Path -LiteralPath $ProjectRoot).Path.TrimEnd('\', '/')
-$knowledgeRoot = Join-Path $root '.orchestrator\knowledge'
+$knowledgeRoot = Join-Path $root '.orchestrator/knowledge'
 $catalogPath = Join-Path $knowledgeRoot 'catalog.json'
 $indexPath = Join-Path $knowledgeRoot 'INDEX.md'
 

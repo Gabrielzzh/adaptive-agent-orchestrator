@@ -286,6 +286,8 @@ $requestFingerprint = Get-TextSha256 (
         usage_source = $UsageSource
     } | ConvertTo-Json -Compress -Depth 10
 )
+$archiveReceiptHash = $null
+$archiveReceiptRelativePath = $null
 
 $transitions = @{
     planned = @('launch_reserved', 'running', 'needs_input', 'completed', 'cancelled')
@@ -329,6 +331,50 @@ try {
 
     $history = @($events | Where-Object { $_.node_id -eq $NodeId })
     $priorState = if ($history.Count) { [string]$history[-1].status } else { 'planned' }
+    if ($Status -eq 'archived' -and $node.kind -eq 'agent' -and
+        $node.topology -eq 'background-thread') {
+        $receiptEvidence = @(
+            $history | ForEach-Object { @($_.evidence) } | Where-Object {
+                $_ -like 'artifact:receipts/*.thread-result-receipt.json'
+            }
+        ) | Select-Object -Last 1
+        if ([string]::IsNullOrWhiteSpace([string]$receiptEvidence)) {
+            throw 'Archiving a background thread requires a recorded result receipt.'
+        }
+        $archiveReceiptRelativePath = (
+            [string]$receiptEvidence
+        ).Substring('artifact:'.Length).Replace('\', '/')
+        $receiptSegments = $archiveReceiptRelativePath -split '[\\/]'
+        if (@($receiptSegments | Where-Object {
+            $_ -in @('', '.', '..') -or $_ -match '[\. ]$' -or $_.Contains(':')
+        }).Count -gt 0) {
+            throw 'Archive result receipt path is unsafe.'
+        }
+        $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+        $archiveReceiptPath = [IO.Path]::GetFullPath(
+            (Join-Path $runRoot $archiveReceiptRelativePath)
+        )
+        if (-not $archiveReceiptPath.StartsWith(
+            $runRoot + [IO.Path]::DirectorySeparatorChar,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw 'Archive result receipt escapes the run.'
+        }
+        $materializedEvent = @(
+            $history | Where-Object {
+                $_.status -eq 'materialized' -and
+                -not [string]::IsNullOrWhiteSpace([string]$_.thread_id)
+            }
+        ) | Select-Object -Last 1
+        if ($null -eq $materializedEvent) {
+            throw 'Archive result receipt has no materialized thread binding.'
+        }
+        $archiveReceipt = Read-ThreadResultReceipt `
+            -Path $archiveReceiptPath `
+            -ExpectedThreadId ([string]$materializedEvent.thread_id) `
+            -RunDirectory $RunDirectory
+        $archiveReceiptHash = [string]$archiveReceipt.receipt_hash
+    }
     $existing = @(
         $events | Where-Object { $_.idempotency_key -eq $IdempotencyKey }
     ) | Select-Object -First 1
@@ -336,6 +382,12 @@ try {
         if ($existing.node_id -ne $NodeId -or $existing.status -ne $Status -or
             $existing.request_fingerprint -ne $requestFingerprint) {
             throw "IdempotencyKey '$IdempotencyKey' was already used for another event."
+        }
+        if ($Status -eq 'archived' -and (
+            [string]$existing.result_receipt_path -ne $archiveReceiptRelativePath -or
+            [string]$existing.result_receipt_hash -ne $archiveReceiptHash
+        )) {
+            throw "IdempotencyKey '$IdempotencyKey' no longer matches the verified result receipt."
         }
         $existing | ConvertTo-Json -Depth 10
         return
@@ -630,6 +682,8 @@ try {
         decision = if ($Decision) { $Decision } else { $null }
         human_actor = if ($HumanActor) { $HumanActor } else { $null }
         evidence = $cleanEvidence
+        result_receipt_path = $archiveReceiptRelativePath
+        result_receipt_hash = $archiveReceiptHash
         idempotency_key = $IdempotencyKey
         request_fingerprint = $requestFingerprint
     }

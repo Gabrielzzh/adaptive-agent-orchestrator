@@ -56,6 +56,14 @@ function Get-NormalizedScope {
         Add-PlanError "Node '$NodeId' write_scope cannot traverse with '..': '$Scope'."
         return $null
     }
+    if ($segments[0] -ieq '.orchestrator') {
+        Add-PlanError (
+            "Node '$NodeId' write_scope cannot target control-plane state " +
+            "under '.orchestrator': '$Scope'. Plan nodes must use the " +
+            'main-agent-owned control scripts instead of direct writes.'
+        )
+        return $null
+    }
     foreach ($segment in $segments) {
         if ($segment -match '[\. ]$' -or $segment.Contains(':')) {
             Add-PlanError "Node '$NodeId' write_scope contains a Windows path alias or stream segment: '$Scope'."
@@ -96,8 +104,8 @@ $plan = Get-Content -LiteralPath $resolvedPlan -Raw | ConvertFrom-Json -Depth 10
 if ((Get-PlanProperty $plan 'schema_version') -ne '1.0') {
     Add-PlanError "schema_version must be '1.0'."
 }
-if ((Get-PlanProperty $plan 'policy_version') -ne '0.6.1') {
-    Add-PlanError "policy_version must be '0.6.1'."
+if ((Get-PlanProperty $plan 'policy_version') -ne '0.7.0') {
+    Add-PlanError "policy_version must be '0.7.0'."
 }
 $null = Require-Text $plan 'run_id' 'Plan'
 $null = Require-Text $plan 'goal' 'Plan'
@@ -843,13 +851,20 @@ if ($null -ne $manuscript) {
 }
 
 $writerIds = @($normalizedWriterScopes.Keys)
+$directorySeparator = [string][IO.Path]::DirectorySeparatorChar
 for ($i = 0; $i -lt $writerIds.Count; $i++) {
     for ($j = $i + 1; $j -lt $writerIds.Count; $j++) {
         foreach ($left in @($normalizedWriterScopes[$writerIds[$i]])) {
             foreach ($right in @($normalizedWriterScopes[$writerIds[$j]])) {
                 if ($left -eq $right -or
-                    $left.StartsWith($right + '\', [StringComparison]::OrdinalIgnoreCase) -or
-                    $right.StartsWith($left + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                    $left.StartsWith(
+                        $right + $directorySeparator,
+                        [StringComparison]::OrdinalIgnoreCase
+                    ) -or
+                    $right.StartsWith(
+                        $left + $directorySeparator,
+                        [StringComparison]::OrdinalIgnoreCase
+                    )) {
                     Add-PlanError "Write scope overlap between '$($writerIds[$i])' and '$($writerIds[$j])'."
                 }
             }

@@ -25,6 +25,7 @@ Every role contains:
 - `required_inputs`: inputs needed before useful work can begin;
 - `deliverables`: exact return artifacts or sections;
 - `evidence_rules`: how claims must be supported and uncertainty reported;
+  substantive findings use `[verified]`, `[inferred]`, or `[assumed]`;
 - `tool_policy`: `read-only`, `scoped-write`, or `proposal-only`;
 - `question_policy`: when the role must ask, maximum questions, and what can be
   assumed safely;

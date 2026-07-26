@@ -322,6 +322,9 @@ $(Join-Bullets @($node.acceptance))
 Evidence:
 $(Join-Bullets @($role.evidence_rules))
 
+Prefix substantive findings with [verified], [inferred], or [assumed].
+Assumptions cannot satisfy acceptance checks.
+
 Return: conclusion; evidence/changes; validation; unresolved risks; questions.
 
 ## Authority
@@ -413,6 +416,10 @@ risks, and questions.
 ## Evidence rules
 
 $(Join-Bullets @($role.evidence_rules))
+
+Prefix substantive findings with [verified], [inferred], or [assumed].
+Verified findings cite reproducible evidence; assumptions cannot satisfy
+acceptance checks.
 
 Acceptance checks:
 $(Join-Bullets @($node.acceptance))

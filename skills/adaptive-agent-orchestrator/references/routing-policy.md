@@ -48,6 +48,23 @@ Profiles control verification, not team size:
 
 Do not expose a mode-by-profile configuration matrix to ordinary users.
 
+## Effort scaling
+
+Scale the team to the question before selecting a topology:
+
+- a single lookup, small fix, or one-source summary: main agent only, zero
+  Workers;
+- a direct comparison or one bounded independent verification: at most one
+  Worker alongside continuing main-agent production;
+- genuinely divisible breadth with independent deliverables and disjoint
+  selected context: start within the first-wave limit and expand only through
+  progressive dispatch after adopted results.
+
+Each isolated Worker adds coordination and context cost, so its deliverable
+must provide value that a low-cost main-agent pass would not. When uncertain,
+start one level lower. Give every Worker an explicit objective, deliverable,
+and boundary; vague mandates produce duplicated or tangential work.
+
 ## Topology selection
 
 Choose `main` when any of these dominates:

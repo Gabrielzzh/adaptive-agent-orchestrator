@@ -25,7 +25,8 @@ function Get-OrchestrationEventHash {
         'effort', 'wave', 'attempt', 'execution_slot_delta', 'error_class',
         'input_tokens_delta', 'output_tokens_delta',
         'coordination_tokens_delta', 'usage_source',
-        'decision', 'human_actor', 'evidence', 'idempotency_key',
+        'decision', 'human_actor', 'evidence',
+        'result_receipt_path', 'result_receipt_hash', 'idempotency_key',
         'request_fingerprint'
     )
     $payload = [ordered]@{}
@@ -244,7 +245,7 @@ function Read-ThreadReconciliationReceipt {
         [string]$input.reservation_path
     )
     $activationRoot = [IO.Path]::GetFullPath(
-        (Join-Path $runRoot 'receipts\activations')
+        (Join-Path $runRoot 'receipts/activations')
     ).TrimEnd('\', '/')
     if (-not $reservationPath.StartsWith(
         $activationRoot + [IO.Path]::DirectorySeparatorChar,

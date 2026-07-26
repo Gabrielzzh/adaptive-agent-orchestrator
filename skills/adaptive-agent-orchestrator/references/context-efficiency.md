@@ -87,6 +87,13 @@ Collect one compact result batch per Worker. Keep verbose logs, source extracts,
 and large drafts in referenced artifacts instead of returning them to the
 parent conversation.
 
+After a Worker result is validated and adopted, do not re-inject its raw output
+into later Worker packets, handoffs, or compaction recovery state. Preserve the
+receipt, referenced artifact, and adopted findings as the durable record.
+Re-open the artifact only when a later step needs its content. Content already
+read by the main agent cannot be removed from the current model context; this
+rule prevents repeated carriage, not retroactive deletion.
+
 ## Adoption check
 
 Before dispatching another optional worker, the main agent checks whether the

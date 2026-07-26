@@ -53,7 +53,71 @@ Run at least three fresh-context scenarios:
 Do not tell test agents the expected answer. Give them the skill and the raw
 task. Inspect actual plans, tool choices, artifacts, and stopping behavior.
 
+## Release-time model-routing calibration
+
+This is an offline Skill-development procedure. Never run it before or during a
+user task, and never create a calibration Worker merely to choose that task's
+model. Runtime selection uses the published static table in
+`platform-codex.md`.
+
+Do not route by model tier name, vendor positioning, star count, a single
+public benchmark, or one community opinion. Before changing an automatic model
+binding:
+
+- prefer current-family results from the same agent harness and reasoning
+  effort, with reproducible tasks or transparent scoring;
+- compare successful task completion, quality, cost per completed task,
+  output Tokens, wall time, retries, and required user intervention;
+- use objective suites such as LiveBench or Aider to design local fixtures, but
+  do not treat an older leaderboard without the current models as direct
+  evidence;
+- cover at least one mechanically checked task, one ordinary implementation
+  with tests, one rubric-scored knowledge-work task, and one difficult review;
+- treat GitHub stars and user reports as discovery signals, not routing proof.
+
+Keep the existing route when evidence is mixed. Adopt a new default only when
+it repeatedly improves the task class it would serve without a material
+regression on the other fixtures. Revert when a forward test lowers completion
+quality, increases retries, or uses an unavailable model or effort. Do not
+browse benchmark sites during ordinary task execution.
+
+### Evidence snapshot: 2026-07-27
+
+- [Artificial Analysis][aa-56] reports that Luna or Sol is ahead of Terra at
+  every GPT-5.6 reasoning level on intelligence versus cost per task.
+- [Zapier AutomationBench][automation-bench] reports Sol max at 29.17% and
+  Terra max at 25.83% on 600 public business-workflow tasks.
+- High-attention GitHub projects such as [Aider][aider] and
+  [LiveBench][livebench] provide useful reproducible evaluation methods, but
+  their popularity or older model tables are not direct GPT-5.6 routing
+  evidence.
+
+These public results corroborate keeping Terra outside the automatic pool; they
+do not independently satisfy the release gate. Re-check this snapshot only
+during a later Skill release when the model family or harness changes.
+
+[aa-56]: https://artificialanalysis.ai/articles/gpt-5-6-intelligence-vs-cost-across-sol-terra-luna
+[automation-bench]: https://github.com/zapier/AutomationBench
+[aider]: https://github.com/Aider-AI/aider
+[livebench]: https://github.com/LiveBench/LiveBench
+
 ## Token benchmark
+
+For one completed durable run, collect diagnostic structure without loading
+the journal into a model:
+
+```powershell
+pwsh -File scripts/Measure-OrchestrationRun.ps1 `
+  -RunDirectory <run-directory> `
+  -SkillRoot <installed-skill-root> `
+  -PacketPaths <optional-worker-packet-paths>
+```
+
+The report summarizes launches, materialized Workers, reconciliation delays,
+result receipts, repeated input references, and packet character counts. It
+does not estimate Tokens, enforce a user budget, or prove that orchestration
+was more efficient than a single Agent. Use it only for evaluation and
+post-run diagnosis.
 
 For every benchmark case, run the same task with the same inputs, acceptance
 checks, output scope, failure policy, environment, and warm/cold cache

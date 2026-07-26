@@ -43,7 +43,7 @@ $normalizedSummary = (
     [regex]::Replace($TaskSummary.Trim(), '\s+', ' ')
 ).ToLowerInvariant()
 $keyHash = Get-TextSha256 $ActivationKey.Trim()
-$reservationDirectory = Join-Path $RunDirectory 'receipts\activations'
+$reservationDirectory = Join-Path $RunDirectory 'receipts/activations'
 if (-not (Test-Path -LiteralPath $reservationDirectory)) {
     $null = New-Item -ItemType Directory -Path $reservationDirectory -Force
 }
