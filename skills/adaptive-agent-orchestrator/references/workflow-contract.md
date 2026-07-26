@@ -5,7 +5,7 @@
 A durable plan is a JSON object with:
 
 - `schema_version`: currently `"1.0"`;
-- `policy_version`: currently `"0.5.1"`, used to validate and replay the run;
+- `policy_version`: currently `"0.6.0"`, used to validate and replay the run;
 - `run_id`: unique, stable identifier;
 - `orchestrator`: the single controller identity and delegation authority;
 - `goal`: concrete outcome;
@@ -19,7 +19,9 @@ A durable plan is a JSON object with:
 - `nodes`: work items;
 - `completion`: global success and stopping criteria.
 
-Every agent node declares a positive `wave`. Read
+Every agent node declares a positive `wave`. A durable run that contains agent
+nodes also contains at least one substantive `main` node unless its goal is
+explicitly coordination-only or review-only. Read
 [context-efficiency.md](context-efficiency.md) before dispatch. A structurally
 valid graph is still rejected when it repeats context, front-loads multiple
 workers, or bypasses progressive dispatch.
@@ -205,6 +207,11 @@ reuse-only field.
 
 ## Ownership rules
 
+- The main agent owns at least one substantive production node in a durable
+  run unless the goal explicitly states coordination-only or review-only.
+- A Worker owns one bounded artifact, investigation, section, module, dataset,
+  design surface, or verification result.
+- The main agent continues dependency-ready production while Workers run.
 - `read_only: true` requires an empty `write_scope`.
 - A `read-only` or `proposal-only` role may bind only to a read-only node.
 - A node may be more restrictive than its role, never less restrictive.
@@ -213,6 +220,8 @@ reuse-only field.
   syntax, and resolved against real paths before dispatch to detect links.
 - Concurrent writable nodes may not overlap scopes.
 - The main agent owns final integration even when workers write disjoint files.
+- Return a defect to the original producer when possible; do not create a new
+  integrator Worker to restate or merge results.
 
 ## Completion contract
 

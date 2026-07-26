@@ -43,7 +43,8 @@ context, changes one small file, or lacks an independently checkable output.
 
 When orchestration is justified:
 
-- launch one worker in wave 1;
+- launch zero, one, or at most two workers in wave 1;
+- use two only when both are ready and their selected context is disjoint;
 - give it one bounded workstream and explicit acceptance checks;
 - launch a later wave only after an earlier worker result is validated;
 - keep exact context-input overlap at or below the plan threshold;
@@ -59,6 +60,11 @@ The default packet contains only identity, task, boundaries, selected
 references, exclusions, acceptance checks, and handoff format. `-Full` exists
 for debugging, not routine dispatch.
 
+A native subagent starts without inherited conversation by default. Rebuild
+its context from the compact task packet and stable references. Inherit only a
+small explicit turn window when the user decision cannot be represented safely
+as a reference or constraint.
+
 Create a handoff only when a later session must resume or reuse the work.
 When required, handoffs contain:
 
@@ -72,6 +78,10 @@ worker. A handoff includes only selected evidence pointers relevant to its
 summary, decisions, risks, and next action; the selected pointers must be a
 subset of the machine-recorded node evidence. Let later workers open only the
 cited artifacts they need.
+
+Collect one compact result batch per Worker. Keep verbose logs, source extracts,
+and large drafts in referenced artifacts instead of returning them to the
+parent conversation.
 
 ## Adoption check
 

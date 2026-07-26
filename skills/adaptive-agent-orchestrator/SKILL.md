@@ -1,6 +1,6 @@
 ---
 name: adaptive-agent-orchestrator
-description: Reduce total context and duplicated reasoning while coordinating genuinely independent Codex workstreams across native subagents and durable background threads. Use for complex work that benefits from isolated ownership, selective verification, durable recovery, or parallel evidence gathering. Keep small, sequential, high-overlap, and full-conversation tasks in the main agent.
+description: Improve task efficiency across research, coding, writing, analysis, creative, and operational work by keeping the main agent productive while isolating genuinely independent work in native subagents or durable background threads. Use when selective delegation, high-output context isolation, reusable project knowledge, independent verification, or durable ownership can reduce repeated reading, reasoning, or elapsed time. Keep small, sequential, high-overlap tasks in the main agent.
 ---
 
 # Adaptive Agent Orchestrator
@@ -15,15 +15,27 @@ delegation, unverifiable completion, or lost recovery state.
 
 Never let a worker create another worker or invoke this Skill.
 
-## Decide whether to orchestrate
+## Assign work ownership
 
 Stay in the main agent when work is small, strongly sequential, needs most of
 the same context, changes one narrow surface, or lacks an independently
 checkable result.
 
-Orchestrate only when at least two workstreams are genuinely independent or an
-independent check covers a material risk. Start with one worker. A later worker
-must depend on an earlier validated result or own disjoint context.
+At task entry, keep the global spine, high-coupling work, user communication,
+external actions, and final integration in the main agent. Delegate a candidate
+workstream only when it can use materially less context, has an independently
+checkable result, and either runs alongside useful main-agent work or provides
+a necessary independent view. Do not use a scoring model or create a Router
+Agent for this decision.
+
+Reconsider ownership only when scope changes, a new independent workstream
+appears, an adopted result opens a dependency, a Worker fails or blocks,
+context must rotate, or a high-risk quality gate begins. Choose one action:
+`main owns`, `dispatch native`, `dispatch durable`, `defer`, or `stop`.
+
+The main agent must own a substantive production workstream in every durable
+run unless the user explicitly requests coordination or review only. A role may
+be adopted by the main agent without creating a Worker.
 
 For one temporary, read-only worker, dispatch directly with a compact task
 packet. Do not create a durable plan, journal, or custom role unless recovery,
@@ -52,10 +64,11 @@ Never fill available worker seats merely because roles exist.
 
 Before every direct or durable Worker, show its role, necessity versus main
 agent execution, execution form (`native subagent` or `independent background
-agent`) and why that form fits the task lifecycle, concrete task,
-responsibilities, non-goals, input scope, deliverables, evidence rules,
-permissions, dependencies, and omission impact. If the user has not explicitly
-authorized automatic teaming, wait for approval or a requested change. Durable
+agent`) and why that form fits the task lifecycle, bounded task ownership,
+input references, deliverable, and permissions. Add dependencies, exclusions,
+or evidence detail only when they affect the decision. If the user has not
+explicitly authorized automatic teaming, wait for approval or a requested
+change. Durable
 nodes record `user:<message-or-request>` for explicit approval or
 `policy:path:<project-relative-policy-file>` for automatic authorization;
 never infer authority from the plan itself. Render the exact preview with:
@@ -130,6 +143,11 @@ root, `all files`, or an entire conversation. For durable nodes, record a
 one-line `selection_reason` explaining why the selected references are the
 smallest sufficient set.
 
+Start a native subagent with no inherited conversation by default
+(`fork_turns: none`) and send a compact task packet. Inherit only a small,
+explicit number of recent turns when the work cannot be reconstructed from
+stable references. Never use full-history inheritance merely for convenience.
+
 For durable plan nodes, use `New-WorkerPacket.ps1` without `-Full`. Full
 packets are debugging aids. A direct temporary worker gets the same compact
 fields inline from the main agent; do not create a plan merely to call the
@@ -138,6 +156,13 @@ script.
 Do not pass full transcripts or hidden reasoning between agents. Pass the
 smallest conclusion, evidence pointers, unresolved risks, and next action.
 Create a handoff only when another session must resume or reuse the work.
+Return one compact result batch instead of streaming intermediate research or
+logs into the parent context.
+
+For a long-lived project, read
+[project-knowledge.md](references/project-knowledge.md) only when a decision,
+verified fact, interface, or unresolved risk will be reused across workstreams
+or turns. Do not create project knowledge for ordinary one-off work.
 
 Retry with the prior-output pointer, failure evidence, and exact repair
 instruction. Do not resend the original context unless it changed or became
@@ -190,26 +215,28 @@ confirmation.
 
 ## Execute progressively
 
-1. Start one worker as the first wave.
+1. Start zero Workers when the main agent is more efficient. Start one when one
+   bounded workstream justifies isolation. Start two in wave 1 only when both
+   are dependency-ready and their input context is disjoint.
 2. Dispatch only dependency-ready nodes.
-3. Validate its evidence and artifacts in the main agent.
-4. Before another wave, ask whether the adopted result changes the plan,
+3. Continue the main agent's own ready production while Workers run.
+4. Validate Worker evidence and artifacts in the main agent.
+5. Before another wave, ask whether the adopted result changes the plan,
    opens a required dependency, or closes an acceptance gap. If none is true,
    stop dispatch. Do not create a separate optimizer to answer this.
-5. Skip dedicated review for low-risk work. Sample critical output for
+6. Skip dedicated review for low-risk work. Sample critical output for
    medium-risk work. Use an independent reviewer for high-risk or
    cross-artifact consistency risk.
-6. Let the main agent integrate directly. Do not create an integrator worker
+7. Let the main agent integrate directly. Do not create an integrator worker
    merely to restate worker outputs.
-7. Stop optional workers when a wave adds no accepted evidence, coverage, or
+8. Stop optional workers when a wave adds no accepted evidence, coverage, or
    material risk reduction. The main agent may continue improving the task.
 
-For manuscripts, the main agent owns the argument spine, outline, voice,
-abstract, conclusion, and final merge. A methods or domain role may co-author
-its bounded section and return revisions to that same owner; do not reduce
-every specialist to a reviewer. Keep one independent academic reviewer for the
-quality gate. Findings return to the original section owner before final
-integration.
+Apply the producer-owner pattern to every domain: the main agent owns the
+global spine and final integration; a Worker may own a bounded section,
+module, investigation, dataset, design surface, or other independently
+verifiable artifact. Return defects to the original owner. Use an independent
+reviewer only for a material risk, not as a default stage.
 
 For durable runs:
 

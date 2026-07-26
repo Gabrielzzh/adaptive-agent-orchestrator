@@ -1,11 +1,11 @@
 # Adaptive Agent Orchestrator
 
-[English](README.md) · [v0.5.1 更新说明](docs/releases/v0.5.1.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+[English](README.md) · [v0.6.0 更新说明](docs/releases/v0.6.0.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
 
-`adaptive-agent-orchestrator` 是一个 Codex Skill：在协调真正独立的工作流
-时，减少重复上下文和重复推理。它提供单 Agent 快速路径、引用优先的 Worker
-输入、紧凑任务包与 handoff、渐进派遣、按风险审阅、差量重试、隔离写入所有
-权和确定性完成检查。
+`adaptive-agent-orchestrator` 是一个适用于研究、开发、写作、分析、创意和
+运营任务的 Codex Skill。主 Agent继续承担主线生产，只把可隔离、可验收且
+值得并行的工作交给临时 subagent 或长期独立任务，从而减少重复读取、重复
+推理和等待时间。
 
 目标是降低完整任务的总 Token 消耗。用户不需要配置 Token budget；Skill
 也不会假装能预测一个开放式持续改进任务的最终消耗。节省效果必须由公平的
@@ -21,8 +21,12 @@
   真正需要时读取。
 - **默认单 Agent：** 小任务、强顺序、高上下文重叠和窄范围修改留在主
   Agent。
-- **渐进派遣：** 第一波只有一个 Worker；后续 Worker 必须依赖已验证结果
-  或拥有不重叠的上下文。
+- **动态工作所有权：** 主 Agent负责全局主线与最终整合；任务入口和关键
+  事件点重新判断哪些工作自己做、临时委派、长期负责、暂缓或停止。
+- **0–2 个首波 Worker：** 简单任务不派；一个独立工作面派一个；两个同时
+  就绪且上下文完全分离的工作面最多并行两个。
+- **独立上下文：** 原生 subagent 默认不继承完整对话，只接收紧凑任务包和
+  稳定引用；大量日志、资料和搜索结果留在其独立上下文。
 - **直接 Worker 快速路径：** 单个临时只读 Worker 不创建持久计划、日志或
   存储角色，也不创建缩小版状态机。
 - **创建过程可见：** 每个 Worker 创建前都说明角色和必要性，创建后报告
@@ -41,8 +45,10 @@
   启用资料整理角色。
 - **行业角色按需加载：** 内置部分行业角色包，只加载被选中的合同；后续
   扩展行业时也不会把全部角色塞入每个 Worker 的上下文。
-- **论文共同撰写：** 方法与行业专家可拥有明确章节，主 Agent 保持论证
-  主线、统一文风和最终合并，独立审稿人只在质量门介入。
+- **通用产物所有权：** 专业 Worker可拥有边界明确的章节、模块、调查、
+  数据集或设计面；缺陷返回原所有者，主 Agent保持全局主线和最终合并。
+- **轻量项目知识：** 只有长期或跨工作流复用时才保存决策、已验证事实、
+  接口和未解决风险；普通一次性任务不创建知识库。
 - **明确角色寿命：** 一次性、项目级和用户拥有角色不会混在一起；用户明确
   要求复用的角色不会被系统自动降级或删除。
 - **按风险审阅：** 低风险跳过 Reviewer；中风险抽查关键输出；高风险才使用
@@ -85,6 +91,7 @@ skills/adaptive-agent-orchestrator/
 │   ├── context-efficiency.md
 │   ├── evaluation.md
 │   ├── example-plan.json
+│   ├── project-knowledge.md
 │   ├── role-pack-catalog.json
 │   ├── role-system.md
 │   ├── roles-creative-production.json
@@ -98,6 +105,7 @@ skills/adaptive-agent-orchestrator/
     ├── Add-OrchestrationEvent.ps1
     ├── Get-OrchestrationState.ps1
     ├── Get-AgentRolePreset.ps1
+    ├── Manage-ProjectKnowledge.ps1
     ├── New-AgentRole.ps1
     ├── New-OrchestrationRun.ps1
     ├── New-RoleActivationPreview.ps1
@@ -163,7 +171,7 @@ $adaptive-agent-orchestrator。共享上下文留在主 Agent，Worker 只拿引
 | --- | --- | --- |
 | 一次性委派 | 原生、更简单 | 主动让路 |
 | 上下文选择 | 依赖总控判断 | 引用优先、排除项、重叠检查 |
-| 派遣时机 | Prompt 驱动 | 第一波单 Worker，后续依赖已验证结果 |
+| 派遣时机 | Prompt 驱动 | 动态所有权判断，首波0–2个独立Worker |
 | 审阅 | 依赖总控判断 | 按风险或抽样，不默认多 Reviewer |
 | 重试 | 依赖当前会话 | 差量修复任务包与失败分类 |
 | 写入所有权 | 依赖 Prompt/沙箱 | 执行前拒绝重叠 Writer |
@@ -179,13 +187,13 @@ $adaptive-agent-orchestrator。共享上下文留在主 Agent，Worker 只拿引
 ```text
 请求
   ↓
-除非工作流真正独立，否则走单 Agent
+主 Agent取得全局主线和自己的生产工作
   ↓
-引用优先计划 + 上下文重叠检查
+寻找可用更小上下文独立完成的工作面
   ↓
-第一波一个 Worker
+按需要启动0–2个首波Worker
   ↓
-验证证据与产物
+主 Agent继续生产并验证Worker证据与产物
   ↓
 只有产生新采纳价值时才启动后续波次
   ↓
@@ -199,11 +207,11 @@ $adaptive-agent-orchestrator。共享上下文留在主 Agent，Worker 只拿引
 
 ## 验证情况
 
-v0.5.1 正式版本通过：
+v0.6.0 正式版本通过：
 
-- 21 个 PowerShell 脚本语法解析；
-- 464 项自测断言；
-- 47 份故意构造的非法负面测试计划均被正确拦截；
+- 22 个 PowerShell 脚本语法解析；
+- 472 项自测断言；
+- 48 份故意构造的非法负面测试计划均被正确拦截；
 - 计划、元数据、日志、handoff、依赖、幂等、所有权、上下文重叠、渐进
   派遣、短任务包和完成门测试；
 - 一个合成的单案例 benchmark 测试。

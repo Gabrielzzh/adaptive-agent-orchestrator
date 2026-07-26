@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0 - 2026-07-26
+
+General task-efficiency release. Plan policy advances to `0.6.0`.
+
+- Make the main agent both the sole orchestrator and a required core producer.
+- Replace one-time orchestration choice with event-driven work ownership.
+- Allow zero, one, or at most two context-disjoint first-wave Workers.
+- Start native subagents without inherited conversation history by default.
+- Generalize bounded producer ownership beyond manuscripts to every task type.
+- Add an optional project-local knowledge pointer catalog with sourced
+  adoption, lookup, invalidation, and supersession.
+- Reject durable plans that delegate every substantive production node.
+- Preserve v0.5.1 reconciliation, receipts, capacity isolation, and explicit
+  model-escalation gates.
+
 ## 0.5.1 - 2026-07-20
 
 Reliability release for Worker materialization, result collection, and

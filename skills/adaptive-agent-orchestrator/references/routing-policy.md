@@ -10,7 +10,9 @@ Do not compare all mechanisms on one axis.
 | Workflow | direct, parallel, pipeline, DAG, loop, race, human gate | How do results and decisions depend on one another? |
 | Compute | model class and reasoning effort | How much capability is justified for this node? |
 
-The main agent is always the only orchestrator.
+The main agent is always the only orchestrator and a core producer. It owns the
+global spine, high-coupling work, final integration, and user-facing delivery.
+Do not create a persistent Router Agent.
 
 ## Model-native minimum
 
@@ -144,8 +146,9 @@ multi-artifact run reserves verification only when cross-artifact consistency
 is a material risk. Low-risk lean runs set `verification_reserve` to zero.
 A worker may never consume a reserved slot without a revised, validated plan.
 
-These are safety ceilings, not targets. Start with one worker. A second worker
-must own disjoint context or independently reduce a material risk. In lean
+These are safety ceilings, not targets. Start zero Workers when delegation
+would not reduce duplicated reading, elapsed time, or material risk. Wave 1 may
+start one Worker, or two when both are ready and own disjoint context. In lean
 mode, do not use speculative races and do not allocate a reviewer to merely
 summarize or approve another worker.
 

@@ -106,6 +106,44 @@ try {
         'Role activation preview should render the selected role ID exactly.'
     )
 
+    $knowledgeProject = Join-Path $testRoot 'knowledge-project'
+    $null = New-Item -ItemType Directory -Path $knowledgeProject
+    $knowledgeSource = Join-Path $knowledgeProject 'decision.md'
+    'Keep final integration in the main agent.' |
+        Set-Content -LiteralPath $knowledgeSource -Encoding utf8
+    $knowledgeManager = Join-Path $scriptRoot 'Manage-ProjectKnowledge.ps1'
+    $knowledgeInit = & $knowledgeManager -Action Initialize `
+        -ProjectRoot $knowledgeProject | ConvertFrom-Json
+    Assert-True $knowledgeInit.initialized (
+        'Durable project knowledge should initialize explicitly.'
+    )
+    $knowledgeEntry = & $knowledgeManager -Action Adopt `
+        -ProjectRoot $knowledgeProject -Id 'decision-main-integration' `
+        -Type 'decision' -Summary 'Keep final integration in the main agent.' `
+        -Tags @('ownership', 'integration') `
+        -SourceRefs @('path:decision.md') | ConvertFrom-Json
+    Assert-True ($knowledgeEntry.status -eq 'adopted') (
+        'The main agent should be able to adopt a sourced knowledge entry.'
+    )
+    $knowledgeFind = & $knowledgeManager -Action Find `
+        -ProjectRoot $knowledgeProject -Query 'ownership' -Limit 5 |
+        ConvertFrom-Json
+    Assert-True ($knowledgeFind.count -eq 1) (
+        'Knowledge lookup should return the selected adopted entry.'
+    )
+    'Changed source.' | Set-Content -LiteralPath $knowledgeSource -Encoding utf8
+    $knowledgeStale = & $knowledgeManager -Action Validate `
+        -ProjectRoot $knowledgeProject -RefreshStale | ConvertFrom-Json
+    Assert-True (-not $knowledgeStale.valid) (
+        'A changed local source should make project knowledge stale.'
+    )
+    $knowledgeAfterStale = & $knowledgeManager -Action Find `
+        -ProjectRoot $knowledgeProject -Query 'ownership' -Limit 5 |
+        ConvertFrom-Json
+    Assert-True ($knowledgeAfterStale.count -eq 0) (
+        'Default lookup should exclude stale project knowledge.'
+    )
+
     $reconcileSummary = 'Review the candidate release.'
     $reconcileRun = Join-Path $testRoot 'thread-reconcile-run'
     $null = New-Item -ItemType Directory -Path $reconcileRun
@@ -1341,7 +1379,41 @@ try {
         ConvertFrom-Json -AsHashtable -Depth 100
     $crowdedFirstWave.nodes[1].wave = 1
     Assert-InvalidPlan $crowdedFirstWave 'crowded-first-wave' (
-        'Wave 1 may contain only one worker'
+        "must be in a later wave than dependency 'draft'"
+    )
+
+    $twoWorkerFirstWave = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $twoWorkerFirstWave.mode = 'team'
+    $twoWorkerFirstWave.nodes[1].wave = 1
+    $twoWorkerFirstWave.nodes[1].depends_on = @()
+    $twoWorkerFirstWave.nodes[1].context.inputs = @(
+        'source:independent-review-rules'
+    )
+    $twoWorkerFirstWave.nodes[2].depends_on = @('draft', 'review')
+    $twoWorkerPlanPath = Join-Path $testRoot 'two-worker-first-wave.json'
+    $twoWorkerFirstWave | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $twoWorkerPlanPath
+    $twoWorkerValid = & (
+        Join-Path $scriptRoot 'Test-OrchestrationPlan.ps1'
+    ) -PlanPath $twoWorkerPlanPath -WorkspaceRoot $skillRoot |
+        ConvertFrom-Json
+    Assert-True $twoWorkerValid.valid (
+        'Two ready Wave 1 workers with disjoint context should be valid.'
+    )
+
+    $missingMainOwner = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $missingMainOwner.nodes = @(
+        $missingMainOwner.nodes | Where-Object { $_.kind -ne 'main' }
+    )
+    $missingMainOwner.completion.required_nodes = @('draft', 'review')
+    $missingMainOwner.completion.evidence_checks = @(
+        $missingMainOwner.completion.evidence_checks |
+            Where-Object { $_.node_id -ne 'integrate' }
+    )
+    Assert-InvalidPlan $missingMainOwner 'missing-main-owner' (
+        'requires a substantive main-agent node'
     )
 
     $missingRoleActivation = Get-Content -LiteralPath $examplePath -Raw |
@@ -2051,7 +2123,9 @@ try {
         ConvertFrom-Json -AsHashtable -Depth 100
     $questionPlan.run_id = 'question-limit-001'
     $questionPlan.roles[0].question_policy.max_questions = 0
-    $questionPlan.nodes = @($questionPlan.nodes[0])
+    $questionMainNode = $questionPlan.nodes[2]
+    $questionMainNode.depends_on = @('draft')
+    $questionPlan.nodes = @($questionPlan.nodes[0], $questionMainNode)
     $questionPlan.completion.required_nodes = @('draft')
     $questionPlan.completion.evidence_checks = @(
         @{ node_id = 'draft'; minimum_entries = 1 }
@@ -2121,7 +2195,9 @@ try {
     $reusePlan = Get-Content -LiteralPath $examplePath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 100
     $reusePlan.run_id = 'reuse-thread-001'
-    $reusePlan.nodes = @($reusePlan.nodes[0])
+    $reuseMainNode = $reusePlan.nodes[2]
+    $reuseMainNode.depends_on = @('draft')
+    $reusePlan.nodes = @($reusePlan.nodes[0], $reuseMainNode)
     $reusePlan.nodes[0].context.session_policy = 'reuse'
     $reusePlan.nodes[0].context.max_prior_turns = 2
     $reusePlan.nodes[0].context.prior_thread_id = 'declared-prior-thread'
@@ -2162,7 +2238,12 @@ try {
     $boundReusePlan = Get-Content -LiteralPath $examplePath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 100
     $boundReusePlan.run_id = 'bound-reuse-001'
-    $boundReusePlan.nodes = @($boundReusePlan.nodes[0])
+    $boundReuseMainNode = $boundReusePlan.nodes[2]
+    $boundReuseMainNode.depends_on = @('draft')
+    $boundReusePlan.nodes = @(
+        $boundReusePlan.nodes[0],
+        $boundReuseMainNode
+    )
     $boundReusePlan.nodes[0].context.session_policy = 'reuse'
     $boundReusePlan.nodes[0].context.max_prior_turns = 2
     $boundReusePlan.nodes[0].context.prior_thread_id = 'test-thread-draft'
@@ -2191,7 +2272,12 @@ try {
     $freshRetryPlan = Get-Content -LiteralPath $examplePath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 100
     $freshRetryPlan.run_id = 'fresh-retry-001'
-    $freshRetryPlan.nodes = @($freshRetryPlan.nodes[0])
+    $freshRetryMainNode = $freshRetryPlan.nodes[2]
+    $freshRetryMainNode.depends_on = @('draft')
+    $freshRetryPlan.nodes = @(
+        $freshRetryPlan.nodes[0],
+        $freshRetryMainNode
+    )
     $freshRetryPlan.nodes[0].max_attempts = 2
     $freshRetryPlan.completion.required_nodes = @('draft')
     $freshRetryPlan.completion.evidence_checks = @(

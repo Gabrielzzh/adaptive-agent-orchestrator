@@ -1,12 +1,11 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.5.1 release notes](docs/releases/v0.5.1.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.6.0 release notes](docs/releases/v0.6.0.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
-`adaptive-agent-orchestrator` is a Codex Skill for reducing duplicated context
-and reasoning while coordinating genuinely independent workstreams. It uses a
-single-agent fast path, reference-first worker inputs, compact packets and
-handoffs, progressive dispatch, selective review, delta retry, isolated write
-ownership, and deterministic completion checks.
+`adaptive-agent-orchestrator` improves research, coding, writing, analysis,
+creative, and operational work. The main agent remains a core producer while
+bounded subagents or durable tasks isolate only the work that can be completed
+and verified with less context.
 
 The goal is lower total task Token use. Users do not configure a Token budget,
 and the Skill does not pretend it can predict the total cost of an open-ended
@@ -23,8 +22,12 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   project files are read only when a workstream needs them.
 - **Single-agent by default:** small, sequential, high-overlap, and narrow-edit
   tasks remain in the main agent.
-- **Progressive dispatch:** wave 1 contains one worker. Later workers require
-  an earlier validated result or disjoint context.
+- **Dynamic work ownership:** the main agent owns the global spine and final
+  integration, then re-evaluates delegation only at meaningful task events.
+- **Zero to two first-wave Workers:** dispatch none for simple work, one for
+  one isolated lane, or two only when both are ready and context-disjoint.
+- **Isolated context by default:** native subagents receive compact packets and
+  stable references rather than full inherited conversation history.
 - **Direct-worker fast path:** one temporary read-only worker does not require
   a durable plan, journal, stored role, or miniature lifecycle.
 - **Visible role activation:** every Worker is explained before creation and
@@ -46,8 +49,12 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   registry only when multiple downstream workstreams will reuse it.
 - **On-demand professional roles:** built-in industry role packs expose only
   the selected contract and can expand without bloating every Worker prompt.
-- **Manuscript co-authorship:** methods and domain specialists can own bounded
-  sections while the main agent preserves the argument spine and final voice.
+- **General producer ownership:** specialists may own bounded sections,
+  modules, investigations, datasets, or design surfaces while the main agent
+  preserves the global spine and final delivery.
+- **Lightweight project knowledge:** durable projects may reuse sourced
+  decisions, verified facts, interfaces, and unresolved risks; one-off work
+  creates no knowledge store.
 - **Explicit role lifetime:** task, project, and user-owned roles cannot be
   silently conflated; user-owned reusable roles are never auto-downgraded.
 - **Risk-based review:** low-risk work skips a reviewer; medium-risk work
@@ -95,6 +102,7 @@ skills/adaptive-agent-orchestrator/
 │   ├── context-efficiency.md
 │   ├── evaluation.md
 │   ├── example-plan.json
+│   ├── project-knowledge.md
 │   ├── role-pack-catalog.json
 │   ├── role-system.md
 │   ├── roles-creative-production.json
@@ -108,6 +116,7 @@ skills/adaptive-agent-orchestrator/
     ├── Add-OrchestrationEvent.ps1
     ├── Get-OrchestrationState.ps1
     ├── Get-AgentRolePreset.ps1
+    ├── Manage-ProjectKnowledge.ps1
     ├── New-AgentRole.ps1
     ├── New-OrchestrationRun.ps1
     ├── New-RoleActivationPreview.ps1
@@ -177,7 +186,7 @@ replace the official feature.
 | --- | --- | --- |
 | One-off delegation | Built in and simpler | Stays out of the way |
 | Context selection | Controller judgment | Reference-first inputs, exclusions, overlap check |
-| Dispatch timing | Prompt-driven | One-worker first wave, validated-result dependency |
+| Dispatch timing | Prompt-driven | Dynamic ownership, zero to two independent first-wave Workers |
 | Review | Controller judgment | Risk-only or sampled; no default reviewer ensemble |
 | Retry | Session-dependent | Delta repair packet and failure-class rules |
 | Write ownership | Prompt/sandbox dependent | Rejects overlapping writer scopes |
@@ -193,13 +202,13 @@ when coordination itself creates risk or repeated context.
 ```text
 request
    ↓
-single-agent fast path unless workstreams are independent
+main agent claims the global spine and productive work
    ↓
-reference-first plan + context-overlap check
+find independently checkable work that needs less context
    ↓
-one worker in wave 1
+start zero to two context-disjoint first-wave Workers
    ↓
-validate evidence/artifact
+main agent keeps producing and validates Worker evidence
    ↓
 optional later wave only when it adds new accepted value
    ↓
@@ -214,11 +223,11 @@ state, integrates results, and performs authorized external actions.
 
 ## Validation
 
-The v0.5.1 release passes:
+The v0.6.0 release passes:
 
-- PowerShell parser validation for all 21 scripts;
-- 464 self-test assertions;
-- 47 intentionally invalid negative-test plans correctly rejected;
+- PowerShell parser validation for all 22 scripts;
+- 472 self-test assertions;
+- 48 intentionally invalid negative-test plans correctly rejected;
 - plan, metadata, journal, handoff, dependency, idempotency, ownership,
   context-overlap, progressive-dispatch, short-packet, and completion tests;
 - a synthetic single-case benchmark test.
