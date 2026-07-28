@@ -207,7 +207,7 @@ state, integrates results, and performs authorized external actions.
 The v0.7.1 release passes:
 
 - PowerShell parser validation for all 28 scripts;
-- 535 self-test assertions;
+- 536 self-test assertions;
 - 50 intentionally invalid negative-test plans correctly rejected;
 - plan, metadata, journal, handoff, dependency, idempotency, ownership,
   context-overlap, progressive-dispatch, short-packet, durable-task selection,

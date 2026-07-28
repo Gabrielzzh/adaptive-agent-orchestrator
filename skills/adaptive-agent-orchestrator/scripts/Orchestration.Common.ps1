@@ -416,7 +416,7 @@ function Read-ThreadReconciliationReceipt {
             }
         }
         if ($snapshotTimes.Count -lt 2 -or
-            ($snapshotTimes[-1] - $snapshotTimes[0]).TotalSeconds -lt 5 -or
+            ($snapshotTimes[-1] - $snapshotTimes[0]).TotalSeconds -lt 40 -or
             $snapshotTimes[-1] -lt $windowEnd -or
             $hasMatchingThread) {
             throw 'Thread reconciliation no-match is not supported by its input.'

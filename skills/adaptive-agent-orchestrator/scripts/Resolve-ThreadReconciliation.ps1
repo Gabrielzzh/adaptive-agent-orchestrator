@@ -6,7 +6,7 @@ param(
     [Parameter(Mandatory)]
     [string] $OutputPath,
 
-    [ValidateRange(5, 300)]
+    [ValidateRange(40, 300)]
     [int] $MinVisibilityDelaySeconds = 40
 )
 

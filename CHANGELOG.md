@@ -19,6 +19,9 @@ Durable-task and worktree lifecycle correction.
   never silently inherit the main agent's model when a worker model is absent.
 - Add immutable task-level outcome receipts for successful completion and
   creation, model, worktree, conflict, timeout, and review fallbacks.
+- Enforce the 40-second task-list visibility floor in reconciliation generation
+  and receipt verification so a caller-supplied short window cannot authorize
+  a duplicate durable-task retry.
 
 ## 0.7.0 - 2026-07-27
 

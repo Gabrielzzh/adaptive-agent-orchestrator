@@ -379,13 +379,21 @@ try {
                 Join-Path $reconcileRun 'receipts/unsafe-delay.thread-reconciliation.json'
             ) -MinVisibilityDelaySeconds 1 | Out-Null
     } 'MinVisibilityDelaySeconds' (
-        'The visibility delay may be increased but must never be reduced below five seconds.'
+        'The visibility delay may be increased but must never be reduced below forty seconds.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1') `
+            -InputPath $endedEmptyPath -OutputPath (
+                Join-Path $reconcileRun 'receipts/long-delay.thread-reconciliation.json'
+            ) -MinVisibilityDelaySeconds 15 | Out-Null
+    } 'MinVisibilityDelaySeconds' (
+        'A fifteen-second no-match window must not override the Codex safety floor.'
     )
     $longDelayResult = & (
         Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1'
     ) -InputPath $endedEmptyPath -OutputPath (
         Join-Path $reconcileRun 'receipts/long-delay.thread-reconciliation.json'
-    ) -MinVisibilityDelaySeconds 15 | ConvertFrom-Json -Depth 20
+    ) -MinVisibilityDelaySeconds 60 | ConvertFrom-Json -Depth 20
     Assert-True ($longDelayResult.decision -eq 'no_match') (
         'A longer platform visibility delay should remain supported.'
     )
