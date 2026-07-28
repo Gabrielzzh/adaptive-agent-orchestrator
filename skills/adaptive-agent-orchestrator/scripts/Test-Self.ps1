@@ -312,6 +312,51 @@ try {
         'A successful create call with a returned task ID must never be ' +
         'converted into no_match merely because list visibility is delayed.'
     )
+    $queuedSetup = Get-Content -LiteralPath $doubleEmptyPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 20
+    $queuedSetup.create_call.status = 'success'
+    $queuedSetup.create_call.returned_thread_id = $null
+    $queuedSetup.create_call.client_thread_id = 'queued-worktree-client-1'
+    $queuedSetupPath = Join-Path $reconcileRun (
+        'thread-reconcile-queued-setup.json'
+    )
+    $queuedSetup | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $queuedSetupPath
+    $queuedSetupResult = & (
+        Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1'
+    ) -InputPath $queuedSetupPath -OutputPath (
+        Join-Path $reconcileRun (
+            'receipts/queued-setup.thread-reconciliation.json'
+        )
+    ) | ConvertFrom-Json -Depth 20
+    Assert-True (
+        $queuedSetupResult.decision -eq 'setup_pending' -and
+        $queuedSetupResult.returned_thread_id -eq $null -and
+        $queuedSetupResult.returned_client_thread_id -eq
+            'queued-worktree-client-1'
+    ) 'A clientThreadId alone must remain setup_pending, not materialized.'
+    $queuedEnded = Get-Content -LiteralPath $queuedSetupPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 20
+    $queuedEnded.snapshots[1].captured_at = '2026-07-20T00:02:00Z'
+    $queuedEndedPath = Join-Path $reconcileRun (
+        'thread-reconcile-queued-setup-ended.json'
+    )
+    $queuedEnded | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $queuedEndedPath
+    $queuedEndedResult = & (
+        Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1'
+    ) -InputPath $queuedEndedPath -OutputPath (
+        Join-Path $reconcileRun (
+            'receipts/queued-setup-ended.thread-reconciliation.json'
+        )
+    ) | ConvertFrom-Json -Depth 20
+    Assert-True (
+        $queuedEndedResult.decision -eq 'setup_failed_or_unresolved' -and
+        $queuedEndedResult.decision -ne 'no_match'
+    ) (
+        'A queued worktree that never materializes must not authorize a ' +
+        'blind replacement task.'
+    )
     $tooFastEmpty = Get-Content -LiteralPath $doubleEmptyPath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 20
     $tooFastEmpty.snapshots[1].captured_at = '2026-07-20T00:00:10.001Z'
@@ -401,7 +446,7 @@ try {
     $calibrationAdd = & $calibrationScript -Action Add `
         -ProjectRoot $calibrationProject -RunDirectory $reconcileRun `
         -MinWindowUsed 20 -AppVersion '26.7.26' -HostKind 'desktop' `
-        -ExecutionMode local -PolicyVersion '0.7.0' |
+        -ExecutionMode local -PolicyVersion '0.7.1' |
         ConvertFrom-Json -Depth 30
     Assert-True (
         $verifiedReceiptCount -gt 0 -and
@@ -424,7 +469,7 @@ try {
     $calibrationRepeat = & $calibrationScript -Action Add `
         -ProjectRoot $calibrationProject -RunDirectory $reconcileRun `
         -MinWindowUsed 20 -AppVersion '26.7.26' -HostKind 'desktop' `
-        -ExecutionMode local -PolicyVersion '0.7.0' |
+        -ExecutionMode local -PolicyVersion '0.7.1' |
         ConvertFrom-Json -Depth 30
     Assert-True (
         $calibrationRepeat.added -eq 0 -and
@@ -443,7 +488,7 @@ try {
         & $calibrationScript -Action Add -ProjectRoot $calibrationProject `
             -RunDirectory $reconcileRun -AppVersion '26.7.26' `
             -HostKind 'desktop' -ExecutionMode local `
-            -PolicyVersion '0.7.0' | Out-Null
+            -PolicyVersion '0.7.1' | Out-Null
     } 'hash mismatch' 'Calibration must reject a tampered receipt.'
     Set-Content -LiteralPath $adoptedReceiptPath -Value $adoptedReceiptRaw
 
@@ -465,7 +510,7 @@ try {
             app_version = '26.7.26'
             host_kind = 'desktop'
             execution_mode = 'local'
-            policy_version = '0.7.0'
+            policy_version = '0.7.1'
         } | ConvertTo-Json -Compress))
     }
     $seedCalibrationLines.Add(([ordered]@{
@@ -678,13 +723,99 @@ try {
         $workflowPreset.limits.transient_reserved_slots -eq 2
     ) 'Runtime capacity should clamp the 4+2 target without hiding transient reserve.'
 
+    $surfaceScript = Join-Path $scriptRoot 'Resolve-CodexExecutionSurface.ps1'
+    $durableProposal = & $surfaceScript -Independent -Bounded `
+        -IndependentlyCheckable -MateriallySmallerContext -ReadOnly |
+        ConvertFrom-Json
+    Assert-True (
+        $durableProposal.surface -eq 'durable-task-proposal' -and
+        $durableProposal.requires_user_confirmation
+    ) (
+        'An independent cost-beneficial workstream should proactively propose ' +
+        'a durable task instead of silently staying in the main agent.'
+    )
+    $lowerCostProposal = & $surfaceScript -Independent -Bounded `
+        -IndependentlyCheckable -LowerCostModelAvailable -ReadOnly |
+        ConvertFrom-Json
+    Assert-True (
+        $lowerCostProposal.surface -eq 'durable-task-proposal'
+    ) (
+        'A lower-cost independently checkable lane should qualify even when ' +
+        'context size alone is not the benefit.'
+    )
+    $explicitLocalThread = & $surfaceScript -Independent -Bounded `
+        -IndependentlyCheckable -MateriallySmallerContext -ReadOnly `
+        -ExplicitThreadRequest | ConvertFrom-Json
+    Assert-True (
+        $explicitLocalThread.surface -eq 'durable-local-task' -and
+        $explicitLocalThread.action -eq 'create-durable-local'
+    ) 'An explicit read-only thread request must not become a native subagent.'
+    $temporaryNative = & $surfaceScript -Independent -Bounded `
+        -IndependentlyCheckable -MateriallySmallerContext -ReadOnly `
+        -TemporaryOnly | ConvertFrom-Json
+    Assert-True ($temporaryNative.surface -eq 'native-subagent') (
+        'Temporary read-only work may use a native subagent when durable ' +
+        'history is not useful.'
+    )
+    $explicitWriterNeedsPreflight = & $surfaceScript -Independent -Bounded `
+        -IndependentlyCheckable -MateriallySmallerContext `
+        -ExplicitThreadRequest | ConvertFrom-Json
+    Assert-True (
+        $explicitWriterNeedsPreflight.surface -eq 'worktree-preflight-required'
+    ) 'An independent durable writer must require worktree preflight.'
+
+    $unbornRepo = Join-Path $testRoot 'unborn-repo'
+    $null = New-Item -ItemType Directory -Path $unbornRepo
+    & git -C $unbornRepo init --quiet
+    if ($LASTEXITCODE -ne 0) { throw 'Unable to initialize unborn Git fixture.' }
+    'untracked' | Set-Content -LiteralPath (Join-Path $unbornRepo 'draft.txt')
+    $unbornPreflight = & (
+        Join-Path $scriptRoot 'Test-CodexWorktreePreflight.ps1'
+    ) -WorkspaceRoot $unbornRepo -RequiresIndependentWrite | ConvertFrom-Json
+    Assert-True (
+        $unbornPreflight.is_git_repository -and
+        -not $unbornPreflight.has_usable_head -and
+        -not $unbornPreflight.worktree_eligible -and
+        $unbornPreflight.recommended_environment -eq 'main-agent'
+    ) 'An unborn Git branch must be rejected for worktree creation.'
+    $readOnlyPreflight = & (
+        Join-Path $scriptRoot 'Test-CodexWorktreePreflight.ps1'
+    ) -WorkspaceRoot $unbornRepo | ConvertFrom-Json
+    Assert-True (
+        $readOnlyPreflight.recommended_environment -eq 'local'
+    ) 'Read-only durable work may fall back to the saved local project.'
+
+    & git -C $unbornRepo config user.email 'test@example.invalid'
+    & git -C $unbornRepo config user.name 'AAO Test'
+    & git -C $unbornRepo add -- draft.txt
+    & git -C $unbornRepo commit --quiet -m baseline
+    if ($LASTEXITCODE -ne 0) { throw 'Unable to commit Git preflight fixture.' }
+    $eligiblePreflight = & (
+        Join-Path $scriptRoot 'Test-CodexWorktreePreflight.ps1'
+    ) -WorkspaceRoot $unbornRepo -RequiresIndependentWrite | ConvertFrom-Json
+    Assert-True (
+        $eligiblePreflight.has_usable_head -and
+        $eligiblePreflight.worktree_eligible -and
+        $eligiblePreflight.recommended_environment -eq 'worktree' -and
+        $eligiblePreflight.preflight_hash -match '^[0-9a-f]{64}$'
+    ) 'A committed Git repository should pass writer worktree preflight.'
+
     $modelIds = @('gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra')
     $economyModel = & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
         -Capability economy -AvailableModelIds $modelIds | ConvertFrom-Json
     Assert-True (
         $economyModel.model -eq 'gpt-5.6-luna' -and
-        $economyModel.effort -eq 'medium'
+        $economyModel.effort -eq 'medium' -and
+        -not $economyModel.inherits_main_agent_model
     ) 'Economy should resolve to Luna medium.'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+            -Capability economy -AvailableModelIds @('gpt-5.6-sol') |
+            Out-Null
+    } 'never inherit the main-agent model silently' (
+        'An unavailable economy model must fall back to main or user choice, ' +
+        'not silently inherit the expensive main model.'
+    )
     $standardModel = & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
         -Capability standard -AvailableModelIds $modelIds | ConvertFrom-Json
     Assert-True ($standardModel.model -eq 'gpt-5.6-sol') (
@@ -1143,7 +1274,7 @@ try {
     ) -RunDirectory $runDirectory -SkillRoot $skillRoot |
         ConvertFrom-Json -Depth 100
     Assert-True (
-        [string]$measureReport.policy_version -eq '0.7.0' -and
+        [string]$measureReport.policy_version -eq '0.7.1' -and
         @($measureReport.result_receipts).Count -ge 1
     ) (
         'Measure-OrchestrationRun must report the run policy version and receipts.'
@@ -2636,6 +2767,75 @@ try {
     Assert-True $completion.complete (
         'Completion gate should pass only after nodes, artifacts, and evidence pass.'
     )
+    $taskReceiptPath = Join-Path $runDirectory (
+        'receipts/final.task-completion-receipt.json'
+    )
+    $taskReceipt = & (
+        Join-Path $scriptRoot 'New-OrchestrationTaskReceipt.ps1'
+    ) -RunDirectory $runDirectory -Outcome completed `
+        -Summary 'All required nodes and artifacts passed acceptance.' `
+        -OutputPath $taskReceiptPath | ConvertFrom-Json -Depth 20
+    $verifiedTaskReceipt = Read-OrchestrationTaskReceipt `
+        -Path $taskReceiptPath -RunDirectory $runDirectory
+    Assert-True (
+        $taskReceipt.outcome -eq 'completed' -and
+        $verifiedTaskReceipt.receipt_hash -eq $taskReceipt.receipt_hash
+    ) 'A completed durable run must produce a verifiable task-level receipt.'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-OrchestrationTaskReceipt.ps1') `
+            -RunDirectory $runDirectory -Outcome completed `
+            -Summary 'duplicate outcome' -OutputPath (
+                Join-Path $runDirectory (
+                    'receipts/duplicate.task-completion-receipt.json'
+                )
+            ) | Out-Null
+    } 'already exists for this run' (
+        'A durable run must not produce multiple competing task-level outcomes.'
+    )
+    $taskReceiptOriginal = Get-Content -LiteralPath $taskReceiptPath -Raw
+    $taskReceiptTampered = $taskReceiptOriginal |
+        ConvertFrom-Json -AsHashtable -Depth 20
+    $taskReceiptTampered.summary = 'silently changed outcome'
+    $taskReceiptTampered | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $taskReceiptPath
+    Assert-ThrowsLike {
+        Read-OrchestrationTaskReceipt -Path $taskReceiptPath `
+            -RunDirectory $runDirectory | Out-Null
+    } 'receipt hash mismatch' (
+        'A changed task-level outcome receipt must be rejected.'
+    )
+    Set-Content -LiteralPath $taskReceiptPath `
+        -Value $taskReceiptOriginal -NoNewline
+
+    $fallbackClasses = @(
+        'creation-failed', 'model-unavailable', 'worktree-preflight-failed',
+        'write-conflict', 'timeout-no-result', 'independent-review-failed'
+    )
+    foreach ($failureClass in $fallbackClasses) {
+        $fallbackRun = Join-Path $testRoot (
+            'fallback-run-' + $failureClass
+        )
+        & (Join-Path $scriptRoot 'New-OrchestrationRun.ps1') `
+            -PlanPath $examplePath -RunDirectory $fallbackRun `
+            -WorkspaceRoot $skillRoot | Out-Null
+        $fallbackReceiptPath = Join-Path $fallbackRun (
+            "receipts/$failureClass.task-completion-receipt.json"
+        )
+        $fallbackReceipt = & (
+            Join-Path $scriptRoot 'New-OrchestrationTaskReceipt.ps1'
+        ) -RunDirectory $fallbackRun -Outcome fallback-main `
+            -FailureClass $failureClass `
+            -FallbackAction 'Main agent retains ownership and reports the boundary.' `
+            -Summary "Fallback recorded for $failureClass." `
+            -Evidence @("observation:$failureClass") `
+            -OutputPath $fallbackReceiptPath | ConvertFrom-Json -Depth 20
+        $verifiedFallback = Read-OrchestrationTaskReceipt `
+            -Path $fallbackReceiptPath -RunDirectory $fallbackRun
+        Assert-True (
+            $fallbackReceipt.failure_class -eq $failureClass -and
+            $verifiedFallback.outcome -eq 'fallback-main'
+        ) "Failure class '$failureClass' must produce a verifiable fallback receipt."
+    }
 
     $tamperedPlanRun = Join-Path $testRoot 'tampered-plan-run'
     & (Join-Path $scriptRoot 'New-OrchestrationRun.ps1') `
@@ -2950,6 +3150,10 @@ try {
         industry_role_packs_verified = $true
         calibration_ledger_verified = $true
         dispatch_preview_verified = $true
+        execution_surface_verified = $true
+        worktree_preflight_verified = $true
+        queued_setup_verified = $true
+        task_completion_receipt_verified = $true
     } | ConvertTo-Json -Depth 5
 }
 finally {

@@ -156,7 +156,11 @@ if (-not $AvailableModelIds) {
     }
 }
 if ($model -notin $AvailableModelIds) {
-    throw "Selected model '$model' is unavailable in the current runtime."
+    throw (
+        "Selected model '$model' is unavailable in the current runtime. " +
+        'Keep the node in the main agent or ask the user to authorize an ' +
+        'available model; never inherit the main-agent model silently.'
+    )
 }
 if ($supportedEfforts -and $resolvedEffort -notin $supportedEfforts) {
     throw "Model '$model' does not support effort '$resolvedEffort'."
@@ -198,6 +202,13 @@ if (($UserConfirmedEscalation -or $UserConfirmedUltra) -and
     authorization_evidence = if ($AuthorizationEvidence) {
         $AuthorizationEvidence
     } else { $null }
+    selection_source = if ($RequestedModel) {
+        'explicit-request'
+    } else {
+        'capability-default-verified-available'
+    }
+    inherits_main_agent_model = $false
+    unavailable_model_fallback = 'main-agent-or-user-authorized-available-model'
     reason = switch ($Capability) {
         'economy' { 'bounded mechanical work' }
         'standard' { 'ordinary judgment, drafting, implementation, or testing' }

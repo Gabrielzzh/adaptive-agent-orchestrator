@@ -47,6 +47,26 @@ When thread tools are available:
 - collect primarily with `read_thread`;
 - use `wait_threads` only as an optional bounded wait optimization.
 
+If the user says `thread`, first resolve whether they mean this user-owned,
+sidebar-visible task or merely an internal temporary worker. A request for
+independent history, direct follow-up, long-lived role ownership, or a visible
+task is unambiguously a user-owned Codex task and must not be downgraded to a
+native subagent.
+
+For a project task, choose the environment in this order:
+
+1. independent writer or branch delivery: worktree, after
+   `Test-CodexWorktreePreflight.ps1` confirms a Git repository and usable HEAD;
+2. read-only durable research over a shared saved snapshot: local project;
+3. temporary read-only work without useful independent history: native
+   subagent;
+4. non-Git or unborn-branch writer: main agent, or stop for a user-approved Git
+   baseline.
+
+`startingState=working-tree` may include uncommitted state but cannot replace a
+base commit. One writer owns each path. If multiple local tasks would write the
+same or overlapping paths, stop or switch to isolated worktrees.
+
 If thread tools are unavailable, do not simulate a durable task with repeated
 native subagents. Keep durable state in project artifacts and continue in the
 main agent, or ask the user whether to create a separate task when that
@@ -102,6 +122,13 @@ miss is normal and never authorizes a retry.
 A confirmed no-match retry uses a new attempt activation key. Never retry by
 switching project scope or by editing Codex internal state stores.
 
+A queued worktree response with only `clientThreadId` is `setup_pending`, not a
+materialized task. It cannot be passed to `read_thread` or `wait_threads` and
+does not count as a live Worker. Reconcile `list_threads` for the eventual real
+task ID. Because the current platform exposes no client-ID setup-status reader,
+a bounded observation window with no matching task becomes
+`setup_failed_or_unresolved`; it never authorizes blind duplicate creation.
+
 ## Result collection
 
 Background tasks do not push results into the parent automatically. Register
@@ -117,3 +144,8 @@ intervals unless the node declares another cadence. Prefer `wait_threads` when
 its handler is available, but collect final evidence with `read_thread`. Do not
 stream unchanged snapshots into the parent context, and do not interpret
 silence as completion.
+
+At durable-run termination, use `New-OrchestrationTaskReceipt.ps1`. Record
+`completed` only after the deterministic completion gate passes. Otherwise
+record `fallback-main`, `blocked`, or `cancelled` with a supported failure class
+and a concrete fallback action.

@@ -28,6 +28,13 @@ checkable result, and either runs alongside useful main-agent work or provides
 a necessary independent view. Do not use a scoring model or create a Router
 Agent for this decision.
 
+When those conditions hold, do not default to keeping the expensive main model
+on every workstream. Proactively recommend a user-owned durable task when its
+separate history, lower-cost model, or reusable context is valuable. Creation
+still requires the user's explicit thread request or confirmation because a
+durable Codex task is visible and user-owned. Use
+`Resolve-CodexExecutionSurface.ps1` to keep this decision consistent.
+
 Reconsider ownership only when scope changes, a new independent workstream
 appears, an adopted result opens a dependency, a Worker fails or blocks,
 context must rotate, or a high-risk quality gate begins. Choose one action:
@@ -43,6 +50,11 @@ write ownership, cross-turn reuse, or an approval gate actually needs it.
 The direct worker has no persistent role ID, project attachment, or pin. If the
 user asks for a named, reusable, project, or persistent role, use the durable
 role path instead.
+
+Treat `thread` as a product term when the user asks for a sidebar-visible task,
+independent history, direct follow-up, or long-lived ownership. Do not replace
+that request with a native subagent. If `thread` may only mean internal
+parallelism, explain the two execution surfaces before creating either one.
 
 Load references only when their path is active:
 
@@ -124,6 +136,13 @@ record it with `New-ThreadResultReceipt.ps1` before integration. Follow the
 exact tool, marker, collection, and failure rules in
 [platform-codex.md](references/platform-codex.md) and
 [safety-and-lifecycle.md](references/safety-and-lifecycle.md).
+
+A worktree task requires a verified Git repository and usable `HEAD`. Run
+`Test-CodexWorktreePreflight.ps1` before the creation call. An unborn branch or
+non-Git directory cannot support a worktree writer. Read-only durable research
+may use the saved local project; independent writers need one owner per write
+scope and must stop for a user-approved Git baseline when worktree isolation is
+unavailable.
 
 Use industry role packs only when a professional responsibility would improve
 the result. First list the compact catalog, then load only the selected
@@ -229,6 +248,11 @@ explicit-request-only. Before any model or effort escalation, explain the
 change and obtain user confirmation unless a bounded policy already authorizes
 it. Ultra always needs explicit per-node confirmation.
 
+Never silently inherit the main agent's model. Resolve only models exposed by
+the destination runtime. If the capability default is unavailable, keep the
+work in the main agent or ask the user to authorize an exposed substitute;
+record `model-unavailable` in the final task receipt.
+
 ## Execute progressively
 
 1. Start zero Workers when the main agent is more efficient. Start one when one
@@ -281,6 +305,13 @@ the task result, not internal orchestration traffic. Expose adopted/rejected
 findings, retries, thread disposition, or measured usage only when the user
 asks, they affect confidence, an unresolved risk remains, or user action is
 required.
+
+For a durable run, write one immutable task-level outcome with
+`New-OrchestrationTaskReceipt.ps1`. A successful receipt is allowed only after
+the completion gate passes. A fallback or blocked receipt records the failure
+class, evidence, and next action for creation failure, model unavailability,
+worktree preflight failure, write conflict, timeout/no result, or failed
+independent review.
 
 Use [evaluation.md](references/evaluation.md) only while developing or
 benchmarking this Skill. Do not load it during ordinary user work.

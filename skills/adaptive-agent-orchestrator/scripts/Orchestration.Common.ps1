@@ -38,6 +38,54 @@ function Get-OrchestrationEventHash {
     return Get-TextSha256 ($payload | ConvertTo-Json -Compress -Depth 10)
 }
 
+function Read-OrchestrationTaskReceipt {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $RunDirectory
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Task completion receipt does not exist: $Path"
+    }
+    $receipt = Get-Content -LiteralPath $Path -Raw |
+        ConvertFrom-Json -Depth 30 -DateKind String
+    $payload = [ordered]@{}
+    foreach ($name in @(
+        'schema_version', 'run_id', 'plan_hash', 'journal_head', 'outcome',
+        'completed_at_utc', 'summary', 'failure_class', 'fallback_action',
+        'evidence'
+    )) {
+        if ($null -eq $receipt.PSObject.Properties[$name]) {
+            throw "Task completion receipt is missing '$name'."
+        }
+        $payload[$name] = $receipt.$name
+    }
+    $expectedHash = Get-TextSha256 (
+        $payload | ConvertTo-Json -Compress -Depth 20
+    )
+    if ([string]$receipt.receipt_hash -ne $expectedHash) {
+        throw 'Task completion receipt hash mismatch.'
+    }
+    $runPath = Join-Path $RunDirectory 'run.json'
+    if (-not (Test-Path -LiteralPath $runPath -PathType Leaf)) {
+        throw 'Task completion receipt run metadata is missing.'
+    }
+    $run = Get-Content -LiteralPath $runPath -Raw |
+        ConvertFrom-Json -Depth 20 -DateKind String
+    $state = & (Join-Path $PSScriptRoot 'Get-OrchestrationState.ps1') `
+        -RunDirectory $RunDirectory | ConvertFrom-Json -Depth 100
+    if ([string]$receipt.run_id -ne [string]$run.run_id -or
+        [string]$receipt.plan_hash -ne [string]$run.plan_hash -or
+        [string]$receipt.journal_head -ne [string]$state.journal_head) {
+        throw 'Task completion receipt does not match the current run.'
+    }
+    if ([string]$receipt.outcome -eq 'completed') {
+        $null = & (Join-Path $PSScriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $RunDirectory
+    }
+    return $receipt
+}
+
 function Read-OrchestrationJournal {
     param([Parameter(Mandatory)][string] $EventsPath)
     $events = @(
@@ -284,6 +332,7 @@ function Read-ThreadReconciliationReceipt {
         window_end_utc = [string]$receipt.window_end_utc
         create_call_status = [string]$receipt.create_call_status
         returned_thread_id = $receipt.returned_thread_id
+        returned_client_thread_id = $receipt.returned_client_thread_id
         snapshot_count = [int]$receipt.snapshot_count
         visibility_delay_seconds = [double]$receipt.visibility_delay_seconds
         snapshot_captured_at = @($receipt.snapshot_captured_at)

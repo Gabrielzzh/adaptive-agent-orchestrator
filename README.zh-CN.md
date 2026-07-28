@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[English](README.md) · [v0.7.0 正式版说明](docs/releases/v0.7.0.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+[English](README.md) · [v0.7.1 正式版说明](docs/releases/v0.7.1.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
 
 ![Adaptive Agent Orchestrator v0.7.0 发布图](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -23,6 +23,9 @@
   真正需要时读取。
 - **默认单 Agent：** 小任务、强顺序、高上下文重叠和窄范围修改留在主
   Agent。
+- **值得时使用长期任务：** 独立、有边界、可验收，且能使用更小上下文或
+  更低成本模型的工作会主动建议创建可见的 Codex 长期任务，而不是静默留在
+  昂贵的主上下文中。
 - **动态工作所有权：** 主 Agent负责全局主线与最终整合；任务入口和关键
   事件点重新判断哪些工作自己做、临时委派、长期负责、暂缓或停止。
 - **0–2 个首波 Worker：** 简单任务不派；一个独立工作面派一个；两个同时
@@ -182,13 +185,14 @@ $adaptive-agent-orchestrator。共享上下文留在主 Agent，Worker 只拿引
 
 ## 验证情况
 
-v0.7.0 正式版本通过：
+v0.7.1 正式版本通过：
 
-- 25 个 PowerShell 脚本语法解析；
-- 515 项自测断言；
+- 28 个 PowerShell 脚本语法解析；
+- 535 项自测断言；
 - 50 份故意构造的非法负面测试计划均被正确拦截；
 - 计划、元数据、日志、handoff、依赖、幂等、所有权、上下文重叠、渐进
-  派遣、短任务包和完成门测试；
+  派遣、短任务包、长期任务选择、排队创建、worktree 预检、任务收据和
+  完成门测试；
 - 严格 JSON 解析与真实 Windows Junction/reparse point 实体测试；
 - 一个合成的单案例 benchmark 测试。
 

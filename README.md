@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.7.0 release notes](docs/releases/v0.7.0.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.7.1 release notes](docs/releases/v0.7.1.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -24,6 +24,9 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   project files are read only when a workstream needs them.
 - **Single-agent by default:** small, sequential, high-overlap, and narrow-edit
   tasks remain in the main agent.
+- **Durable work when it pays:** independent, bounded, checkable work that can
+  use smaller context or a lower-cost model is proposed as a visible durable
+  Codex task instead of silently staying in the expensive main context.
 - **Dynamic work ownership:** the main agent owns the global spine and final
   integration, then re-evaluates delegation only at meaningful task events.
 - **Zero to two first-wave Workers:** dispatch none for simple work, one for
@@ -201,13 +204,14 @@ state, integrates results, and performs authorized external actions.
 
 ## Validation
 
-The v0.7.0 release passes:
+The v0.7.1 release passes:
 
-- PowerShell parser validation for all 25 scripts;
-- 515 self-test assertions;
+- PowerShell parser validation for all 28 scripts;
+- 535 self-test assertions;
 - 50 intentionally invalid negative-test plans correctly rejected;
 - plan, metadata, journal, handoff, dependency, idempotency, ownership,
-  context-overlap, progressive-dispatch, short-packet, and completion tests;
+  context-overlap, progressive-dispatch, short-packet, durable-task selection,
+  queued setup, worktree preflight, task receipt, and completion tests;
 - strict JSON parsing and a real Windows Junction/reparse-point fixture;
 - a synthetic single-case benchmark test.
 

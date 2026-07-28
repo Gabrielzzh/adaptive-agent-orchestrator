@@ -1,8 +1,8 @@
 # Release validation receipt
 
-Release: `0.7.0`
-Policy version: `0.7.0`
-Date: `2026-07-27`
+Release: `0.7.1`
+Policy version: `0.7.1`
+Date: `2026-07-28`
 
 ## Environment
 
@@ -36,8 +36,8 @@ python `
 ## Results
 
 - Exit code: 0
-- PowerShell scripts parsed: 25
-- Self-test assertions: 515 passed
+- PowerShell scripts parsed: 28
+- Self-test assertions: 535 passed
 - Intentional invalid-plan negative cases: 50 correctly rejected
 - Strict reference JSON files parsed: 7
 - Skill Creator validation: `Skill is valid!`
@@ -52,7 +52,9 @@ real-path boundaries, Worker packets, project knowledge control, lifecycle,
 journal recovery, handoff, completion gates, retry authorization,
 reconciliation calibration, non-materializing dispatch preview,
 Worker-packet injection of the output-as-data policy and provenance labels,
-and result-receipt verification before durable-task archive. The Worker-output
+result-receipt verification before durable-task archive, durable-task surface
+selection, usable-HEAD worktree preflight, queued worktree setup, model
+availability fallback, and task-level completion receipts. The Worker-output
 policy is enforced by main-agent review, not by parsing free-form text as a
 security sandbox.
 

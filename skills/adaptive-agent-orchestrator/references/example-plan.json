@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "policy_version": "0.7.0",
+  "policy_version": "0.7.1",
   "run_id": "example-review-001",
   "goal": "Draft and independently verify a bounded architecture proposal.",
   "constraints": [

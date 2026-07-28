@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.7.1 - 2026-07-28
+
+Durable-task and worktree lifecycle correction.
+
+- Treat explicit user requests for visible Codex threads as user-owned durable
+  tasks rather than silently substituting native subagents.
+- Proactively recommend durable tasks for bounded, independently checkable
+  workstreams that can use smaller context or a lower-cost model, while keeping
+  creation subject to explicit user authority.
+- Add deterministic execution-surface resolution for main-agent,
+  native-subagent, durable-local, and durable-worktree paths.
+- Add Git/HEAD/worktree preflight and safe local/main-agent fallbacks for
+  read-only, non-Git, unborn-branch, and isolated-writer cases.
+- Track queued `clientThreadId` worktree setup separately from materialized
+  `threadId`; unresolved setup never authorizes blind duplicate creation.
+- Make model selection capability-driven and runtime-availability checked;
+  never silently inherit the main agent's model when a worker model is absent.
+- Add immutable task-level outcome receipts for successful completion and
+  creation, model, worktree, conflict, timeout, and review fallbacks.
+
 ## 0.7.0 - 2026-07-27
 
 Major context-efficiency, delegation, and task-reliability release.

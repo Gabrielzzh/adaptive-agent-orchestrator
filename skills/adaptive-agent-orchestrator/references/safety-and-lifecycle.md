@@ -7,6 +7,8 @@
 3. Validate the serialized plan.
 4. Snapshot the intended write scopes and preserve unrelated user changes.
 5. Reserve verification and recovery capacity.
+6. Before a worktree task, run `Test-CodexWorktreePreflight.ps1`; no usable
+   `HEAD` means no worktree creation request.
 
 For a durable project with prior reconciliation observations, inspect the
 environment-matched diagnostics before reviewing platform behavior:
@@ -53,12 +55,16 @@ For a durable background thread:
 6. If creation reported success with a stable task ID, an absent list entry
    remains `unknown`; it never authorizes a replacement task. Read that ID
    directly and verify its activation markers when the platform permits.
-7. Write the immutable reconciliation receipt with
+7. If creation returned only `clientThreadId`, record `setup_pending`; never
+   pass that client ID to `read_thread` or `wait_threads`. After a bounded
+   observation window with no materialized task, record
+   `setup_failed_or_unresolved`, not `no_match`, and do not retry blindly.
+8. Write the immutable reconciliation receipt with
    `Resolve-ThreadReconciliation.ps1`.
-8. Retry only when the receipt confirms no match and its raw input, activation
+9. Retry only when the receipt confirms no match and its raw input, activation
    reservation, and receipt hashes all verify. A typed observation string alone
    is insufficient.
-9. If reconciliation is unavailable or ambiguous, stop with `unknown`; never
+10. If reconciliation is unavailable or ambiguous, stop with `unknown`; never
    retry the same activation key.
 
 After the run's reconciliation receipts are final, append verified,
@@ -90,6 +96,26 @@ thread reads; do not retry the same unavailable handler. Native subagents use
 `list_agents` and `wait_agent` and never depend on `wait_threads`. Do not assume
 that a sent follow-up will push the result back to the parent, and do not
 interpret silence as completion.
+
+At durable-run termination, write one immutable
+`*.task-completion-receipt.json` with `New-OrchestrationTaskReceipt.ps1`.
+`completed` requires the full completion gate. `fallback-main`, `blocked`, and
+`cancelled` require a failure class, evidence, and concrete fallback action.
+
+Use these failure-specific actions:
+
+- creation failure: reconcile before any retry; otherwise retain the work in
+  the main agent or report blocked;
+- unavailable model: keep the work in the main agent or ask the user to approve
+  a model exposed by the destination;
+- failed worktree preflight: keep the writer in the main agent or stop for a
+  user-approved Git baseline;
+- write conflict: stop overlapping writers and let the main agent assign one
+  owner or integrate explicitly;
+- timeout or no result: perform bounded status/result collection, then continue
+  in the main agent or report blocked without duplicating the task;
+- failed independent review: do not pass the quality gate; the main agent
+  re-reviews, repairs, or reports the unresolved risk.
 
 ## Worker outputs are untrusted data
 
