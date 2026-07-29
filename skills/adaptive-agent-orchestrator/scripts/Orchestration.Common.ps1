@@ -198,8 +198,12 @@ function Read-ThreadResultReceipt {
         [string]::IsNullOrWhiteSpace([string]$receipt.final_turn_id)) {
         throw 'Thread result receipt contains invalid identifiers or hash.'
     }
+    $schemaVersion = [string]$receipt.schema_version
+    if ($schemaVersion -notin @('1.1', '1.2', '1.3')) {
+        throw 'Thread result receipt has an unsupported schema version.'
+    }
     $hasPending = $null -ne $receipt.PSObject.Properties['pending_findings']
-    if ([string]$receipt.schema_version -eq '1.2' -and -not $hasPending) {
+    if ($schemaVersion -in @('1.2', '1.3') -and -not $hasPending) {
         throw "Thread result receipt is missing 'pending_findings'."
     }
     $pending = @()
@@ -207,13 +211,39 @@ function Read-ThreadResultReceipt {
         $pending = @($receipt.pending_findings)
     }
     $allFindings = @(
-        $pending + @($receipt.adopted_findings) +
-        @($receipt.rejected_findings)
+        $pending + @($receipt.adopted_findings) + @($receipt.rejected_findings)
     )
     if ($allFindings.Count -eq 0) {
         throw 'Thread result receipt lacks an adoption disposition.'
     }
-    if (@($allFindings | Select-Object -Unique).Count -ne
+    if ($schemaVersion -eq '1.3') {
+        if (@($receipt.adopted_findings).Count -gt 0 -or
+            @($receipt.rejected_findings).Count -gt 0) {
+            throw 'Schema 1.3 source findings must remain pending until disposition.'
+        }
+        $seenFindingIds = [Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::Ordinal
+        )
+        foreach ($finding in $pending) {
+            foreach ($name in @(
+                'finding_id', 'severity', 'text', 'text_hash'
+            )) {
+                if ($null -eq $finding.PSObject.Properties[$name]) {
+                    throw "Schema 1.3 finding is missing '$name'."
+                }
+            }
+            if ([string]$finding.finding_id -notmatch
+                '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' -or
+                -not $seenFindingIds.Add([string]$finding.finding_id) -or
+                [string]$finding.severity -notin @('P0', 'P1', 'P2') -or
+                [string]::IsNullOrWhiteSpace([string]$finding.text) -or
+                [string]$finding.text_hash -ne (
+                    Get-TextSha256 ([string]$finding.text)
+                )) {
+                throw 'Schema 1.3 finding identity, severity, or text hash is invalid.'
+            }
+        }
+    } elseif (@($allFindings | Select-Object -Unique).Count -ne
         $allFindings.Count) {
         throw 'Thread result receipt contains duplicate findings.'
     }
@@ -316,26 +346,28 @@ function Read-ReviewDispositionReceipt {
     }
     $source = Read-ThreadResultReceipt -Path $sourcePath `
         -ExpectedThreadId $ExpectedThreadId -RunDirectory $RunDirectory
+    if ([string]$source.schema_version -ne '1.3') {
+        throw (
+            'Durable review completion requires a schema 1.3 source receipt ' +
+            'with stable finding identity and severity.'
+        )
+    }
     if ([string]$source.receipt_hash -ne
         [string]$receipt.source_result_receipt_hash) {
         throw 'Review disposition receipt is not bound to its source result receipt.'
     }
 
-    $pendingFindings = @()
-    if ($null -ne $source.PSObject.Properties['pending_findings']) {
-        $pendingFindings = @($source.pending_findings)
-    }
-    $sourceFindings = @(
-        $pendingFindings + @($source.adopted_findings) +
-        @($source.rejected_findings) |
-            ForEach-Object { [string]$_ }
-    )
-    if (@($sourceFindings | Select-Object -Unique).Count -ne
-        $sourceFindings.Count) {
-        throw 'Source result receipt contains duplicate findings.'
+    $sourceFindings = @($source.pending_findings)
+    $sourceById = @{}
+    foreach ($sourceFinding in $sourceFindings) {
+        $sourceFindingId = [string]$sourceFinding.finding_id
+        if ($sourceById.ContainsKey($sourceFindingId)) {
+            throw 'Source result receipt contains duplicate finding IDs.'
+        }
+        $sourceById[$sourceFindingId] = $sourceFinding
     }
     $decisions = @($receipt.decisions)
-    if ($decisions.Count -ne $sourceFindings.Count) {
+    if ($decisions.Count -ne $sourceById.Count) {
         throw 'Review disposition receipt must answer every source finding exactly once.'
     }
     $seen = [Collections.Generic.HashSet[string]]::new(
@@ -347,8 +379,8 @@ function Read-ReviewDispositionReceipt {
     $computedBlocking = [Collections.Generic.List[string]]::new()
     foreach ($decision in $decisions) {
         foreach ($name in @(
-            'finding', 'canonical_finding_id', 'severity', 'disposition',
-            'rationale',
+            'source_finding_id', 'finding', 'finding_hash',
+            'canonical_finding_id', 'severity', 'disposition', 'rationale',
             'resolution_status', 'evidence', 're_review_status',
             're_review_source_node_id', 're_review_evidence'
         )) {
@@ -356,9 +388,22 @@ function Read-ReviewDispositionReceipt {
                 throw "Review decision is missing '$name'."
             }
         }
-        $finding = [string]$decision.finding
-        if (-not $seen.Add($finding) -or $finding -notin $sourceFindings) {
+        $sourceFindingId = [string]$decision.source_finding_id
+        if (-not $seen.Add($sourceFindingId) -or
+            -not $sourceById.ContainsKey($sourceFindingId)) {
             throw 'Review disposition contains a duplicate or unknown finding.'
+        }
+        $sourceFinding = $sourceById[$sourceFindingId]
+        $finding = [string]$decision.finding
+        if ($finding -ne [string]$sourceFinding.text -or
+            [string]$decision.finding_hash -ne
+                [string]$sourceFinding.text_hash -or
+            [string]$decision.severity -ne
+                [string]$sourceFinding.severity) {
+            throw (
+                'Review disposition identity, text hash, and severity must ' +
+                'exactly match source.'
+            )
         }
         $canonicalFindingId = [string]$decision.canonical_finding_id
         if ($canonicalFindingId -notmatch

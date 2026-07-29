@@ -914,6 +914,17 @@ if ($null -ne $durableReview) {
             )
         }
     }
+    foreach ($durableNode in @($nodes)) {
+        $durableNodeId = [string](Get-PlanProperty $durableNode 'id')
+        if ($durableNodeId -eq $mainOwnerId) { continue }
+        if ((Get-PlanProperty $durableNode 'read_only') -ne $true -or
+            @(Get-PlanProperty $durableNode 'write_scope').Count -gt 0) {
+            Add-PlanError (
+                "Durable review profile only its main owner may write; node " +
+                "'$durableNodeId' must be read-only with an empty write_scope."
+            )
+        }
+    }
 }
 
 $writerIds = @($normalizedWriterScopes.Keys)
@@ -1032,6 +1043,18 @@ foreach ($check in $reviewDispositionChecks) {
         Add-PlanError (
             "completion review disposition check '$path' has invalid " +
             'blocking_severities.'
+        )
+    }
+    if ($null -ne $durableReview -and
+        $nodeId -in @(
+            @(Get-PlanProperty $durableReview 'domain_node_ids') +
+            @(Get-PlanProperty $durableReview 'dissent_node_ids')
+        ) -and
+        ('P0' -notin $blockingSeverities -or
+            'P1' -notin $blockingSeverities)) {
+        Add-PlanError (
+            "Durable review completion check '$path' must always block P0 " +
+            'and P1; callers may only add severities.'
         )
     }
 }

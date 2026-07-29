@@ -311,6 +311,11 @@ per source. Use a stable `canonical_finding_id` to group overlapping findings
 without discarding either source's evidence; append unique findings under new
 IDs. One role's PASS never substitutes for another role's required receipt or
 re-review.
+Durable source receipts use schema 1.3 findings bound to a source finding ID,
+original P0/P1/P2 severity, exact text, and text hash. Disposition must match
+all four values. Older receipts remain readable for history but cannot satisfy
+durable completion. P0 and P1 are non-configurable blockers; callers may add
+P2 but cannot remove either required severity.
 Workers do not debate or message each other directly.
 `Test-OrchestrationCompletion.ps1` blocks delivery while any configured P0/P1
 finding remains unresolved. P2 may be deferred only with rationale and

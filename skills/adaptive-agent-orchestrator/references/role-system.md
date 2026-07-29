@@ -182,6 +182,11 @@ never activated to fill Worker capacity.
   `canonical_finding_id`; retain every source-specific finding and its evidence
   under that key. A unique finding gets a new key. Never replace a missing or
   failed source receipt with another role's PASS.
+- Bind every durable source finding to its source finding ID, original
+  severity, exact text, and text hash. Never lower severity during disposition.
+  Legacy receipts without this binding are historical evidence only.
+- Only the configured main owner may write in a durable review profile. Domain
+  and dissent roles, and any other supporting producer, remain read-only.
 - P2 findings may be deferred without blocking delivery, but every deferral
   still records a rationale and evidence.
 - Reuse accepted evidence through compact project artifacts and result

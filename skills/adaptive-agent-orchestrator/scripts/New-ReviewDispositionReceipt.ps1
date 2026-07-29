@@ -40,25 +40,27 @@ if (-not (Test-Path -LiteralPath $decisionsFullPath -PathType Leaf)) {
 }
 $source = Read-ThreadResultReceipt -Path $sourcePath `
     -ExpectedThreadId $SourceThreadId -RunDirectory $runRoot
+if ([string]$source.schema_version -ne '1.3') {
+    throw (
+        'Durable review disposition requires a schema 1.3 source receipt ' +
+        'with stable finding identity and severity. Migrate legacy receipts.'
+    )
+}
 $decisions = @(
     Get-Content -LiteralPath $decisionsFullPath -Raw |
         ConvertFrom-Json -Depth 50 -DateKind String
 )
-$pendingFindings = @()
-if ($null -ne $source.PSObject.Properties['pending_findings']) {
-    $pendingFindings = @($source.pending_findings)
-}
-$sourceFindings = @(
-    $pendingFindings + @($source.adopted_findings) +
-    @($source.rejected_findings) |
-        ForEach-Object { [string]$_ }
-)
+$sourceFindings = @($source.pending_findings)
 if ($sourceFindings.Count -eq 0) {
     throw 'Source result receipt has no findings to disposition.'
 }
-if (@($sourceFindings | Select-Object -Unique).Count -ne
-    $sourceFindings.Count) {
-    throw 'Source result receipt contains duplicate findings.'
+$sourceById = @{}
+foreach ($sourceFinding in $sourceFindings) {
+    $sourceFindingId = [string]$sourceFinding.finding_id
+    if ($sourceById.ContainsKey($sourceFindingId)) {
+        throw 'Source result receipt contains duplicate finding IDs.'
+    }
+    $sourceById[$sourceFindingId] = $sourceFinding
 }
 
 $seen = [Collections.Generic.HashSet[string]]::new(
@@ -71,7 +73,8 @@ $normalized = [Collections.Generic.List[object]]::new()
 $blocking = [Collections.Generic.List[string]]::new()
 foreach ($decision in $decisions) {
     foreach ($name in @(
-        'finding', 'canonical_finding_id', 'severity', 'disposition', 'rationale',
+        'source_finding_id', 'finding', 'finding_hash',
+        'canonical_finding_id', 'severity', 'disposition', 'rationale',
         'resolution_status', 'evidence', 're_review_status',
         're_review_source_node_id', 're_review_evidence'
     )) {
@@ -79,9 +82,21 @@ foreach ($decision in $decisions) {
             throw "Review decision is missing '$name'."
         }
     }
-    $finding = [string]$decision.finding
-    if (-not $seen.Add($finding) -or $finding -notin $sourceFindings) {
+    $sourceFindingId = [string]$decision.source_finding_id
+    if (-not $seen.Add($sourceFindingId) -or
+        -not $sourceById.ContainsKey($sourceFindingId)) {
         throw 'Review decisions contain a duplicate or unknown finding.'
+    }
+    $sourceFinding = $sourceById[$sourceFindingId]
+    $finding = [string]$decision.finding
+    $findingHash = [string]$decision.finding_hash
+    if ($finding -ne [string]$sourceFinding.text -or
+        $findingHash -ne [string]$sourceFinding.text_hash -or
+        [string]$decision.severity -ne [string]$sourceFinding.severity) {
+        throw (
+            'Review decision identity, text hash, and severity must exactly ' +
+            'match source.'
+        )
     }
     $canonicalFindingId = [string]$decision.canonical_finding_id
     if ($canonicalFindingId -notmatch
@@ -144,7 +159,9 @@ foreach ($decision in $decisions) {
         $blocking.Add($finding)
     }
     $normalized.Add([ordered]@{
+        source_finding_id = $sourceFindingId
         finding = $finding
+        finding_hash = $findingHash
         canonical_finding_id = $canonicalFindingId
         severity = $severity
         disposition = $disposition
@@ -156,7 +173,7 @@ foreach ($decision in $decisions) {
         re_review_evidence = $reReviewEvidence
     })
 }
-if ($seen.Count -ne $sourceFindings.Count) {
+if ($seen.Count -ne $sourceById.Count) {
     throw 'Review decisions must answer every source finding exactly once.'
 }
 

@@ -203,6 +203,12 @@ in each source receipt to group overlap while preserving both source records.
 Unique findings use new IDs. Receipt paths must be unique per source, and every
 profile node requires its own completion check; another role's PASS cannot
 satisfy it.
+Schema 1.3 durable source findings bind `finding_id`, original `severity`,
+exact `text`, and `text_hash`. A disposition repeats and exactly matches that
+source identity before adding its canonical cross-source ID. Schema 1.1 and
+1.2 receipts remain readable as history but fail closed for durable
+disposition and completion. Durable completion always blocks both P0 and P1;
+the plan may add P2 but cannot narrow the required set.
 - `session_policy`: `fresh` by default, or explicitly justified `reuse`;
 - `continuity_key`: stable workstream identity;
 - optional `selection_reason`: controller-only diagnostic justification for

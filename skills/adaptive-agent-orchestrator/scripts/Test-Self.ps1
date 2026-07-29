@@ -1234,6 +1234,17 @@ try {
             }
         )
     } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $draftReadPath
+    $draftFindingText = 'Draft satisfies the bounded section contract.'
+    $draftFindingHash = Get-TextSha256 $draftFindingText
+    $draftFindingId = 'draft-contract-001'
+    $draftFindingsPath = Join-Path $runDirectory 'draft-findings.json'
+    @(
+        [ordered]@{
+            finding_id = $draftFindingId
+            severity = 'P1'
+            text = $draftFindingText
+        }
+    ) | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $draftFindingsPath
     $draftReceiptRelative = 'receipts/draft.thread-result-receipt.json'
     $draftReceiptPath = Join-Path $runDirectory $draftReceiptRelative
     $draftReceipt = & (
@@ -1241,7 +1252,7 @@ try {
     ) -RunDirectory $runDirectory -ThreadId 'test-thread-draft' `
         -HostId 'opaque-host-1' -ThreadReadPath $draftReadPath `
         -OutputPath $draftReceiptPath `
-        -PendingFindings @('Draft satisfies the bounded section contract.') |
+        -PendingFindingRecordsPath $draftFindingsPath |
         ConvertFrom-Json -Depth 20
     Assert-True ($draftReceipt.receipt_hash -match '^[0-9a-f]{64}$') (
         'Thread result collection must produce an immutable receipt.'
@@ -1266,7 +1277,7 @@ try {
         final_turn_id = [string]$draftReceipt.final_turn_id
         final_status = [string]$draftReceipt.final_status
         final_content_hash = [string]$draftReceipt.final_content_hash
-        adopted_findings = @($draftReceipt.pending_findings)
+        adopted_findings = @($draftFindingText)
         rejected_findings = @()
     }
     $legacyReceipt = [ordered]@{}
@@ -1288,7 +1299,9 @@ try {
     )
     @(
         [ordered]@{
-            finding = 'Draft satisfies the bounded section contract.'
+            source_finding_id = $draftFindingId
+            finding = $draftFindingText
+            finding_hash = $draftFindingHash
             canonical_finding_id = 'draft.bounded-section-contract'
             severity = 'P1'
             disposition = 'adopted'
@@ -1301,6 +1314,19 @@ try {
         }
     ) | ConvertTo-Json -Depth 10 |
         Set-Content -LiteralPath $resolvedDecisionsPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ReviewDispositionReceipt.ps1') `
+            -RunDirectory $runDirectory -MilestoneId 'self-test-legacy-source' `
+            -SourceNodeId 'draft' -SourceThreadId 'test-thread-draft' `
+            -SourceResultReceiptPath $legacyReceiptPath `
+            -DecisionsPath $resolvedDecisionsPath -OutputPath (
+                Join-Path $runDirectory (
+                    'receipts/draft.review-disposition.legacy-source.json'
+                )
+            ) | Out-Null
+    } 'requires a schema 1.3 source receipt' (
+        'Legacy result receipts must fail closed for durable disposition.'
+    )
     $resolvedDispositionPath = Join-Path $runDirectory (
         'receipts/draft.review-disposition.json'
     )
@@ -1321,7 +1347,9 @@ try {
     )
     @(
         [ordered]@{
-            finding = 'Draft satisfies the bounded section contract.'
+            source_finding_id = $draftFindingId
+            finding = $draftFindingText
+            finding_hash = $draftFindingHash
             canonical_finding_id = 'draft.bounded-section-contract'
             severity = 'P1'
             disposition = 'deferred'
@@ -1352,7 +1380,9 @@ try {
     )
     @(
         [ordered]@{
-            finding = 'Draft satisfies the bounded section contract.'
+            source_finding_id = $draftFindingId
+            finding = $draftFindingText
+            finding_hash = $draftFindingHash
             canonical_finding_id = 'draft.bounded-section-contract'
             severity = 'P1'
             disposition = 'partially-adopted'
@@ -1398,6 +1428,27 @@ try {
             ) | Out-Null
     } 'original source node' (
         'One durable role cannot satisfy another role re-review requirement.'
+    )
+    $downgradedSeverityPath = Join-Path $runDirectory (
+        'draft-review-decisions-downgraded-severity.json'
+    )
+    $downgradedSeverity = Get-Content -LiteralPath $openDecisionsPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 20
+    $downgradedSeverity.severity = 'P2'
+    $downgradedSeverity | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $downgradedSeverityPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ReviewDispositionReceipt.ps1') `
+            -RunDirectory $runDirectory -MilestoneId 'self-test-downgrade' `
+            -SourceNodeId 'draft' -SourceThreadId 'test-thread-draft' `
+            -SourceResultReceiptPath $draftReceiptPath `
+            -DecisionsPath $downgradedSeverityPath -OutputPath (
+                Join-Path $runDirectory (
+                    'receipts/draft.review-disposition.downgraded.json'
+                )
+            ) | Out-Null
+    } 'must exactly match source' (
+        'A disposition must not downgrade a source finding severity.'
     )
     $runningReadPath = Join-Path $draftReadDirectory 'draft-running.json'
     $runningCapture = Get-Content -LiteralPath $draftReadPath -Raw |
@@ -1631,7 +1682,7 @@ try {
     $archiveReceiptOriginal = Get-Content -LiteralPath $draftReceiptPath -Raw
     $archiveReceiptTampered = $archiveReceiptOriginal |
         ConvertFrom-Json -AsHashtable -Depth 20
-    $archiveReceiptTampered.adopted_findings = @('embedded redirect')
+    $archiveReceiptTampered.host_id = 'tampered-host'
     $archiveReceiptTampered | ConvertTo-Json -Depth 20 |
         Set-Content -LiteralPath $draftReceiptPath
     Assert-ThrowsLike {
@@ -2839,6 +2890,8 @@ try {
     $durableReviewPlan.nodes[1].topology = 'background-thread'
     $durableReviewPlan.nodes[1].context.continuity_key =
         'durable-adversarial-review'
+    $durableReviewPlan.nodes[0].read_only = $true
+    $durableReviewPlan.nodes[0].write_scope = @()
     $domainNode = @{}
     foreach ($entry in $durableReviewPlan.nodes[1].GetEnumerator()) {
         $domainNode[$entry.Key] = $entry.Value
@@ -2906,6 +2959,24 @@ try {
     Assert-InvalidPlan $sharedDurableDisposition (
         'durable-review-shared-disposition'
     ) 'Each source role requires its own receipt'
+
+    $narrowDurableBlocking = Get-Content `
+        -LiteralPath $durableReviewPlanPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $narrowDurableBlocking.completion.review_disposition_checks[0].blocking_severities =
+        @('P0')
+    Assert-InvalidPlan $narrowDurableBlocking (
+        'durable-review-narrow-blocking'
+    ) 'must always block P0 and P1'
+
+    $writableDurableProducer = Get-Content `
+        -LiteralPath $durableReviewPlanPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $writableDurableProducer.nodes[0].read_only = $false
+    $writableDurableProducer.nodes[0].write_scope = @('artifacts/draft')
+    Assert-InvalidPlan $writableDurableProducer (
+        'durable-review-writable-producer'
+    ) 'only its main owner may write'
 
     $writableDurableReviewer = Get-Content -LiteralPath (
         $durableReviewPlanPath
@@ -3058,7 +3129,7 @@ try {
     $receiptOriginal = Get-Content -LiteralPath $draftReceiptPath -Raw
     $receiptTampered = $receiptOriginal |
         ConvertFrom-Json -AsHashtable -Depth 20
-    $receiptTampered.adopted_findings = @('silently replaced disposition')
+    $receiptTampered.host_id = 'silently-replaced-host'
     $receiptTampered | ConvertTo-Json -Depth 20 |
         Set-Content -LiteralPath $draftReceiptPath
     Assert-ThrowsLike {

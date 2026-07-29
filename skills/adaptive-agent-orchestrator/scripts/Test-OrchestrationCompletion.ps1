@@ -151,8 +151,25 @@ $reviewDispositionChecks = if (
 $canonicalReviewFindings = @{}
 $reviewSourceCount = 0
 $reviewDecisionCount = 0
+$durableReviewNodeIds = [Collections.Generic.HashSet[string]]::new(
+    [StringComparer]::Ordinal
+)
+if ($null -ne $plan.PSObject.Properties['durable_review_profile']) {
+    foreach ($durableNodeId in @(
+        @($plan.durable_review_profile.domain_node_ids) +
+        @($plan.durable_review_profile.dissent_node_ids)
+    )) {
+        $null = $durableReviewNodeIds.Add([string]$durableNodeId)
+    }
+}
+$checkedDurableReviewNodeIds = [Collections.Generic.HashSet[string]]::new(
+    [StringComparer]::Ordinal
+)
 foreach ($check in $reviewDispositionChecks) {
     $nodeId = [string]$check.source_node_id
+    if ($durableReviewNodeIds.Contains($nodeId)) {
+        $null = $checkedDurableReviewNodeIds.Add($nodeId)
+    }
     $nodeState = @($state.nodes | Where-Object { $_.id -eq $nodeId }) |
         Select-Object -First 1
     if ($null -eq $nodeState -or
@@ -196,13 +213,26 @@ foreach ($check in $reviewDispositionChecks) {
             $canonicalReviewFindings[$canonicalId].Add([pscustomobject]@{
                 source_node_id = $nodeId
                 source_thread_id = [string]$receipt.source_thread_id
+                source_finding_id = [string]$decision.source_finding_id
                 finding = [string]$decision.finding
+                finding_hash = [string]$decision.finding_hash
                 severity = [string]$decision.severity
                 disposition = [string]$decision.disposition
                 resolution_status = [string]$decision.resolution_status
             })
         }
         $blockingSeverities = @($check.blocking_severities)
+        if ($durableReviewNodeIds.Contains($nodeId)) {
+            if ('P0' -notin $blockingSeverities -or
+                'P1' -notin $blockingSeverities) {
+                $errors.Add(
+                    "Durable review source '$nodeId' must always block P0 and P1."
+                )
+            }
+            $blockingSeverities = @(
+                @('P0', 'P1') + $blockingSeverities | Select-Object -Unique
+            )
+        }
         $openBlocking = @($receipt.decisions | Where-Object {
             [string]$_.severity -in $blockingSeverities -and
             [string]$_.resolution_status -ne 'resolved'
@@ -219,6 +249,13 @@ foreach ($check in $reviewDispositionChecks) {
         $errors.Add(
             "Review disposition check '$relativeReceipt' is invalid: " +
             $_.Exception.Message
+        )
+    }
+}
+foreach ($durableNodeId in $durableReviewNodeIds) {
+    if (-not $checkedDurableReviewNodeIds.Contains($durableNodeId)) {
+        $errors.Add(
+            "Durable review source '$durableNodeId' lacks a disposition check."
         )
     }
 }
