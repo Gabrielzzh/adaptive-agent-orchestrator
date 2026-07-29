@@ -992,6 +992,9 @@ $reviewDispositionChecks = if (
 ) {
     @(Get-PlanProperty $completion 'review_disposition_checks')
 } else { @() }
+$reviewDispositionPaths = [Collections.Generic.HashSet[string]]::new(
+    [StringComparer]::OrdinalIgnoreCase
+)
 foreach ($check in $reviewDispositionChecks) {
     $nodeId = Require-Text $check 'source_node_id' (
         'completion review disposition check'
@@ -1012,6 +1015,13 @@ foreach ($check in $reviewDispositionChecks) {
         }).Count -gt 0) {
         Add-PlanError (
             "completion review disposition path is unsafe: '$path'."
+        )
+    }
+    if (-not [string]::IsNullOrWhiteSpace($path) -and
+        -not $reviewDispositionPaths.Add($path)) {
+        Add-PlanError (
+            "completion review disposition path is reused: '$path'. " +
+            'Each source role requires its own receipt.'
         )
     }
     $blockingSeverities = @(Get-PlanProperty $check 'blocking_severities')

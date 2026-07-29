@@ -148,6 +148,9 @@ $reviewDispositionChecks = if (
 ) {
     @($plan.completion.review_disposition_checks)
 } else { @() }
+$canonicalReviewFindings = @{}
+$reviewSourceCount = 0
+$reviewDecisionCount = 0
 foreach ($check in $reviewDispositionChecks) {
     $nodeId = [string]$check.source_node_id
     $nodeState = @($state.nodes | Where-Object { $_.id -eq $nodeId }) |
@@ -182,6 +185,23 @@ foreach ($check in $reviewDispositionChecks) {
         $receipt = Read-ReviewDispositionReceipt -Path $receiptPath `
             -RunDirectory $RunDirectory -ExpectedSourceNodeId $nodeId `
             -ExpectedThreadId ([string]$nodeState.thread_id)
+        $reviewSourceCount++
+        foreach ($decision in @($receipt.decisions)) {
+            $reviewDecisionCount++
+            $canonicalId = [string]$decision.canonical_finding_id
+            if (-not $canonicalReviewFindings.ContainsKey($canonicalId)) {
+                $canonicalReviewFindings[$canonicalId] =
+                    [Collections.Generic.List[object]]::new()
+            }
+            $canonicalReviewFindings[$canonicalId].Add([pscustomobject]@{
+                source_node_id = $nodeId
+                source_thread_id = [string]$receipt.source_thread_id
+                finding = [string]$decision.finding
+                severity = [string]$decision.severity
+                disposition = [string]$decision.disposition
+                resolution_status = [string]$decision.resolution_status
+            })
+        }
         $blockingSeverities = @($check.blocking_severities)
         $openBlocking = @($receipt.decisions | Where-Object {
             [string]$_.severity -in $blockingSeverities -and
@@ -214,5 +234,8 @@ if ($errors.Count) {
     artifact_checks = @($plan.completion.artifact_checks).Count
     evidence_checks = @($plan.completion.evidence_checks).Count
     review_disposition_checks = $reviewDispositionChecks.Count
+    review_sources = $reviewSourceCount
+    review_decisions = $reviewDecisionCount
+    canonical_review_findings = $canonicalReviewFindings.Count
     journal_head = $state.journal_head
 } | ConvertTo-Json -Depth 10

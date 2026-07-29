@@ -64,13 +64,16 @@ if (@($sourceFindings | Select-Object -Unique).Count -ne
 $seen = [Collections.Generic.HashSet[string]]::new(
     [StringComparer]::Ordinal
 )
+$seenCanonical = [Collections.Generic.HashSet[string]]::new(
+    [StringComparer]::Ordinal
+)
 $normalized = [Collections.Generic.List[object]]::new()
 $blocking = [Collections.Generic.List[string]]::new()
 foreach ($decision in $decisions) {
     foreach ($name in @(
-        'finding', 'severity', 'disposition', 'rationale',
+        'finding', 'canonical_finding_id', 'severity', 'disposition', 'rationale',
         'resolution_status', 'evidence', 're_review_status',
-        're_review_evidence'
+        're_review_source_node_id', 're_review_evidence'
     )) {
         if ($null -eq $decision.PSObject.Properties[$name]) {
             throw "Review decision is missing '$name'."
@@ -80,12 +83,22 @@ foreach ($decision in $decisions) {
     if (-not $seen.Add($finding) -or $finding -notin $sourceFindings) {
         throw 'Review decisions contain a duplicate or unknown finding.'
     }
+    $canonicalFindingId = [string]$decision.canonical_finding_id
+    if ($canonicalFindingId -notmatch
+        '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' -or
+        -not $seenCanonical.Add($canonicalFindingId)) {
+        throw (
+            'Review decisions require a unique stable canonical_finding_id ' +
+            'within each source receipt.'
+        )
+    }
     $severity = [string]$decision.severity
     $disposition = [string]$decision.disposition
     $resolution = [string]$decision.resolution_status
     $rationale = [string]$decision.rationale
     $evidence = @($decision.evidence | ForEach-Object { [string]$_ })
     $reReviewStatus = [string]$decision.re_review_status
+    $reReviewSourceNodeId = [string]$decision.re_review_source_node_id
     $reReviewEvidence = @(
         $decision.re_review_evidence | ForEach-Object { [string]$_ }
     )
@@ -112,6 +125,9 @@ foreach ($decision in $decisions) {
     )) {
         throw 'Review decision contains an invalid re_review_status.'
     }
+    if ($reReviewSourceNodeId -ne $SourceNodeId) {
+        throw 'Re-review must be assigned to the original source node.'
+    }
     if ($reReviewStatus -eq 'completed' -and
         @($reReviewEvidence | Where-Object {
             $_ -match '^(test|artifact|source|observation):.+'
@@ -129,12 +145,14 @@ foreach ($decision in $decisions) {
     }
     $normalized.Add([ordered]@{
         finding = $finding
+        canonical_finding_id = $canonicalFindingId
         severity = $severity
         disposition = $disposition
         rationale = $rationale
         resolution_status = $resolution
         evidence = $evidence
         re_review_status = $reReviewStatus
+        re_review_source_node_id = $reReviewSourceNodeId
         re_review_evidence = $reReviewEvidence
     })
 }

@@ -1289,12 +1289,14 @@ try {
     @(
         [ordered]@{
             finding = 'Draft satisfies the bounded section contract.'
+            canonical_finding_id = 'draft.bounded-section-contract'
             severity = 'P1'
             disposition = 'adopted'
             rationale = 'The main owner incorporated the bounded contract.'
             resolution_status = 'resolved'
             evidence = @('test:self-test-draft-contract')
             re_review_status = 'completed'
+            re_review_source_node_id = 'draft'
             re_review_evidence = @('observation:source-role-accepted-revision')
         }
     ) | ConvertTo-Json -Depth 10 |
@@ -1320,12 +1322,14 @@ try {
     @(
         [ordered]@{
             finding = 'Draft satisfies the bounded section contract.'
+            canonical_finding_id = 'draft.bounded-section-contract'
             severity = 'P1'
             disposition = 'deferred'
             rationale = 'The finding is intentionally left open for the gate test.'
             resolution_status = 'open'
             evidence = @('observation:self-test-open-finding')
             re_review_status = 'requested'
+            re_review_source_node_id = 'draft'
             re_review_evidence = @('observation:re-review-request-sent')
         }
     ) | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $openDecisionsPath
@@ -1349,12 +1353,14 @@ try {
     @(
         [ordered]@{
             finding = 'Draft satisfies the bounded section contract.'
+            canonical_finding_id = 'draft.bounded-section-contract'
             severity = 'P1'
             disposition = 'partially-adopted'
             rationale = 'The main owner claims the revision is complete.'
             resolution_status = 'resolved'
             evidence = @('test:self-test-unreviewed-revision')
             re_review_status = 'requested'
+            re_review_source_node_id = 'draft'
             re_review_evidence = @('observation:re-review-request-sent')
         }
     ) | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $missingReReviewPath
@@ -1370,6 +1376,28 @@ try {
             ) | Out-Null
     } 'require completed re-review' (
         'Resolved adopted P0/P1 findings must return to the source role.'
+    )
+
+    $wrongReviewSourcePath = Join-Path $runDirectory (
+        'draft-review-decisions-wrong-source.json'
+    )
+    $wrongReviewSource = Get-Content -LiteralPath $openDecisionsPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 20
+    $wrongReviewSource.re_review_source_node_id = 'another-reviewer'
+    $wrongReviewSource | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $wrongReviewSourcePath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ReviewDispositionReceipt.ps1') `
+            -RunDirectory $runDirectory -MilestoneId 'self-test-wrong-source' `
+            -SourceNodeId 'draft' -SourceThreadId 'test-thread-draft' `
+            -SourceResultReceiptPath $draftReceiptPath `
+            -DecisionsPath $wrongReviewSourcePath -OutputPath (
+                Join-Path $runDirectory (
+                    'receipts/draft.review-disposition.wrong-source.json'
+                )
+            ) | Out-Null
+    } 'original source node' (
+        'One durable role cannot satisfy another role re-review requirement.'
     )
     $runningReadPath = Join-Path $draftReadDirectory 'draft-running.json'
     $runningCapture = Get-Content -LiteralPath $draftReadPath -Raw |
@@ -2869,6 +2897,15 @@ try {
     Assert-InvalidPlan $missingDurableDisposition (
         'durable-review-missing-disposition'
     ) 'requires a completion review disposition check'
+
+    $sharedDurableDisposition = Get-Content `
+        -LiteralPath $durableReviewPlanPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $sharedDurableDisposition.completion.review_disposition_checks[1].path =
+        $sharedDurableDisposition.completion.review_disposition_checks[0].path
+    Assert-InvalidPlan $sharedDurableDisposition (
+        'durable-review-shared-disposition'
+    ) 'Each source role requires its own receipt'
 
     $writableDurableReviewer = Get-Content -LiteralPath (
         $durableReviewPlanPath

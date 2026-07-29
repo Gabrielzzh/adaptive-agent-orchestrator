@@ -177,6 +177,11 @@ never activated to fill Worker capacity.
   binds the complete report before the main agent makes adoption decisions.
   Adopted or partially adopted P0/P1 revisions return to the original role and
   require typed evidence of completed re-review before resolution.
+- Keep each durable role's capture, result receipt, disposition receipt, and
+  re-review evidence separate. Group overlap with a stable
+  `canonical_finding_id`; retain every source-specific finding and its evidence
+  under that key. A unique finding gets a new key. Never replace a missing or
+  failed source receipt with another role's PASS.
 - P2 findings may be deferred without blocking delivery, but every deferral
   still records a rationale and evidence.
 - Reuse accepted evidence through compact project artifacts and result

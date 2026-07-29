@@ -341,12 +341,16 @@ function Read-ReviewDispositionReceipt {
     $seen = [Collections.Generic.HashSet[string]]::new(
         [StringComparer]::Ordinal
     )
+    $seenCanonical = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
     $computedBlocking = [Collections.Generic.List[string]]::new()
     foreach ($decision in $decisions) {
         foreach ($name in @(
-            'finding', 'severity', 'disposition', 'rationale',
+            'finding', 'canonical_finding_id', 'severity', 'disposition',
+            'rationale',
             'resolution_status', 'evidence', 're_review_status',
-            're_review_evidence'
+            're_review_source_node_id', 're_review_evidence'
         )) {
             if ($null -eq $decision.PSObject.Properties[$name]) {
                 throw "Review decision is missing '$name'."
@@ -355,6 +359,15 @@ function Read-ReviewDispositionReceipt {
         $finding = [string]$decision.finding
         if (-not $seen.Add($finding) -or $finding -notin $sourceFindings) {
             throw 'Review disposition contains a duplicate or unknown finding.'
+        }
+        $canonicalFindingId = [string]$decision.canonical_finding_id
+        if ($canonicalFindingId -notmatch
+            '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' -or
+            -not $seenCanonical.Add($canonicalFindingId)) {
+            throw (
+                'Review disposition requires a unique stable ' +
+                'canonical_finding_id within each source receipt.'
+            )
         }
         if ([string]$decision.severity -notin @('P0', 'P1', 'P2') -or
             [string]$decision.disposition -notin @(
@@ -377,11 +390,15 @@ function Read-ReviewDispositionReceipt {
             throw 'A resolved review decision requires typed resolution evidence.'
         }
         $reReviewStatus = [string]$decision.re_review_status
+        $reReviewSourceNodeId = [string]$decision.re_review_source_node_id
         $reReviewEvidence = @($decision.re_review_evidence)
         if ($reReviewStatus -notin @(
             'not-required', 'requested', 'completed'
         )) {
             throw 'Review disposition contains an invalid re_review_status.'
+        }
+        if ($reReviewSourceNodeId -ne $ExpectedSourceNodeId) {
+            throw 'Re-review is not bound to the original source node.'
         }
         if ($reReviewStatus -eq 'completed' -and
             @($reReviewEvidence | Where-Object {

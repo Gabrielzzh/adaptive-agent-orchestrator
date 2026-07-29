@@ -306,6 +306,11 @@ At each milestone, first bind the complete report and its extracted
 with `New-ReviewDispositionReceipt.ps1` and send adopted changes or reasoned
 rejections back through the main agent. Adopted or partially adopted P0/P1
 changes are not resolved until the original role completes a re-review.
+When multiple durable roles report, keep one capture and disposition receipt
+per source. Use a stable `canonical_finding_id` to group overlapping findings
+without discarding either source's evidence; append unique findings under new
+IDs. One role's PASS never substitutes for another role's required receipt or
+re-review.
 Workers do not debate or message each other directly.
 `Test-OrchestrationCompletion.ps1` blocks delivery while any configured P0/P1
 finding remains unresolved. P2 may be deferred only with rationale and

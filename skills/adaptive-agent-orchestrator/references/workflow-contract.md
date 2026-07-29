@@ -191,10 +191,18 @@ findings to the complete captured report before adoption decisions. It then
 uses `New-ReviewDispositionReceipt.ps1` to bind each decision to that source
 receipt. Every decision records the exact finding, P0/P1/P2 severity,
 adopted/partially-adopted/rejected/deferred disposition, rationale,
-open/resolved status, typed evidence, and re-review status. Adopted or
+open/resolved status, typed evidence, a stable `canonical_finding_id`, and
+re-review status bound to the original source node. Adopted or
 partially adopted P0/P1 revisions require completed re-review by the original
 role before resolution. Workers do not message one another or write project
 files; the main owner routes accepted changes and requests re-review.
+
+For multiple durable review roles, keep separate capture, result, disposition,
+and re-review evidence chains. The same `canonical_finding_id` may appear once
+in each source receipt to group overlap while preserving both source records.
+Unique findings use new IDs. Receipt paths must be unique per source, and every
+profile node requires its own completion check; another role's PASS cannot
+satisfy it.
 - `session_policy`: `fresh` by default, or explicitly justified `reuse`;
 - `continuity_key`: stable workstream identity;
 - optional `selection_reason`: controller-only diagnostic justification for
@@ -293,6 +301,8 @@ still open, when a finding is omitted, when the source result changes, or when
 the receipt hash is invalid. P2 may remain open or deferred with rationale and
 evidence. A resolved adopted or partially adopted P0/P1 decision also requires
 typed evidence that the original role completed re-review.
+Completion reports both source-decision count and canonical-finding count so
+the controller can deduplicate overlap without losing source provenance.
 
 Finishing all nodes is not success if acceptance checks fail.
 Every agent or main node completion event includes at least one typed evidence
