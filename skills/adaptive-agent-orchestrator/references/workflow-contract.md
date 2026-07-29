@@ -158,6 +158,43 @@ exact `section_scope` and uses a `proposal-only` or `scoped-write` role. An
 independent reviewer is read-only with `purpose: verification`. `coauthoring`
 requires at least one co-author; use `review-only` when specialists truly are
 only an independent quality gate.
+
+## Optional durable review profile
+
+Use `durable_review_profile` only for long-running research or Skill
+development where domain evidence and independent dissent recur across at
+least two named milestones. Omit it for one-off work, ordinary implementation,
+or a single final review.
+
+```json
+{
+  "durable_review_profile": {
+    "mode": "domain-dissent",
+    "main_owner_node_id": "integrate",
+    "domain_node_ids": ["domain-research"],
+    "dissent_node_ids": ["adversarial-review"],
+    "milestone_ids": ["method-1", "method-2"],
+    "consumer_output": "result-only"
+  }
+}
+```
+
+Every listed domain or dissent node must be a read-only
+`background-thread` agent with delegation disabled, and its role lifetime must
+be `project` or `user-owned`. Domain and dissent node sets must be distinct.
+The profile does not authorize automatic seat filling: each role still needs
+the normal activation explanation and user authorization.
+
+The main owner collects results and answers findings one by one. It creates an
+immutable thread-result receipt whose `pending_findings` binds extracted
+findings to the complete captured report before adoption decisions. It then
+uses `New-ReviewDispositionReceipt.ps1` to bind each decision to that source
+receipt. Every decision records the exact finding, P0/P1/P2 severity,
+adopted/partially-adopted/rejected/deferred disposition, rationale,
+open/resolved status, typed evidence, and re-review status. Adopted or
+partially adopted P0/P1 revisions require completed re-review by the original
+role before resolution. Workers do not message one another or write project
+files; the main owner routes accepted changes and requests re-review.
 - `session_policy`: `fresh` by default, or explicitly justified `reuse`;
 - `continuity_key`: stable workstream identity;
 - optional `selection_reason`: controller-only diagnostic justification for
@@ -238,6 +275,24 @@ Global completion must define:
 - unresolved-risk threshold;
 - termination conditions for exhausted execution slots, repeated failure, unavailable tools, and
   rejected approvals.
+
+When `durable_review_profile` is present, completion also defines one
+`review_disposition_checks` entry for every listed domain and dissent node:
+
+```json
+{
+  "source_node_id": "adversarial-review",
+  "path": "receipts/adversarial-review.disposition.json",
+  "blocking_severities": ["P0", "P1"]
+}
+```
+
+The disposition receipt must answer every finding in the bound thread-result
+receipt exactly once. Completion fails when a configured blocking severity is
+still open, when a finding is omitted, when the source result changes, or when
+the receipt hash is invalid. P2 may remain open or deferred with rationale and
+evidence. A resolved adopted or partially adopted P0/P1 decision also requires
+typed evidence that the original role completed re-review.
 
 Finishing all nodes is not success if acceptance checks fail.
 Every agent or main node completion event includes at least one typed evidence

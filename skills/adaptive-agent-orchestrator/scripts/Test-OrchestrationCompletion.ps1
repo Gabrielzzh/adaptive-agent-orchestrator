@@ -141,6 +141,68 @@ foreach ($check in @($plan.completion.evidence_checks)) {
     }
 }
 
+$reviewDispositionChecks = if (
+    $null -ne $plan.completion.PSObject.Properties[
+        'review_disposition_checks'
+    ]
+) {
+    @($plan.completion.review_disposition_checks)
+} else { @() }
+foreach ($check in $reviewDispositionChecks) {
+    $nodeId = [string]$check.source_node_id
+    $nodeState = @($state.nodes | Where-Object { $_.id -eq $nodeId }) |
+        Select-Object -First 1
+    if ($null -eq $nodeState -or
+        [string]::IsNullOrWhiteSpace([string]$nodeState.thread_id)) {
+        $errors.Add(
+            "Review disposition source node '$nodeId' has no materialized thread."
+        )
+        continue
+    }
+    $relativeReceipt = [string]$check.path
+    $segments = $relativeReceipt -split '[\\/]'
+    if (@($segments | Where-Object {
+        $_ -in @('', '.', '..') -or $_ -match '[\. ]$' -or $_.Contains(':')
+    }).Count -gt 0) {
+        $errors.Add("Review disposition check has an unsafe path: '$relativeReceipt'.")
+        continue
+    }
+    $receiptPath = [IO.Path]::GetFullPath(
+        (Join-Path $RunDirectory $relativeReceipt)
+    )
+    $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+    if (-not $receiptPath.StartsWith(
+        $runRoot + [IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        $errors.Add("Review disposition check escapes the run: '$relativeReceipt'.")
+        continue
+    }
+    try {
+        $receipt = Read-ReviewDispositionReceipt -Path $receiptPath `
+            -RunDirectory $RunDirectory -ExpectedSourceNodeId $nodeId `
+            -ExpectedThreadId ([string]$nodeState.thread_id)
+        $blockingSeverities = @($check.blocking_severities)
+        $openBlocking = @($receipt.decisions | Where-Object {
+            [string]$_.severity -in $blockingSeverities -and
+            [string]$_.resolution_status -ne 'resolved'
+        })
+        if ($openBlocking.Count -gt 0) {
+            $errors.Add(
+                "Review disposition check '$relativeReceipt' has unresolved " +
+                (@($openBlocking | ForEach-Object {
+                    "$($_.severity):$($_.finding)"
+                }) -join ', ')
+            )
+        }
+    } catch {
+        $errors.Add(
+            "Review disposition check '$relativeReceipt' is invalid: " +
+            $_.Exception.Message
+        )
+    }
+}
+
 if ($errors.Count) {
     throw ($errors -join [Environment]::NewLine)
 }
@@ -151,5 +213,6 @@ if ($errors.Count) {
     required_nodes = @($plan.completion.required_nodes).Count
     artifact_checks = @($plan.completion.artifact_checks).Count
     evidence_checks = @($plan.completion.evidence_checks).Count
+    review_disposition_checks = $reviewDispositionChecks.Count
     journal_head = $state.journal_head
 } | ConvertTo-Json -Depth 10

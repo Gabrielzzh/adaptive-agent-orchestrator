@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory)][string] $HostId,
     [Parameter(Mandatory)][string] $ThreadReadPath,
     [Parameter(Mandatory)][string] $OutputPath,
+    [string[]] $PendingFindings = @(),
     [string[]] $AdoptedFindings = @(),
     [string[]] $RejectedFindings = @()
 )
@@ -57,11 +58,18 @@ $adopted = @($AdoptedFindings | Where-Object {
 $rejected = @($RejectedFindings | Where-Object {
     -not [string]::IsNullOrWhiteSpace($_)
 })
-if ($adopted.Count + $rejected.Count -eq 0) {
-    throw 'At least one adopted or rejected finding is required.'
+$pending = @($PendingFindings | Where-Object {
+    -not [string]::IsNullOrWhiteSpace($_)
+})
+$allFindings = @($pending + $adopted + $rejected)
+if ($allFindings.Count -eq 0) {
+    throw 'At least one pending, adopted, or rejected finding is required.'
+}
+if (@($allFindings | Select-Object -Unique).Count -ne $allFindings.Count) {
+    throw 'Thread result findings must be unique across disposition groups.'
 }
 $receipt = [ordered]@{
-    schema_version = '1.1'
+    schema_version = '1.2'
     thread_id = $ThreadId
     host_id = $HostId
     collection_method = 'read_thread'
@@ -72,6 +80,7 @@ $receipt = [ordered]@{
     final_content_hash = $final.final_content_hash
     adopted_findings = $adopted
     rejected_findings = $rejected
+    pending_findings = $pending
 }
 $receipt.receipt_hash = Get-TextSha256 (
     $receipt | ConvertTo-Json -Compress -Depth 20

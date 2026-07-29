@@ -151,6 +151,47 @@ Available packs:
 Do not imitate famous practitioners, run automatic role debates, or inject the
 whole catalog into worker context.
 
+## Durable domain and dissent pattern
+
+Use a durable domain-and-dissent pair only for a project that spans at least
+two named milestones and needs the same specialist evidence or adversarial
+acceptance checks more than once. It is not a default review stage and it is
+never activated to fill Worker capacity.
+
+- Domain roles own a stable body of questions, sources, terminology, and
+  method-specific acceptance gaps across milestones.
+- Dissent roles repeatedly seek counterexamples, untested assumptions, and
+  test-green-but-invalid outcomes. They do not become producers or approvers.
+- Both use `project` or `user-owned` lifetime, read-only background tasks, and
+  `allow_delegation: false`.
+- The main agent remains the only writer and integration owner. Durable roles
+  return evidence and findings; they never share write scope or negotiate
+  changes directly with each other.
+- At every milestone, the main agent records one decision for every returned
+  finding: adopted, partially adopted, rejected, or deferred, with rationale,
+  severity, resolution status, typed evidence, and re-review status.
+- P0/P1 findings may remain open while development continues, but the final
+  completion gate blocks until they are resolved or rejected with verified
+  evidence.
+- A collected report may begin with all extracted findings pending. Collection
+  binds the complete report before the main agent makes adoption decisions.
+  Adopted or partially adopted P0/P1 revisions return to the original role and
+  require typed evidence of completed re-review before resolution.
+- P2 findings may be deferred without blocking delivery, but every deferral
+  still records a rationale and evidence.
+- Reuse accepted evidence through compact project artifacts and result
+  receipts. Do not preserve all history by keeping one execution context alive
+  indefinitely.
+- Consumer-facing answers contain the integrated result, not internal debate.
+  Expose a dispute only when it changes confidence, leaves a material risk, or
+  requires a user decision.
+
+Declare this pattern with `durable_review_profile` and
+`completion.review_disposition_checks` from
+[workflow-contract.md](workflow-contract.md). The profile selects an ongoing
+responsibility model; it does not imply that every role runs concurrently at
+every milestone.
+
 ## Research evidence role
 
 Activate `research-evidence-curator` only when the user explicitly requests a

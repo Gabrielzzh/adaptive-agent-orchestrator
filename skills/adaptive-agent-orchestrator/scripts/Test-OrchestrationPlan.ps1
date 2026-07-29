@@ -850,6 +850,72 @@ if ($null -ne $manuscript) {
     }
 }
 
+$durableReview = Get-PlanProperty $plan 'durable_review_profile'
+if ($null -ne $durableReview) {
+    if ((Get-PlanProperty $durableReview 'mode') -ne 'domain-dissent') {
+        Add-PlanError 'durable_review_profile.mode must be domain-dissent.'
+    }
+    $mainOwnerId = Require-Text $durableReview 'main_owner_node_id' (
+        'durable_review_profile'
+    )
+    if (-not $ids.ContainsKey($mainOwnerId) -or
+        (Get-PlanProperty $ids[$mainOwnerId] 'kind') -ne 'main') {
+        Add-PlanError (
+            'durable_review_profile.main_owner_node_id must reference a main node.'
+        )
+    }
+    $domainNodeIds = @(Get-PlanProperty $durableReview 'domain_node_ids')
+    $dissentNodeIds = @(Get-PlanProperty $durableReview 'dissent_node_ids')
+    if ($domainNodeIds.Count -eq 0 -or $dissentNodeIds.Count -eq 0) {
+        Add-PlanError (
+            'durable_review_profile requires domain_node_ids and dissent_node_ids.'
+        )
+    }
+    $reviewNodeIds = @($domainNodeIds + $dissentNodeIds)
+    if (@($reviewNodeIds | Select-Object -Unique).Count -ne
+        $reviewNodeIds.Count) {
+        Add-PlanError 'durable_review_profile node roles must be distinct.'
+    }
+    if (@(Get-PlanProperty $durableReview 'milestone_ids').Count -lt 2) {
+        Add-PlanError (
+            'durable_review_profile requires at least two milestone_ids.'
+        )
+    }
+    if ((Get-PlanProperty $durableReview 'consumer_output') -ne 'result-only') {
+        Add-PlanError (
+            'durable_review_profile.consumer_output must be result-only.'
+        )
+    }
+    foreach ($reviewNodeId in $reviewNodeIds) {
+        if (-not $ids.ContainsKey([string]$reviewNodeId)) {
+            Add-PlanError (
+                "durable_review_profile references missing node '$reviewNodeId'."
+            )
+            continue
+        }
+        $reviewNode = $ids[[string]$reviewNodeId]
+        if ((Get-PlanProperty $reviewNode 'kind') -ne 'agent' -or
+            (Get-PlanProperty $reviewNode 'topology') -ne 'background-thread' -or
+            (Get-PlanProperty $reviewNode 'read_only') -ne $true -or
+            (Get-PlanProperty $reviewNode 'allow_delegation') -ne $false) {
+            Add-PlanError (
+                "Durable review node '$reviewNodeId' must be a read-only " +
+                'background-thread agent with delegation disabled.'
+            )
+        }
+        $reviewRole = $roles[[string](Get-PlanProperty $reviewNode 'role_id')]
+        if ($null -eq $reviewRole -or
+            (Get-PlanProperty $reviewRole 'lifetime') -notin @(
+                'project', 'user-owned'
+            )) {
+            Add-PlanError (
+                "Durable review node '$reviewNodeId' requires a project or " +
+                'user-owned role lifetime.'
+            )
+        }
+    }
+}
+
 $writerIds = @($normalizedWriterScopes.Keys)
 $directorySeparator = [string][IO.Path]::DirectorySeparatorChar
 for ($i = 0; $i -lt $writerIds.Count; $i++) {
@@ -919,6 +985,62 @@ foreach ($check in @(Get-PlanProperty $completion 'evidence_checks')) {
         ($minimumEntries -isnot [long] -and $minimumEntries -isnot [int]) -or
         [int64]$minimumEntries -lt 1) {
         Add-PlanError "completion evidence check '$nodeId' requires minimum_entries >= 1."
+    }
+}
+$reviewDispositionChecks = if (
+    Test-PlanProperty $completion 'review_disposition_checks'
+) {
+    @(Get-PlanProperty $completion 'review_disposition_checks')
+} else { @() }
+foreach ($check in $reviewDispositionChecks) {
+    $nodeId = Require-Text $check 'source_node_id' (
+        'completion review disposition check'
+    )
+    if (-not $ids.ContainsKey($nodeId) -or
+        (Get-PlanProperty $ids[$nodeId] 'kind') -ne 'agent' -or
+        (Get-PlanProperty $ids[$nodeId] 'topology') -ne 'background-thread') {
+        Add-PlanError (
+            "completion review disposition check source '$nodeId' must be a " +
+            'background-thread agent.'
+        )
+    }
+    $path = Require-Text $check 'path' 'completion review disposition check'
+    $segments = $path -split '[\\/]'
+    if ([IO.Path]::IsPathRooted($path) -or
+        @($segments | Where-Object {
+            $_ -in @('', '.', '..') -or $_ -match '[\. ]$' -or $_.Contains(':')
+        }).Count -gt 0) {
+        Add-PlanError (
+            "completion review disposition path is unsafe: '$path'."
+        )
+    }
+    $blockingSeverities = @(Get-PlanProperty $check 'blocking_severities')
+    if ($blockingSeverities.Count -eq 0 -or
+        @($blockingSeverities | Where-Object {
+            [string]$_ -notin @('P0', 'P1', 'P2')
+        }).Count -gt 0) {
+        Add-PlanError (
+            "completion review disposition check '$path' has invalid " +
+            'blocking_severities.'
+        )
+    }
+}
+if ($null -ne $durableReview) {
+    $requiredReviewNodes = @(
+        @(Get-PlanProperty $durableReview 'domain_node_ids') +
+        @(Get-PlanProperty $durableReview 'dissent_node_ids')
+    )
+    $checkedReviewNodes = @(
+        $reviewDispositionChecks |
+            ForEach-Object { [string](Get-PlanProperty $_ 'source_node_id') }
+    )
+    foreach ($requiredReviewNode in $requiredReviewNodes) {
+        if ([string]$requiredReviewNode -notin $checkedReviewNodes) {
+            Add-PlanError (
+                "Durable review node '$requiredReviewNode' requires a " +
+                'completion review disposition check.'
+            )
+        }
     }
 }
 foreach ($requiredNode in @(Get-PlanProperty $completion 'required_nodes')) {

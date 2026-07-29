@@ -198,9 +198,24 @@ function Read-ThreadResultReceipt {
         [string]::IsNullOrWhiteSpace([string]$receipt.final_turn_id)) {
         throw 'Thread result receipt contains invalid identifiers or hash.'
     }
-    if (@($receipt.adopted_findings).Count +
-        @($receipt.rejected_findings).Count -eq 0) {
+    $hasPending = $null -ne $receipt.PSObject.Properties['pending_findings']
+    if ([string]$receipt.schema_version -eq '1.2' -and -not $hasPending) {
+        throw "Thread result receipt is missing 'pending_findings'."
+    }
+    $pending = @()
+    if ($hasPending) {
+        $pending = @($receipt.pending_findings)
+    }
+    $allFindings = @(
+        $pending + @($receipt.adopted_findings) +
+        @($receipt.rejected_findings)
+    )
+    if ($allFindings.Count -eq 0) {
         throw 'Thread result receipt lacks an adoption disposition.'
+    }
+    if (@($allFindings | Select-Object -Unique).Count -ne
+        $allFindings.Count) {
+        throw 'Thread result receipt contains duplicate findings.'
     }
     $relativeCapture = [string]$receipt.thread_read_path
     $segments = $relativeCapture -split '[\\/]'
@@ -239,11 +254,178 @@ function Read-ThreadResultReceipt {
         adopted_findings = @($receipt.adopted_findings)
         rejected_findings = @($receipt.rejected_findings)
     }
+    if ($hasPending) {
+        $payload.pending_findings = $pending
+    }
     $expectedHash = Get-TextSha256 (
         $payload | ConvertTo-Json -Compress -Depth 20
     )
     if ([string]$receipt.receipt_hash -ne $expectedHash) {
         throw 'Thread result receipt hash mismatch.'
+    }
+    return $receipt
+}
+
+function Read-ReviewDispositionReceipt {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $RunDirectory,
+        [Parameter(Mandatory)][string] $ExpectedSourceNodeId,
+        [Parameter(Mandatory)][string] $ExpectedThreadId
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Review disposition receipt does not exist: $Path"
+    }
+    $receipt = Get-Content -LiteralPath $Path -Raw |
+        ConvertFrom-Json -Depth 50 -DateKind String
+    $required = @(
+        'schema_version', 'run_id', 'milestone_id', 'source_node_id',
+        'source_thread_id', 'source_result_receipt_path',
+        'source_result_receipt_hash', 'decisions', 'blocking_open',
+        'created_at_utc', 'receipt_hash'
+    )
+    foreach ($name in $required) {
+        if ($null -eq $receipt.PSObject.Properties[$name]) {
+            throw "Review disposition receipt is missing '$name'."
+        }
+    }
+    $runPath = Join-Path $RunDirectory 'run.json'
+    $run = Get-Content -LiteralPath $runPath -Raw |
+        ConvertFrom-Json -Depth 20 -DateKind String
+    if ([string]$receipt.run_id -ne [string]$run.run_id -or
+        [string]$receipt.source_node_id -ne $ExpectedSourceNodeId -or
+        [string]$receipt.source_thread_id -ne $ExpectedThreadId) {
+        throw 'Review disposition receipt does not match the current run or source node.'
+    }
+
+    $relativeSource = [string]$receipt.source_result_receipt_path
+    $segments = $relativeSource -split '[\\/]'
+    if (@($segments | Where-Object {
+        $_ -in @('', '.', '..') -or $_ -match '[\. ]$' -or $_.Contains(':')
+    }).Count -gt 0) {
+        throw 'Review disposition receipt has an unsafe source receipt path.'
+    }
+    $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+    $sourcePath = [IO.Path]::GetFullPath((Join-Path $runRoot $relativeSource))
+    if (-not $sourcePath.StartsWith(
+        $runRoot + [IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'Review disposition source receipt escapes the run.'
+    }
+    $source = Read-ThreadResultReceipt -Path $sourcePath `
+        -ExpectedThreadId $ExpectedThreadId -RunDirectory $RunDirectory
+    if ([string]$source.receipt_hash -ne
+        [string]$receipt.source_result_receipt_hash) {
+        throw 'Review disposition receipt is not bound to its source result receipt.'
+    }
+
+    $pendingFindings = @()
+    if ($null -ne $source.PSObject.Properties['pending_findings']) {
+        $pendingFindings = @($source.pending_findings)
+    }
+    $sourceFindings = @(
+        $pendingFindings + @($source.adopted_findings) +
+        @($source.rejected_findings) |
+            ForEach-Object { [string]$_ }
+    )
+    if (@($sourceFindings | Select-Object -Unique).Count -ne
+        $sourceFindings.Count) {
+        throw 'Source result receipt contains duplicate findings.'
+    }
+    $decisions = @($receipt.decisions)
+    if ($decisions.Count -ne $sourceFindings.Count) {
+        throw 'Review disposition receipt must answer every source finding exactly once.'
+    }
+    $seen = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    $computedBlocking = [Collections.Generic.List[string]]::new()
+    foreach ($decision in $decisions) {
+        foreach ($name in @(
+            'finding', 'severity', 'disposition', 'rationale',
+            'resolution_status', 'evidence', 're_review_status',
+            're_review_evidence'
+        )) {
+            if ($null -eq $decision.PSObject.Properties[$name]) {
+                throw "Review decision is missing '$name'."
+            }
+        }
+        $finding = [string]$decision.finding
+        if (-not $seen.Add($finding) -or $finding -notin $sourceFindings) {
+            throw 'Review disposition contains a duplicate or unknown finding.'
+        }
+        if ([string]$decision.severity -notin @('P0', 'P1', 'P2') -or
+            [string]$decision.disposition -notin @(
+                'adopted', 'partially-adopted', 'rejected', 'deferred'
+            ) -or
+            [string]$decision.resolution_status -notin @('open', 'resolved') -or
+            [string]::IsNullOrWhiteSpace([string]$decision.rationale)) {
+            throw 'Review disposition contains an invalid decision contract.'
+        }
+        $evidence = @($decision.evidence)
+        if ($evidence.Count -eq 0 -or @($evidence | Where-Object {
+            [string]::IsNullOrWhiteSpace([string]$_)
+        }).Count -gt 0) {
+            throw 'Every review decision requires non-empty evidence.'
+        }
+        if ([string]$decision.resolution_status -eq 'resolved' -and
+            @($evidence | Where-Object {
+                [string]$_ -match '^(test|artifact|source|observation):.+'
+            }).Count -eq 0) {
+            throw 'A resolved review decision requires typed resolution evidence.'
+        }
+        $reReviewStatus = [string]$decision.re_review_status
+        $reReviewEvidence = @($decision.re_review_evidence)
+        if ($reReviewStatus -notin @(
+            'not-required', 'requested', 'completed'
+        )) {
+            throw 'Review disposition contains an invalid re_review_status.'
+        }
+        if ($reReviewStatus -eq 'completed' -and
+            @($reReviewEvidence | Where-Object {
+                [string]$_ -match '^(test|artifact|source|observation):.+'
+            }).Count -eq 0) {
+            throw 'Completed re-review requires typed evidence.'
+        }
+        if ([string]$decision.severity -in @('P0', 'P1') -and
+            [string]$decision.disposition -in @(
+                'adopted', 'partially-adopted'
+            ) -and
+            [string]$decision.resolution_status -eq 'resolved' -and
+            $reReviewStatus -ne 'completed') {
+            throw 'Resolved adopted P0/P1 findings require completed re-review.'
+        }
+        if ([string]$decision.severity -in @('P0', 'P1') -and
+            [string]$decision.resolution_status -ne 'resolved') {
+            $computedBlocking.Add($finding)
+        }
+    }
+    $declaredBlocking = @($receipt.blocking_open | ForEach-Object {
+        [string]$_
+    })
+    if (($declaredBlocking -join "`n") -ne
+        (@($computedBlocking) -join "`n")) {
+        throw 'Review disposition blocking_open does not match unresolved P0/P1 findings.'
+    }
+    $payload = [ordered]@{
+        schema_version = [string]$receipt.schema_version
+        run_id = [string]$receipt.run_id
+        milestone_id = [string]$receipt.milestone_id
+        source_node_id = [string]$receipt.source_node_id
+        source_thread_id = [string]$receipt.source_thread_id
+        source_result_receipt_path = $relativeSource
+        source_result_receipt_hash = [string]$receipt.source_result_receipt_hash
+        decisions = $decisions
+        blocking_open = $declaredBlocking
+        created_at_utc = [string]$receipt.created_at_utc
+    }
+    $expectedHash = Get-TextSha256 (
+        $payload | ConvertTo-Json -Compress -Depth 30
+    )
+    if ([string]$receipt.receipt_hash -ne $expectedHash) {
+        throw 'Review disposition receipt hash mismatch.'
     }
     return $receipt
 }

@@ -290,6 +290,28 @@ module, investigation, dataset, design surface, or other independently
 verifiable artifact. Return defects to the original owner. Use an independent
 reviewer only for a material risk, not as a default stage.
 
+For a long-running research or Skill-development project, do not reduce all
+specialist involvement to one final review when the same domain evidence and
+adversarial checks must recur across milestones. With explicit user approval,
+declare the optional `durable_review_profile` from
+[workflow-contract.md](references/workflow-contract.md). It keeps one or more
+project-lifetime domain roles and at least one project-lifetime dissent role as
+read-only background tasks while the main agent remains the only integration
+owner. Use it only when there are at least two named milestones and the roles
+have distinct reusable responsibilities; never create it to fill available
+Worker slots.
+
+At each milestone, first bind the complete report and its extracted
+`pending_findings` with `New-ThreadResultReceipt.ps1`. Then answer every finding
+with `New-ReviewDispositionReceipt.ps1` and send adopted changes or reasoned
+rejections back through the main agent. Adopted or partially adopted P0/P1
+changes are not resolved until the original role completes a re-review.
+Workers do not debate or message each other directly.
+`Test-OrchestrationCompletion.ps1` blocks delivery while any configured P0/P1
+finding remains unresolved. P2 may be deferred only with rationale and
+evidence. Consumer-facing output remains result-only unless an unresolved risk
+or user decision must be disclosed.
+
 For durable runs:
 
 ```powershell
