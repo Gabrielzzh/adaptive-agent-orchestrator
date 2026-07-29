@@ -1294,6 +1294,37 @@ try {
     Assert-True ($legacyVerified.schema_version -eq '1.1') (
         'The pending-findings schema must preserve legacy receipt readability.'
     )
+    $legacy12ReceiptPath = Join-Path $runDirectory (
+        'receipts/legacy-1.2.thread-result-receipt.json'
+    )
+    $legacy12Payload = [ordered]@{
+        schema_version = '1.2'
+        thread_id = [string]$draftReceipt.thread_id
+        host_id = [string]$draftReceipt.host_id
+        collection_method = [string]$draftReceipt.collection_method
+        thread_read_path = [string]$draftReceipt.thread_read_path
+        thread_read_hash = [string]$draftReceipt.thread_read_hash
+        final_turn_id = [string]$draftReceipt.final_turn_id
+        final_status = [string]$draftReceipt.final_status
+        final_content_hash = [string]$draftReceipt.final_content_hash
+        adopted_findings = @()
+        rejected_findings = @()
+        pending_findings = @($draftFindingText)
+    }
+    $legacy12Receipt = [ordered]@{}
+    foreach ($key in $legacy12Payload.Keys) {
+        $legacy12Receipt[$key] = $legacy12Payload[$key]
+    }
+    $legacy12Receipt.receipt_hash = Get-TextSha256 (
+        $legacy12Payload | ConvertTo-Json -Compress -Depth 20
+    )
+    $legacy12Receipt | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $legacy12ReceiptPath
+    $legacy12Verified = Read-ThreadResultReceipt -Path $legacy12ReceiptPath `
+        -ExpectedThreadId 'test-thread-draft' -RunDirectory $runDirectory
+    Assert-True ($legacy12Verified.schema_version -eq '1.2') (
+        'Schema 1.2 receipts should remain readable as historical evidence.'
+    )
     $resolvedDecisionsPath = Join-Path $runDirectory (
         'draft-review-decisions-resolved.json'
     )
@@ -1327,6 +1358,19 @@ try {
     } 'requires a schema 1.3 source receipt' (
         'Legacy result receipts must fail closed for durable disposition.'
     )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ReviewDispositionReceipt.ps1') `
+            -RunDirectory $runDirectory -MilestoneId 'self-test-legacy-1.2' `
+            -SourceNodeId 'draft' -SourceThreadId 'test-thread-draft' `
+            -SourceResultReceiptPath $legacy12ReceiptPath `
+            -DecisionsPath $resolvedDecisionsPath -OutputPath (
+                Join-Path $runDirectory (
+                    'receipts/draft.review-disposition.legacy-1.2.json'
+                )
+            ) | Out-Null
+    } 'requires a schema 1.3 source receipt' (
+        'Schema 1.2 must fail closed for durable disposition.'
+    )
     $resolvedDispositionPath = Join-Path $runDirectory (
         'receipts/draft.review-disposition.json'
     )
@@ -1341,6 +1385,38 @@ try {
         $resolvedDisposition.blocking_open.Count -eq 0 -and
         $resolvedDisposition.receipt_hash -match '^[0-9a-f]{64}$'
     ) 'Resolved review findings should produce a bound immutable receipt.'
+    $wrongSourceHashReceiptPath = Join-Path $runDirectory (
+        'receipts/draft.review-disposition.wrong-source-hash.json'
+    )
+    $wrongSourceHashReceipt = Get-Content -LiteralPath (
+        $resolvedDispositionPath
+    ) -Raw | ConvertFrom-Json -AsHashtable -Depth 30
+    $wrongSourceHashReceipt.source_result_receipt_hash = '0' * 64
+    $wrongSourceHashReceipt | ConvertTo-Json -Depth 30 |
+        Set-Content -LiteralPath $wrongSourceHashReceiptPath
+    Assert-ThrowsLike {
+        Read-ReviewDispositionReceipt -Path $wrongSourceHashReceiptPath `
+            -RunDirectory $runDirectory -ExpectedSourceNodeId 'draft' `
+            -ExpectedThreadId 'test-thread-draft' | Out-Null
+    } 'not bound to its source result receipt' (
+        'Disposition must reject a changed source receipt hash.'
+    )
+    $wrongSourceNodeReceiptPath = Join-Path $runDirectory (
+        'receipts/draft.review-disposition.wrong-node.json'
+    )
+    $wrongSourceNodeReceipt = Get-Content -LiteralPath (
+        $resolvedDispositionPath
+    ) -Raw | ConvertFrom-Json -AsHashtable -Depth 30
+    $wrongSourceNodeReceipt.source_node_id = 'another-source'
+    $wrongSourceNodeReceipt | ConvertTo-Json -Depth 30 |
+        Set-Content -LiteralPath $wrongSourceNodeReceiptPath
+    Assert-ThrowsLike {
+        Read-ReviewDispositionReceipt -Path $wrongSourceNodeReceiptPath `
+            -RunDirectory $runDirectory -ExpectedSourceNodeId 'draft' `
+            -ExpectedThreadId 'test-thread-draft' | Out-Null
+    } 'current run or source node' (
+        'Disposition must reject a changed source node binding.'
+    )
 
     $openDecisionsPath = Join-Path $runDirectory (
         'draft-review-decisions-open.json'
@@ -1429,27 +1505,57 @@ try {
     } 'original source node' (
         'One durable role cannot satisfy another role re-review requirement.'
     )
-    $downgradedSeverityPath = Join-Path $runDirectory (
-        'draft-review-decisions-downgraded-severity.json'
+    $sourceBindingMutations = @(
+        @{
+            name = 'finding-id'
+            property = 'source_finding_id'
+            value = 'unknown-source-finding'
+            expected = 'duplicate or unknown finding'
+        },
+        @{
+            name = 'text'
+            property = 'finding'
+            value = 'Changed finding text.'
+            expected = 'must exactly match source'
+        },
+        @{
+            name = 'text-hash'
+            property = 'finding_hash'
+            value = '0' * 64
+            expected = 'must exactly match source'
+        },
+        @{
+            name = 'severity'
+            property = 'severity'
+            value = 'P2'
+            expected = 'must exactly match source'
+        }
     )
-    $downgradedSeverity = Get-Content -LiteralPath $openDecisionsPath -Raw |
-        ConvertFrom-Json -AsHashtable -Depth 20
-    $downgradedSeverity.severity = 'P2'
-    $downgradedSeverity | ConvertTo-Json -Depth 20 |
-        Set-Content -LiteralPath $downgradedSeverityPath
-    Assert-ThrowsLike {
-        & (Join-Path $scriptRoot 'New-ReviewDispositionReceipt.ps1') `
-            -RunDirectory $runDirectory -MilestoneId 'self-test-downgrade' `
-            -SourceNodeId 'draft' -SourceThreadId 'test-thread-draft' `
-            -SourceResultReceiptPath $draftReceiptPath `
-            -DecisionsPath $downgradedSeverityPath -OutputPath (
-                Join-Path $runDirectory (
-                    'receipts/draft.review-disposition.downgraded.json'
-                )
-            ) | Out-Null
-    } 'must exactly match source' (
-        'A disposition must not downgrade a source finding severity.'
-    )
+    foreach ($mutation in $sourceBindingMutations) {
+        $mutationPath = Join-Path $runDirectory (
+            'draft-review-decisions-mutated-' + $mutation.name + '.json'
+        )
+        $mutatedDecision = Get-Content -LiteralPath $openDecisionsPath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 20
+        $mutatedDecision[$mutation.property] = $mutation.value
+        $mutatedDecision | ConvertTo-Json -Depth 20 |
+            Set-Content -LiteralPath $mutationPath
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot 'New-ReviewDispositionReceipt.ps1') `
+                -RunDirectory $runDirectory `
+                -MilestoneId ('self-test-mutated-' + $mutation.name) `
+                -SourceNodeId 'draft' -SourceThreadId 'test-thread-draft' `
+                -SourceResultReceiptPath $draftReceiptPath `
+                -DecisionsPath $mutationPath -OutputPath (
+                    Join-Path $runDirectory (
+                        'receipts/draft.review-disposition.mutated-' +
+                        $mutation.name + '.json'
+                    )
+                ) | Out-Null
+        } $mutation.expected (
+            "Durable disposition must reject mutated $($mutation.name)."
+        )
+    }
     $runningReadPath = Join-Path $draftReadDirectory 'draft-running.json'
     $runningCapture = Get-Content -LiteralPath $draftReadPath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 20
