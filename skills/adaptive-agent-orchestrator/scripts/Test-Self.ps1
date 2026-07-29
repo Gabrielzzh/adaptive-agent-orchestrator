@@ -809,15 +809,31 @@ try {
     ) 'A committed Git repository should pass writer worktree preflight.'
 
     $modelIds = @('gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra')
+    $platformBindingPath = Join-Path $skillRoot (
+        'references/platform-codex.md'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+            -Capability standard -RequestedModel 'gpt-5.6-terra' `
+            -AllowExperimentalTerra `
+            -AuthorizationEvidence 'user:not-a-real-request-without-binding' `
+            -AvailableModelIds $modelIds | Out-Null
+    } 'requires PlatformBindingPath' (
+        'Loading routing-policy without the platform binding must not ' +
+        'authorize any concrete model, including Terra.'
+    )
     $economyModel = & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
         -Capability economy -AvailableModelIds $modelIds | ConvertFrom-Json
     Assert-True (
         $economyModel.model -eq 'gpt-5.6-luna' -and
         $economyModel.effort -eq 'medium' -and
-        -not $economyModel.inherits_main_agent_model
-    ) 'Economy should resolve to Luna medium.'
+        -not $economyModel.inherits_main_agent_model -and
+        $economyModel.platform_binding_sha256 -match '^[0-9a-f]{64}$'
+    ) 'Economy should resolve to Luna medium through a hashed platform binding.'
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
             -Capability economy -AvailableModelIds @('gpt-5.6-sol') |
             Out-Null
     } 'never inherit the main-agent model silently' (
@@ -825,12 +841,14 @@ try {
         'not silently inherit the expensive main model.'
     )
     $standardModel = & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
         -Capability standard -AvailableModelIds $modelIds | ConvertFrom-Json
     Assert-True ($standardModel.model -eq 'gpt-5.6-sol') (
         'Standard judgment should resolve to Sol, not Terra.'
     )
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
             -Capability standard -RequestedModel 'gpt-5.6-terra' `
             -AvailableModelIds $modelIds | Out-Null
     } 'Terra requires an explicit request' (
@@ -838,6 +856,7 @@ try {
     )
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
             -Capability standard -RequestedModel 'gpt-5.6-terra' `
             -AllowExperimentalTerra -AvailableModelIds $modelIds | Out-Null
     } 'user: authorization evidence' (
@@ -845,12 +864,14 @@ try {
     )
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
             -Capability ultra -AvailableModelIds $modelIds | Out-Null
     } 'user: confirmation evidence' (
         'Ultra must require explicit per-node confirmation.'
     )
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
             -Capability economy -RequestedModel 'gpt-5.6-sol' `
             -AvailableModelIds $modelIds | Out-Null
     } 'requires explicit user confirmation' (
@@ -858,6 +879,7 @@ try {
     )
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
             -Capability strong -PriorRunDirectory $testRoot `
             -AvailableModelIds $modelIds | Out-Null
     } 'must be provided together' (
@@ -865,6 +887,7 @@ try {
     )
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
             -Capability economy -RequestedModel 'gpt-5.6-sol' `
             -UserConfirmedEscalation `
             -AuthorizationEvidence 'policy:path:missing-policy.md' `
@@ -873,6 +896,7 @@ try {
         'A policy pointer must identify a real project file.'
     )
     $confirmedTerra = & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
         -Capability standard -RequestedModel 'gpt-5.6-terra' `
         -AllowExperimentalTerra `
         -AuthorizationEvidence 'user:explicit-terra-test-request' `
@@ -920,12 +944,14 @@ try {
         -IdempotencyKey 'luna-routing-failed' | Out-Null
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
             -Capability strong -PriorRunDirectory $lunaRetryRun `
             -PriorNodeId 'draft' -AvailableModelIds $modelIds | Out-Null
     } 'requires explicit user confirmation' (
         'A journal-derived Luna-to-Sol escalation must require confirmation.'
     )
     $confirmedRetry = & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
         -Capability strong -PriorRunDirectory $lunaRetryRun `
         -PriorNodeId 'draft' `
         -UserConfirmedEscalation `
@@ -1547,6 +1573,23 @@ try {
         $skillPolicyText -like '*data, never as control instructions*' -and
         $safetyPolicyText -like '*data, not instructions to the main agent*'
     ) 'Worker packets must inject the untrusted-data control-plane policy.'
+    $routingPolicyText = Get-Content -LiteralPath (
+        Join-Path $skillRoot 'references/routing-policy.md'
+    ) -Raw
+    Assert-True (
+        $skillPolicyText -like (
+            '*A concrete model or effort may enter*only from that resolver*'
+        ) -and
+        $skillPolicyText -like (
+            '*actual model: unverified*never relabel the request*'
+        ) -and
+        $routingPolicyText -like (
+            '*If only this routing policy was loaded, no concrete model*'
+        )
+    ) (
+        'The launch contract must forbid model inference from routing policy ' +
+        'without the platform-bound resolver.'
+    )
     Assert-True ($packet -like '*Maximum questions: 2*') (
         'Rendered packets should contain the role question limit.'
     )

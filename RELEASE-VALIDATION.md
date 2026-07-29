@@ -37,7 +37,7 @@ python `
 
 - Exit code: 0
 - PowerShell scripts parsed: 28
-- Self-test assertions: 536 passed
+- Self-test assertions: 538 passed
 - Intentional invalid-plan negative cases: 50 correctly rejected
 - Strict reference JSON files parsed: 7
 - Skill Creator validation: `Skill is valid!`

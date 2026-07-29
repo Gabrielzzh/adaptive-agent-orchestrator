@@ -20,6 +20,14 @@ automatic selection or fallback. `Resolve-WorkerModel.ps1`,
 contract and must be updated together if the supported pool changes. Never
 invent a model ID that the runtime does not expose.
 
+Every concrete native-subagent or durable-task launch route must come from a
+current `Resolve-WorkerModel.ps1` invocation that binds this exact file through
+`PlatformBindingPath`. Loading `routing-policy.md`, describing a node as
+bounded, or preferring lower cost does not authorize a model. If this binding
+or resolver output is missing, do not launch. Terra additionally requires the
+user to request Terra explicitly and the resolver call to carry the matching
+`user:` evidence; policy authorization is insufficient.
+
 This binding is the current conservative runtime contract, not an inference
 from tier names. Select directly from this table during user work: do not run a
 benchmark, A/B test, or model-selection Worker first. Public benchmarks are
@@ -35,6 +43,11 @@ Use a native subagent for a subtask of the current request:
 - inspect with `list_agents`;
 - collect with `wait_agent`;
 - keep it temporary, non-recursive, and bounded by the current task.
+
+If native-subagent creation reports only the requested route and agent ID,
+record `actual model: unverified`. Do not claim the requested model was
+observed. A later platform result may replace this label only when it exposes
+the actual model explicitly.
 
 An independent Codex task/thread is user-owned and appears separately in the
 application. Create one only when the user explicitly asks for, or explicitly

@@ -128,6 +128,13 @@ safe project-relative file. Retry resolution reads the prior failed node's
 actual model from its validated immutable journal and its effort from the
 sealed plan; callers cannot supply either value directly.
 
+A capability decision is not a concrete model decision. Before putting any
+model or effort into a launch tool, load `platform-codex.md` and call the
+resolver with that bundled file as `PlatformBindingPath`. The resolver output
+is the launch route. If only this routing policy was loaded, no concrete model
+is authorized and the Worker must not launch. Cost or boundedness may select a
+capability class; neither can authorize Terra.
+
 Do not inherit the main agent's model as a default. If the selected capability
 model is unavailable, keep the work in the main agent or request confirmation
 for a model actually exposed by the destination. Do not silently escalate a

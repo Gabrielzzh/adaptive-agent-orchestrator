@@ -22,6 +22,11 @@ Durable-task and worktree lifecycle correction.
 - Enforce the 40-second task-list visibility floor in reconciliation generation
   and receipt verification so a caller-supplied short window cannot authorize
   a duplicate durable-task retry.
+- Make the platform-bound model resolver a mandatory launch gate. Capability
+  descriptions or cost rationale cannot authorize a concrete model, and Terra
+  remains blocked without an explicit `user:` request.
+- When a native-subagent creation response omits the runtime model, report the
+  requested route separately and mark the actual model as unverified.
 
 ## 0.7.0 - 2026-07-27
 

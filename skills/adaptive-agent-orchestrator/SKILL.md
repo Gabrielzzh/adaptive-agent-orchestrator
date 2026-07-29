@@ -117,8 +117,10 @@ Show its Worker list when it changes the dispatch decision. Treat
 use or monetary cost.
 
 After materialization, report the role, actual execution form, actual Worker or
-thread ID, actual model, status, and any deviation from the preview. Repeat
-permissions or dependencies only when they changed. A failed health probe is
+thread ID, actual model, status, and any deviation from the preview. If the
+platform creation result does not expose the actual model, report the requested
+route and `actual model: unverified`; never relabel the request as observed
+runtime fact. Repeat permissions or dependencies only when they changed. A failed health probe is
 not proof of absence; it consumes no seat only after task-list reconciliation
 confirms that nothing materialized. Target at most six active Workers: four
 active background threads plus two reserved native-subagent slots. Clamp this
@@ -238,13 +240,23 @@ context-overlap, progressive-dispatch, or delta-retry rules to force a team.
 
 Resolve `auto`, capacity, and verification profile with
 `Resolve-OrchestrationPreset.ps1`. Resolve the dispatch model with
-`Resolve-WorkerModel.ps1`. Before every launch, use
+`Resolve-WorkerModel.ps1`. A concrete model or effort may enter
+`spawn_agent`, `create_thread`, or a durable plan only from that resolver's
+current output after loading [platform-codex.md](references/platform-codex.md)
+and passing its path as `PlatformBindingPath`. Never infer a concrete model
+from capability names, cost descriptions, `routing-policy.md`, or the main
+agent's model. If the platform binding was not loaded, the resolver was not
+run, or resolution fails, do not launch; keep the work in the main agent.
+Before every launch, use
 `Resolve-WorkerCapacity.ps1` with observed active persistent and transient
 counts; registered but idle agents do not count. Automatically use the
 `economy` class only for bounded mechanical work and `standard` for ordinary
 judgment, implementation, writing, or review. Resolve concrete model IDs with
 [platform-codex.md](references/platform-codex.md). Treat experimental models as
-explicit-request-only. Before any model or effort escalation, explain the
+explicit-request-only. Terra additionally requires a concrete `user:` request
+pointer in the resolver call; a role description, cost rationale, or automatic
+teaming policy is not authorization. Before any model or effort escalation,
+explain the
 change and obtain user confirmation unless a bounded policy already authorizes
 it. Ultra always needs explicit per-node confirmation.
 
