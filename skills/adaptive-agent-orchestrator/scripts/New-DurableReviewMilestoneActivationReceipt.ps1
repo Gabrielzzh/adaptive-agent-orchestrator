@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory)][string] $MilestoneId,
     [Parameter(Mandatory)][string] $SelectionPath,
     [Parameter(Mandatory)][string] $AuthorizationMaterialPath,
+    [Parameter(Mandatory)][string] $AcceptanceAuthorizationMaterialPath,
     [Parameter(Mandatory)][string] $ActivationKey
 )
 
@@ -69,10 +70,44 @@ $selectionFullPath = Resolve-RunFile $SelectionPath 'Milestone selection'
 $authorizationFullPath = Resolve-RunFile (
     $AuthorizationMaterialPath
 ) 'Milestone authorization'
+$acceptanceAuthorizationFullPath = Resolve-RunFile (
+    $AcceptanceAuthorizationMaterialPath
+) 'Milestone acceptance authorization'
 if ([string]::IsNullOrWhiteSpace(
     (Get-Content -LiteralPath $authorizationFullPath -Raw)
 )) {
     throw 'Milestone authorization material cannot be empty.'
+}
+$acceptanceAuthorization = Get-Content -LiteralPath (
+    $acceptanceAuthorizationFullPath
+) -Raw | ConvertFrom-Json -Depth 30 -DateKind String
+$mainNodes = @($plan.nodes | Where-Object { [string]$_.kind -eq 'main' })
+foreach ($name in @(
+    'schema_version', 'milestone_id', 'main_node_id', 'acceptance_key',
+    'evidence_material_path', 'evidence_material_hash'
+)) {
+    if ($null -eq $acceptanceAuthorization.PSObject.Properties[$name]) {
+        throw "Milestone acceptance authorization is missing '$name'."
+    }
+}
+if ([string]$acceptanceAuthorization.schema_version -ne '1.0' -or
+    [string]$acceptanceAuthorization.milestone_id -ne $MilestoneId -or
+    $mainNodes.Count -ne 1 -or
+    [string]$acceptanceAuthorization.main_node_id -ne
+        [string]$mainNodes[0].id -or
+    [string]$acceptanceAuthorization.acceptance_key -notmatch
+        '^(user|controller):[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$') {
+    throw 'Milestone acceptance authorization does not match this activation.'
+}
+$acceptanceEvidenceFullPath = Resolve-RunFile (
+    Join-Path $runRoot (
+        [string]$acceptanceAuthorization.evidence_material_path
+    )
+) 'Milestone acceptance evidence'
+if ([string]$acceptanceAuthorization.evidence_material_hash -ne (
+    Get-FileHash -LiteralPath $acceptanceEvidenceFullPath -Algorithm SHA256
+).Hash.ToLowerInvariant()) {
+    throw 'Milestone acceptance authorization evidence hash changed.'
 }
 $selections = @(
     Get-Content -LiteralPath $selectionFullPath -Raw |
@@ -132,8 +167,11 @@ $selectionRelativePath = [IO.Path]::GetRelativePath(
 $authorizationRelativePath = [IO.Path]::GetRelativePath(
     $runRoot, $authorizationFullPath
 ).Replace('\', '/')
+$acceptanceAuthorizationRelativePath = [IO.Path]::GetRelativePath(
+    $runRoot, $acceptanceAuthorizationFullPath
+).Replace('\', '/')
 $payload = [ordered]@{
-    schema_version = '1.0'
+    schema_version = '1.1'
     run_id = [string]$run.run_id
     plan_hash = [string]$run.plan_hash
     milestone_id = $MilestoneId
@@ -165,6 +203,20 @@ $payload = [ordered]@{
     authorization_material_hash = (
         Get-FileHash -LiteralPath $authorizationFullPath -Algorithm SHA256
     ).Hash.ToLowerInvariant()
+    acceptance_authorization_material_path =
+        $acceptanceAuthorizationRelativePath
+    acceptance_authorization_material_hash = (
+        Get-FileHash -LiteralPath $acceptanceAuthorizationFullPath `
+            -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    main_node_id = [string]$acceptanceAuthorization.main_node_id
+    acceptance_key = [string]$acceptanceAuthorization.acceptance_key
+    acceptance_evidence_material_path = [string](
+        $acceptanceAuthorization.evidence_material_path
+    )
+    acceptance_evidence_material_hash = [string](
+        $acceptanceAuthorization.evidence_material_hash
+    )
     activation_key = $ActivationKey
     created_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
 }
@@ -229,7 +281,8 @@ try {
         error_class = $null
         evidence = @(
             "artifact:receipts/$receiptName",
-            "artifact:$authorizationRelativePath"
+            "artifact:$authorizationRelativePath",
+            "artifact:$acceptanceAuthorizationRelativePath"
         )
         idempotency_key = $ActivationKey
         request_fingerprint = [string]$receipt.receipt_hash

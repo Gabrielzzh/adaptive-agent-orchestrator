@@ -85,6 +85,24 @@ function Get-OrchestrationEventHash {
             $keys[$milestoneIndex..($keys.Count - 1)]
         )
     }
+    if ($null -ne $Event.PSObject.Properties[
+        'milestone_acceptance_key'
+    ] -or $null -ne $Event.PSObject.Properties[
+        'milestone_acceptance_evidence_path'
+    ] -or $null -ne $Event.PSObject.Properties[
+        'milestone_acceptance_evidence_hash'
+    ]) {
+        $acceptanceIndex = [Array]::IndexOf(
+            $keys, 'milestone_acceptance_receipt_hash'
+        ) + 1
+        $keys = @(
+            $keys[0..($acceptanceIndex - 1)]
+            'milestone_acceptance_key'
+            'milestone_acceptance_evidence_path'
+            'milestone_acceptance_evidence_hash'
+            $keys[$acceptanceIndex..($keys.Count - 1)]
+        )
+    }
     $payload = [ordered]@{}
     foreach ($key in $keys) {
         $property = $Event.PSObject.Properties[$key]
@@ -1568,12 +1586,20 @@ function Read-DurableReviewMilestoneActivationChain {
             'authorization_material_hash', 'activation_key',
             'created_at_utc', 'receipt_hash'
         )
+        if ([string]$receipt.schema_version -eq '1.1') {
+            $required += @(
+                'acceptance_authorization_material_path',
+                'acceptance_authorization_material_hash', 'main_node_id',
+                'acceptance_key', 'acceptance_evidence_material_path',
+                'acceptance_evidence_material_hash'
+            )
+        }
         foreach ($name in $required) {
             if ($null -eq $receipt.PSObject.Properties[$name]) {
                 throw "Milestone activation receipt is missing '$name'."
             }
         }
-        if ([string]$receipt.schema_version -ne '1.0' -or
+        if ([string]$receipt.schema_version -notin @('1.0', '1.1') -or
             [string]$receipt.run_id -ne [string]$run.run_id -or
             [string]$receipt.plan_hash -ne [string]$run.plan_hash -or
             [string]$receipt.milestone_id -ne $milestoneId -or
@@ -1622,6 +1648,54 @@ function Read-DurableReviewMilestoneActivationChain {
                 '^(user|controller):[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$'
             )) {
             throw 'Milestone activation authorization binding changed.'
+        }
+        if ([string]$receipt.schema_version -eq '1.1') {
+            $acceptanceAuthorizationPath = Get-RunLocalReceiptPath `
+                -RunDirectory $runRoot -RelativePath (
+                    [string]$receipt.acceptance_authorization_material_path
+                ) -Label 'Milestone acceptance authorization'
+            if (-not (
+                Test-Path -LiteralPath $acceptanceAuthorizationPath `
+                    -PathType Leaf
+            ) -or [string]$receipt.acceptance_authorization_material_hash -ne (
+                Get-FileHash -LiteralPath $acceptanceAuthorizationPath `
+                    -Algorithm SHA256
+            ).Hash.ToLowerInvariant()) {
+                throw 'Milestone acceptance authorization binding changed.'
+            }
+            $acceptanceAuthorization = Get-Content -LiteralPath (
+                $acceptanceAuthorizationPath
+            ) -Raw | ConvertFrom-Json -Depth 30 -DateKind String
+            $mainNodes = @($plan.nodes | Where-Object {
+                [string]$_.kind -eq 'main'
+            })
+            if ($mainNodes.Count -ne 1 -or
+                [string]$receipt.main_node_id -ne
+                    [string]$mainNodes[0].id -or
+                [string]$acceptanceAuthorization.milestone_id -ne
+                    $milestoneId -or
+                [string]$acceptanceAuthorization.main_node_id -ne
+                    [string]$receipt.main_node_id -or
+                [string]$acceptanceAuthorization.acceptance_key -ne
+                    [string]$receipt.acceptance_key -or
+                [string]$acceptanceAuthorization.evidence_material_path -ne
+                    [string]$receipt.acceptance_evidence_material_path -or
+                [string]$acceptanceAuthorization.evidence_material_hash -ne
+                    [string]$receipt.acceptance_evidence_material_hash) {
+                throw 'Milestone acceptance authorization constraints changed.'
+            }
+            $acceptanceEvidencePath = Get-RunLocalReceiptPath `
+                -RunDirectory $runRoot -RelativePath (
+                    [string]$receipt.acceptance_evidence_material_path
+                ) -Label 'Milestone acceptance evidence'
+            if (-not (Test-Path -LiteralPath $acceptanceEvidencePath `
+                -PathType Leaf) -or
+                [string]$receipt.acceptance_evidence_material_hash -ne (
+                    Get-FileHash -LiteralPath $acceptanceEvidencePath `
+                        -Algorithm SHA256
+                ).Hash.ToLowerInvariant()) {
+                throw 'Milestone acceptance evidence anchor changed.'
+            }
         }
         $selectionPath = Get-RunLocalReceiptPath `
             -RunDirectory $runRoot `
@@ -1786,7 +1860,14 @@ function Read-DurableReviewMilestoneAcceptance {
         [string]$receipt.checkpoint_material_path -ne
             [string]$chain.activation_receipt.checkpoint_material_path -or
         [string]$receipt.checkpoint_material_hash -ne
-            [string]$chain.activation_receipt.checkpoint_material_hash) {
+            [string]$chain.activation_receipt.checkpoint_material_hash -or
+        [string]$chain.activation_receipt.schema_version -ne '1.1' -or
+        [string]$receipt.acceptance_key -ne
+            [string]$chain.activation_receipt.acceptance_key -or
+        [string]$receipt.evidence_material_path -ne
+            [string]$chain.activation_receipt.acceptance_evidence_material_path -or
+        [string]$receipt.evidence_material_hash -ne
+            [string]$chain.activation_receipt.acceptance_evidence_material_hash) {
         throw 'Milestone acceptance does not match the active review chain.'
     }
     $evidencePath = Get-RunLocalReceiptPath -RunDirectory $runRoot `
@@ -1840,6 +1921,12 @@ function Read-DurableReviewMilestoneAcceptance {
         [string]$acceptanceEvents[0].status -ne 'validated' -or
         [string]$acceptanceEvents[0].milestone_activation_receipt_hash -ne
             [string]$chain.activation_receipt_hash -or
+        [string]$acceptanceEvents[0].milestone_acceptance_key -ne
+            [string]$receipt.acceptance_key -or
+        [string]$acceptanceEvents[0].milestone_acceptance_evidence_path -ne
+            [string]$receipt.evidence_material_path -or
+        [string]$acceptanceEvents[0].milestone_acceptance_evidence_hash -ne
+            [string]$receipt.evidence_material_hash -or
         $eventIndex -lt 1 -or
         [string]$events[$eventIndex - 1].hash -ne
             [string]$receipt.source_journal_head) {

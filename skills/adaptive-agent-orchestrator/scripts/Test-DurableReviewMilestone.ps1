@@ -242,6 +242,42 @@ function Convert-SourceChainToHistoricalAlias {
         Set-Content -LiteralPath $dispositionPath -Encoding utf8
 }
 
+function Resign-AcceptanceTail {
+    param(
+        [string] $Run,
+        [scriptblock] $ReceiptMutation
+    )
+    $receiptPath = Join-Path $Run (
+        'receipts/durable-review-milestone.method-2.acceptance.json'
+    )
+    $receipt = Get-Content -LiteralPath $receiptPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    & $ReceiptMutation $receipt
+    $receipt.Remove('receipt_hash')
+    $receipt.receipt_hash = Get-TextSha256 (
+        $receipt | ConvertTo-Json -Compress -Depth 100
+    )
+    $receipt | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $receiptPath -Encoding utf8
+
+    $eventsPath = Join-Path $Run 'events.jsonl'
+    $eventLines = @(Get-Content -LiteralPath $eventsPath)
+    $event = $eventLines[-1] |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $event.milestone_acceptance_receipt_hash = $receipt.receipt_hash
+    $event.milestone_acceptance_key = $receipt.acceptance_key
+    $event.milestone_acceptance_evidence_path =
+        $receipt.evidence_material_path
+    $event.milestone_acceptance_evidence_hash =
+        $receipt.evidence_material_hash
+    $event.idempotency_key = $receipt.acceptance_key
+    $event.request_fingerprint = $receipt.receipt_hash
+    $event.Remove('hash')
+    $event.hash = Get-OrchestrationEventHash ([pscustomobject]$event)
+    $eventLines[-1] = $event | ConvertTo-Json -Compress -Depth 100
+    $eventLines | Set-Content -LiteralPath $eventsPath -Encoding utf8
+}
+
 function Complete-SourceLifecycle {
     param(
         [string] $Run,
@@ -362,6 +398,26 @@ try {
     $authorizationPath = Join-Path $run 'materials/method-2-authorization.md'
     Set-Content -LiteralPath $authorizationPath `
         -Value 'Controller activates exactly method-2.'
+    $acceptanceEvidencePath = Join-Path $run (
+        'materials/method-2-main-acceptance.md'
+    )
+    Set-Content -LiteralPath $acceptanceEvidencePath -Value (
+        'Main owner integrated the exact method-2 source reports.'
+    )
+    $acceptanceAuthorizationPath = Join-Path $run (
+        'materials/method-2-acceptance-authorization.json'
+    )
+    [ordered]@{
+        schema_version = '1.0'
+        milestone_id = 'method-2'
+        main_node_id = 'integrate'
+        acceptance_key = 'controller:accept-method-2'
+        evidence_material_path = 'materials/method-2-main-acceptance.md'
+        evidence_material_hash = (
+            Get-FileHash -LiteralPath $acceptanceEvidencePath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+    } | ConvertTo-Json -Depth 10 |
+        Set-Content -LiteralPath $acceptanceAuthorizationPath -Encoding utf8
 
     $unselectedCompletion = & (
         Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1'
@@ -416,6 +472,11 @@ try {
     )) -RunDirectory $resolvedRun -MilestoneId 'method-2' `
         -SelectionPath $resolvedSelectionPath `
         -AuthorizationMaterialPath $resolvedAuthorizationPath `
+        -AcceptanceAuthorizationMaterialPath (
+            Join-Path $resolvedRun (
+                'materials/method-2-acceptance-authorization.json'
+            )
+        ) `
         -ActivationKey 'controller:resolved-method-2' | Out-Null
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
@@ -423,16 +484,9 @@ try {
     } 'lacks main-owner acceptance' (
         'A later milestone cannot reuse the main acceptance from its baseline.'
     )
-    $acceptanceEvidencePath = Join-Path $resolvedRun (
-        'materials/method-2-main-acceptance.md'
-    )
-    Set-Content -LiteralPath $acceptanceEvidencePath `
-        -Value 'Main owner integrated both resolved method-2 source reports.'
     $acceptance = & (Join-Path $scriptRoot (
         'New-DurableReviewMilestoneAcceptanceReceipt.ps1'
-    )) -RunDirectory $resolvedRun -MilestoneId 'method-2' `
-        -EvidenceMaterialPath $acceptanceEvidencePath `
-        -AcceptanceKey 'controller:accept-resolved-method-2' |
+    )) -RunDirectory $resolvedRun -MilestoneId 'method-2' |
         ConvertFrom-Json -Depth 100
     $resolvedCompletion = & (
         Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1'
@@ -444,11 +498,45 @@ try {
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot (
             'New-DurableReviewMilestoneAcceptanceReceipt.ps1'
-        )) -RunDirectory $resolvedRun -MilestoneId 'method-2' `
-            -EvidenceMaterialPath $acceptanceEvidencePath `
-            -AcceptanceKey 'controller:duplicate-method-2-acceptance' |
+        )) -RunDirectory $resolvedRun -MilestoneId 'method-2' |
             Out-Null
     } 'already exists' 'A milestone acceptance cannot be recorded twice.'
+    $resignedKeyRun = Join-Path $testRoot 'resigned-acceptance-key'
+    Copy-Item -LiteralPath $resolvedRun -Destination $resignedKeyRun -Recurse
+    Resign-AcceptanceTail -Run $resignedKeyRun -ReceiptMutation {
+        param($receipt)
+        $receipt.acceptance_key = 'controller:forged-method-2'
+    }
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $resignedKeyRun | Out-Null
+    } 'does not match the active review chain' (
+        'A coherently re-signed acceptance key cannot replace the activation ' +
+        'authorization anchor.'
+    )
+    $resignedEvidenceRun = Join-Path $testRoot 'resigned-acceptance-evidence'
+    Copy-Item -LiteralPath $resolvedRun -Destination $resignedEvidenceRun `
+        -Recurse
+    $alternateEvidencePath = Join-Path $resignedEvidenceRun (
+        'materials/alternate-main-acceptance.md'
+    )
+    Set-Content -LiteralPath $alternateEvidencePath `
+        -Value 'A different run-local file must not replace anchored evidence.'
+    $alternateEvidenceHash = (
+        Get-FileHash -LiteralPath $alternateEvidencePath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    Resign-AcceptanceTail -Run $resignedEvidenceRun -ReceiptMutation {
+        param($receipt)
+        $receipt.evidence_material_path =
+            'materials/alternate-main-acceptance.md'
+        $receipt.evidence_material_hash = $alternateEvidenceHash
+    }
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $resignedEvidenceRun | Out-Null
+    } 'does not match the active review chain' (
+        'Coherently re-signed evidence cannot replace the activation anchor.'
+    )
 
     $activation = & (
         Join-Path $scriptRoot (
@@ -457,6 +545,7 @@ try {
     ) -RunDirectory $run -MilestoneId 'method-2' `
         -SelectionPath $selectionPath `
         -AuthorizationMaterialPath $authorizationPath `
+        -AcceptanceAuthorizationMaterialPath $acceptanceAuthorizationPath `
         -ActivationKey 'controller:self-test-method-2' |
         ConvertFrom-Json -Depth 100
     Assert-True (
@@ -485,9 +574,7 @@ try {
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot (
             'New-DurableReviewMilestoneAcceptanceReceipt.ps1'
-        )) -RunDirectory $run -MilestoneId 'method-2' `
-            -EvidenceMaterialPath $authorizationPath `
-            -AcceptanceKey 'controller:accept-open-method-2' | Out-Null
+        )) -RunDirectory $run -MilestoneId 'method-2' | Out-Null
     } 'unresolved P0/P1' (
         'Main-owner acceptance cannot precede resolution of active blockers.'
     )
@@ -498,6 +585,7 @@ try {
         )) -RunDirectory $run -MilestoneId 'method-2' `
             -SelectionPath $selectionPath `
             -AuthorizationMaterialPath $authorizationPath `
+            -AcceptanceAuthorizationMaterialPath $acceptanceAuthorizationPath `
             -ActivationKey 'controller:duplicate-method-2' | Out-Null
     } 'not the next declared milestone' (
         'A milestone cannot be activated twice.'
@@ -510,6 +598,10 @@ try {
                 Join-Path $preActivation 'materials/method-2-selection.json'
             ) -AuthorizationMaterialPath (
                 Join-Path $preActivation 'materials/method-2-authorization.md'
+            ) -AcceptanceAuthorizationMaterialPath (
+                Join-Path $preActivation (
+                    'materials/method-2-acceptance-authorization.json'
+                )
             ) -ActivationKey 'controller:skip-method-2' | Out-Null
     } 'not the next declared milestone' (
         'An undeclared or skipped milestone must fail closed.'
@@ -536,6 +628,10 @@ try {
             -AuthorizationMaterialPath (
                 Join-Path $duplicateSourceRun (
                     'materials/method-2-authorization.md'
+                )
+            ) -AcceptanceAuthorizationMaterialPath (
+                Join-Path $duplicateSourceRun (
+                    'materials/method-2-acceptance-authorization.json'
                 )
             ) -ActivationKey 'controller:duplicate-source' | Out-Null
     } 'missing or repeated' (
@@ -577,6 +673,10 @@ try {
             -AuthorizationMaterialPath (
                 Join-Path $differentCheckpointRun (
                     'materials/method-2-authorization.md'
+                )
+            ) -AcceptanceAuthorizationMaterialPath (
+                Join-Path $differentCheckpointRun (
+                    'materials/method-2-acceptance-authorization.json'
                 )
             ) -ActivationKey 'controller:different-checkpoint' | Out-Null
     } 'same checkpoint material' (

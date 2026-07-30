@@ -317,6 +317,8 @@ checkpoint binding, create source-specific dispositions, and activate them with
 `New-DurableReviewMilestoneActivationReceipt.ps1`. The append-only activation
 receipt and journal event select the exact source chains; never edit the plan,
 overwrite old receipts, or infer the active milestone from file timestamps.
+The activation must also bind controller material that fixes the later
+main-owner acceptance key and evidence path/hash.
 After all active P0/P1 findings are resolved, the main integration owner must
 record a fresh `New-DurableReviewMilestoneAcceptanceReceipt.ps1` bound to that
 activation, its source bindings, checkpoint, and acceptance evidence. A main

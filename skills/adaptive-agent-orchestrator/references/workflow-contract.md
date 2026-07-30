@@ -262,11 +262,24 @@ file:
 
 Activate only the next declared milestone:
 
+```json
+{
+  "schema_version": "1.0",
+  "milestone_id": "method-2",
+  "main_node_id": "integrate",
+  "acceptance_key": "controller:method-2-main-acceptance",
+  "evidence_material_path": "materials/method-2-main-acceptance.md",
+  "evidence_material_hash": "<sha256>"
+}
+```
+
 ```powershell
 pwsh -File scripts/New-DurableReviewMilestoneActivationReceipt.ps1 `
   -RunDirectory <run> -MilestoneId method-2 `
   -SelectionPath <run>/materials/method-2-selection.json `
   -AuthorizationMaterialPath <run>/materials/method-2-authorization.md `
+  -AcceptanceAuthorizationMaterialPath `
+    <run>/materials/method-2-acceptance-authorization.json `
   -ActivationKey "controller:<stable-authority-reference>"
 ```
 
@@ -277,16 +290,16 @@ authorization. It also appends one hash-bound journal event. Completion uses
 the terminal valid activation chain, never a filename timestamp or unactivated
 "latest" receipt. Missing, duplicated, skipped, changed, cross-run,
 cross-source, or cross-checkpoint bindings fail closed. Policy activation is a
-different protocol and cannot select a milestone.
+different protocol and cannot select a milestone. Activation also anchors the
+only permitted main-owner acceptance key and the exact evidence path and hash;
+the later acceptance receipt cannot choose replacements.
 
 After every active non-baseline milestone has resolved all P0/P1 findings, the
 main integration owner must record a new acceptance:
 
 ```powershell
 pwsh -File scripts/New-DurableReviewMilestoneAcceptanceReceipt.ps1 `
-  -RunDirectory <run> -MilestoneId method-2 `
-  -EvidenceMaterialPath <run>/materials/method-2-main-acceptance.md `
-  -AcceptanceKey "controller:<stable-authority-reference>"
+  -RunDirectory <run> -MilestoneId method-2
 ```
 
 The acceptance receipt and its append-only journal event bind the exact
@@ -294,7 +307,9 @@ activation receipt, source-binding hash, shared checkpoint, main-owner node,
 and run-local evidence. Its event sequence must be later than activation.
 Completion never reuses a main node's `validated` state from the baseline or an
 earlier milestone. Missing, duplicated, changed, or pre-activation acceptance
-fails closed.
+fails closed. The event directly repeats the anchored key and evidence
+path/hash; coherently re-signing only the acceptance receipt and chain-tail
+event cannot replace the earlier activation authorization anchor.
 
 When a durable source has no final answer, its node enters `result_pending`.
 The only legal continuations are a bounded same-source recovery or, after a

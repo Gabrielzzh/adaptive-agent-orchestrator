@@ -1,9 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string] $RunDirectory,
-    [Parameter(Mandatory)][string] $MilestoneId,
-    [Parameter(Mandatory)][string] $EvidenceMaterialPath,
-    [Parameter(Mandatory)][string] $AcceptanceKey
+    [Parameter(Mandatory)][string] $MilestoneId
 )
 
 Set-StrictMode -Version Latest
@@ -20,13 +18,14 @@ $eventsPath = Join-Path $runRoot 'events.jsonl'
 $events = @(Read-OrchestrationJournal $eventsPath)
 $chain = Read-DurableReviewMilestoneActivationChain -RunDirectory $runRoot
 if ([string]$chain.active_milestone_id -ne $MilestoneId -or
-    [string]::IsNullOrWhiteSpace([string]$chain.activation_receipt_hash)) {
+    [string]::IsNullOrWhiteSpace([string]$chain.activation_receipt_hash) -or
+    [string]$chain.activation_receipt.schema_version -ne '1.1') {
     throw 'Main-owner acceptance requires the active non-baseline milestone.'
 }
-if ($AcceptanceKey -notmatch
-    '^(user|controller):[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$') {
-    throw 'Milestone acceptance requires a stable user: or controller: key.'
-}
+$AcceptanceKey = [string]$chain.activation_receipt.acceptance_key
+$evidenceRelativePath = [string](
+    $chain.activation_receipt.acceptance_evidence_material_path
+)
 $mainNodes = @($plan.nodes | Where-Object { [string]$_.kind -eq 'main' })
 if ($mainNodes.Count -ne 1) {
     throw 'Milestone acceptance requires exactly one main-owner node.'
@@ -50,19 +49,16 @@ foreach ($binding in @($chain.active_source_bindings)) {
     }
 }
 
-$evidenceFullPath = [IO.Path]::GetFullPath($EvidenceMaterialPath)
-if (-not $evidenceFullPath.StartsWith(
-    $runRoot + [IO.Path]::DirectorySeparatorChar,
-    [StringComparison]::OrdinalIgnoreCase
-) -or -not (Test-Path -LiteralPath $evidenceFullPath -PathType Leaf) -or
+$evidenceFullPath = Get-RunLocalReceiptPath -RunDirectory $runRoot `
+    -RelativePath $evidenceRelativePath -Label 'Milestone acceptance evidence'
+if (-not (Test-Path -LiteralPath $evidenceFullPath -PathType Leaf) -or
     [string]::IsNullOrWhiteSpace(
         (Get-Content -LiteralPath $evidenceFullPath -Raw)
-    )) {
+    ) -or [string]$chain.activation_receipt.acceptance_evidence_material_hash -ne (
+        Get-FileHash -LiteralPath $evidenceFullPath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()) {
     throw 'Milestone acceptance evidence must be a non-empty run-local file.'
 }
-$evidenceRelativePath = [IO.Path]::GetRelativePath(
-    $runRoot, $evidenceFullPath
-).Replace('\', '/')
 $receiptDirectory = Join-Path $runRoot 'receipts'
 $receiptName = "durable-review-milestone.$MilestoneId.acceptance.json"
 $receiptPath = Join-Path $receiptDirectory $receiptName
@@ -90,9 +86,9 @@ $payload = [ordered]@{
     source_journal_head = [string]$events[-1].hash
     source_journal_event_count = $events.Count
     evidence_material_path = $evidenceRelativePath
-    evidence_material_hash = (
-        Get-FileHash -LiteralPath $evidenceFullPath -Algorithm SHA256
-    ).Hash.ToLowerInvariant()
+    evidence_material_hash = [string](
+        $chain.activation_receipt.acceptance_evidence_material_hash
+    )
     acceptance_key = $AcceptanceKey
     created_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
 }
@@ -155,6 +151,11 @@ try {
         )
         milestone_acceptance_receipt_path = "receipts/$receiptName"
         milestone_acceptance_receipt_hash = [string]$receipt.receipt_hash
+        milestone_acceptance_key = $AcceptanceKey
+        milestone_acceptance_evidence_path = $evidenceRelativePath
+        milestone_acceptance_evidence_hash = [string](
+            $receipt.evidence_material_hash
+        )
         message = "Main owner accepted milestone '$MilestoneId'."
         thread_id = $null
         model_id = $null
