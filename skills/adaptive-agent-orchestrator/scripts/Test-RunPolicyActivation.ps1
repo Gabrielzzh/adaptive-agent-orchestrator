@@ -103,7 +103,7 @@ function New-LegacyRunFixture {
         -Value '{"checkpoint_hash":"fixture-checkpoint"}'
     Set-Content -LiteralPath (
         Join-Path $Path 'materials/policy-migration-authorization.md'
-    ) -Value 'Controller authorizes this exact immutable run to use policy 0.7.4.'
+    ) -Value 'Controller authorizes this exact immutable run to use policy 0.7.5.'
 }
 
 try {
@@ -135,7 +135,7 @@ try {
         ConvertFrom-Json -Depth 100
     Assert-True (
         $receipt.source_policy_version -eq '0.7.2' -and
-        $receipt.target_policy_version -eq '0.7.4' -and
+        $receipt.target_policy_version -eq '0.7.5' -and
         @($receipt.artifact_bindings).Count -eq 5
     ) 'Activation must bind the exact predecessor artifacts and transition.'
     $validation = & (
@@ -145,7 +145,7 @@ try {
     Assert-True (
         $validation.valid -and
         $validation.policy_version -eq '0.7.2' -and
-        $validation.effective_policy_version -eq '0.7.4'
+        $validation.effective_policy_version -eq '0.7.5'
     ) 'Activated old runs must expose source and effective policy separately.'
 
     $event = & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
@@ -155,14 +155,14 @@ try {
         ConvertFrom-Json -Depth 30
     Assert-True (
         $event.policy_version -eq '0.7.2' -and
-        $event.runtime_policy_version -eq '0.7.4' -and
+        $event.runtime_policy_version -eq '0.7.5' -and
         $event.policy_activation_receipt_hash -eq $receipt.receipt_hash
     ) 'Post-activation events must preserve old identity and bind new runtime.'
     $state = & (Join-Path $scriptRoot 'Get-OrchestrationState.ps1') `
         -RunDirectory $run | ConvertFrom-Json -Depth 100
     Assert-True (
         $state.policy_version -eq '0.7.2' -and
-        $state.effective_policy_version -eq '0.7.4'
+        $state.effective_policy_version -eq '0.7.5'
     ) 'State must report source and effective policy honestly.'
 
     foreach ($mutation in @(
@@ -222,9 +222,9 @@ try {
     $reusedRun = Join-Path $testRoot 'receipt-reuse'
     New-LegacyRunFixture -Path $reusedRun -RunId 'different-run'
     Copy-Item -LiteralPath (
-        Join-Path $run 'receipts/run-policy-activation.0.7.4.json'
+        Join-Path $run 'receipts/run-policy-activation.0.7.5.json'
     ) -Destination (
-        Join-Path $reusedRun 'receipts/run-policy-activation.0.7.4.json'
+        Join-Path $reusedRun 'receipts/run-policy-activation.0.7.5.json'
     )
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Get-OrchestrationState.ps1') `
@@ -236,11 +236,11 @@ try {
     $skipRun = Join-Path $testRoot 'unsupported-skip'
     Copy-Item -LiteralPath $run -Destination $skipRun -Recurse
     $skipReceiptPath = Join-Path $skipRun (
-        'receipts/run-policy-activation.0.7.4.json'
+        'receipts/run-policy-activation.0.7.5.json'
     )
     $skipReceipt = Get-Content -LiteralPath $skipReceiptPath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 100
-    $skipReceipt.target_policy_version = '0.7.5'
+    $skipReceipt.target_policy_version = '0.7.6'
     $skipPayload = [ordered]@{}
     foreach ($key in $skipReceipt.Keys | Where-Object {
         $_ -ne 'receipt_hash'
@@ -270,7 +270,7 @@ try {
         pass = $true
         assertions = $script:assertions
         source_policy = '0.7.2'
-        effective_policy = '0.7.4'
+        effective_policy = '0.7.5'
     } | ConvertTo-Json -Compress
 }
 finally {

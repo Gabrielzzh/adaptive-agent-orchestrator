@@ -172,6 +172,45 @@ if ($null -ne $plan.PSObject.Properties['durable_review_profile']) {
 $checkedDurableReviewNodeIds = [Collections.Generic.HashSet[string]]::new(
     [StringComparer]::Ordinal
 )
+$durableMilestoneChain = $null
+$durableMilestoneAcceptance = $null
+$durableMilestoneError = ''
+$durableAcceptanceError = ''
+$activeDurableBindings = @{}
+if ($durableReviewNodeIds.Count -gt 0) {
+    try {
+        $durableMilestoneChain =
+            Read-DurableReviewMilestoneActivationChain `
+                -RunDirectory $RunDirectory
+        foreach ($binding in @(
+            $durableMilestoneChain.active_source_bindings
+        )) {
+            $activeDurableBindings[[string]$binding.source_node_id] = $binding
+        }
+        if (-not [string]::IsNullOrWhiteSpace(
+            [string]$durableMilestoneChain.activation_receipt_hash
+        )) {
+            try {
+                $durableMilestoneAcceptance =
+                    Read-DurableReviewMilestoneAcceptance `
+                        -RunDirectory $RunDirectory `
+                        -MilestoneChain $durableMilestoneChain
+            } catch {
+                $durableAcceptanceError = $_.Exception.Message
+                $errors.Add(
+                    'Active milestone main-owner acceptance is invalid: ' +
+                    $durableAcceptanceError
+                )
+            }
+        }
+    } catch {
+        $durableMilestoneError = $_.Exception.Message
+        $errors.Add(
+            'Durable review milestone chain is invalid: ' +
+            $durableMilestoneError
+        )
+    }
+}
 foreach ($check in $reviewDispositionChecks) {
     $nodeId = [string]$check.source_node_id
     if ($durableReviewNodeIds.Contains($nodeId)) {
@@ -186,7 +225,30 @@ foreach ($check in $reviewDispositionChecks) {
         )
         continue
     }
-    $relativeReceipt = [string]$check.path
+    if ($durableReviewNodeIds.Contains($nodeId) -and
+        -not [string]::IsNullOrWhiteSpace($durableMilestoneError)) {
+        continue
+    }
+    $activeBinding = if ($activeDurableBindings.ContainsKey($nodeId)) {
+        $activeDurableBindings[$nodeId]
+    } else { $null }
+    $relativeReceipt = if ($null -ne $activeBinding) {
+        [string]$activeBinding.disposition_receipt_path
+    } else {
+        [string]$check.path
+    }
+    $expectedThreadId = if ($null -ne $activeBinding) {
+        [string]$activeBinding.source_thread_id
+    } else {
+        [string]$nodeState.thread_id
+    }
+    if ($null -ne $activeBinding -and
+        [string]$nodeState.thread_id -ne $expectedThreadId) {
+        $errors.Add(
+            "Active milestone source '$nodeId' does not match the current thread."
+        )
+        continue
+    }
     $segments = $relativeReceipt -split '[\\/]'
     if (@($segments | Where-Object {
         $_ -in @('', '.', '..') -or $_ -match '[\. ]$' -or $_.Contains(':')
@@ -208,7 +270,15 @@ foreach ($check in $reviewDispositionChecks) {
     try {
         $receipt = Read-ReviewDispositionReceipt -Path $receiptPath `
             -RunDirectory $RunDirectory -ExpectedSourceNodeId $nodeId `
-            -ExpectedThreadId ([string]$nodeState.thread_id)
+            -ExpectedThreadId $expectedThreadId
+        if ($null -ne $activeBinding -and
+            -not [string]::IsNullOrWhiteSpace(
+                [string]$durableMilestoneChain.activation_receipt_hash
+            ) -and
+            [string]$receipt.milestone_id -ne
+                [string]$durableMilestoneChain.active_milestone_id) {
+            throw 'Disposition does not match the active milestone.'
+        }
         $reviewSourceCount++
         foreach ($decision in @($receipt.decisions)) {
             $reviewDecisionCount++
@@ -281,6 +351,9 @@ if ($errors.Count) {
     review_sources = $reviewSourceCount
     review_decisions = $reviewDecisionCount
     canonical_review_findings = $canonicalReviewFindings.Count
+    active_review_milestone = if ($null -ne $durableMilestoneChain) {
+        [string]$durableMilestoneChain.active_milestone_id
+    } else { '' }
     model_verification = [ordered]@{
         all_actual_models_verified = ($unverifiedActualModels.Count -eq 0)
         unverified_node_ids = $unverifiedActualModels

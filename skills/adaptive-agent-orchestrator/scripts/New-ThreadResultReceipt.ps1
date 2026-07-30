@@ -6,6 +6,8 @@ param(
     [Parameter(Mandatory)][string] $HostId,
     [Parameter(Mandatory)][string] $ThreadReadPath,
     [Parameter(Mandatory)][string] $OutputPath,
+    [string] $MilestoneId,
+    [string] $CheckpointMaterialPath,
     [string] $ReplacementContinuityReceiptPath,
     [string] $PendingFindingRecordsPath,
     [string[]] $PendingFindings = @(),
@@ -43,6 +45,51 @@ $sourceNode = @($plan.nodes | Where-Object {
 }) | Select-Object -First 1
 if ($null -eq $sourceNode) {
     throw 'Thread result source node does not exist in the run plan.'
+}
+$durableSourceIds = @()
+if ($null -ne $plan.PSObject.Properties['durable_review_profile']) {
+    $durableSourceIds = @(
+        @($plan.durable_review_profile.domain_node_ids) +
+        @($plan.durable_review_profile.dissent_node_ids)
+    )
+}
+$isDurableReviewSource = $SourceNodeId -in $durableSourceIds
+$checkpointRelativePath = ''
+$checkpointHash = ''
+if ($isDurableReviewSource) {
+    $milestones = @($plan.durable_review_profile.milestone_ids)
+    if ([string]::IsNullOrWhiteSpace($MilestoneId) -or
+        $MilestoneId -notin $milestones) {
+        throw (
+            'Durable review result requires a milestone_id declared by the ' +
+            'run plan.'
+        )
+    }
+    if ([string]::IsNullOrWhiteSpace($CheckpointMaterialPath)) {
+        throw 'Durable review result requires checkpoint material.'
+    }
+    $checkpointFullPath = [IO.Path]::GetFullPath($CheckpointMaterialPath)
+    if (-not $checkpointFullPath.StartsWith(
+        $runRoot + [IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase
+    ) -or -not (Test-Path -LiteralPath $checkpointFullPath -PathType Leaf)) {
+        throw 'Checkpoint material must be an existing file inside the run.'
+    }
+    $checkpointRelativePath = [IO.Path]::GetRelativePath(
+        $runRoot, $checkpointFullPath
+    ).Replace('\', '/')
+    $checkpointSegments = $checkpointRelativePath -split '[\\/]'
+    if (@($checkpointSegments | Where-Object {
+        $_ -in @('', '.', '..') -or $_ -match '[\. ]$' -or $_.Contains(':')
+    }).Count -gt 0) {
+        throw 'Checkpoint material path contains an unsafe segment.'
+    }
+    $checkpointHash = (
+        Get-FileHash -LiteralPath $checkpointFullPath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+} elseif (-not [string]::IsNullOrWhiteSpace($MilestoneId) -or
+    -not [string]::IsNullOrWhiteSpace($CheckpointMaterialPath)) {
+    throw 'Milestone binding is only valid for a durable review source.'
 }
 $events = @(Read-OrchestrationJournal (Join-Path $runRoot 'events.jsonl'))
 $replacementLifecycleEvent = @($events | Where-Object {
@@ -200,6 +247,9 @@ $receipt = [ordered]@{
     final_content_hash = $final.final_content_hash
     replacement_continuity_receipt_path = $replacementRelativePath
     replacement_continuity_receipt_hash = $replacementHash
+    milestone_id = if ($isDurableReviewSource) { $MilestoneId } else { '' }
+    checkpoint_material_path = $checkpointRelativePath
+    checkpoint_material_hash = $checkpointHash
     adopted_findings = $receiptAdopted
     rejected_findings = $receiptRejected
     pending_findings = $receiptPending

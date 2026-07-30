@@ -311,6 +311,18 @@ per source. Use a stable `canonical_finding_id` to group overlapping findings
 without discarding either source's evidence; append unique findings under new
 IDs. One role's PASS never substitutes for another role's required receipt or
 re-review.
+For the first milestone, the immutable plan paths are the baseline. For each
+later declared milestone, give every durable result the same run-local
+checkpoint binding, create source-specific dispositions, and activate them with
+`New-DurableReviewMilestoneActivationReceipt.ps1`. The append-only activation
+receipt and journal event select the exact source chains; never edit the plan,
+overwrite old receipts, or infer the active milestone from file timestamps.
+The activation must also bind controller material that fixes the later
+main-owner acceptance key and evidence path/hash.
+After all active P0/P1 findings are resolved, the main integration owner must
+record a fresh `New-DurableReviewMilestoneAcceptanceReceipt.ps1` bound to that
+activation, its source bindings, checkpoint, and acceptance evidence. A main
+node status inherited from an earlier milestone never satisfies this gate.
 Durable source receipts use schema 1.3 findings bound to a source finding ID,
 original P0/P1/P2 severity, exact text, and text hash. Disposition must match
 all four values. Older receipts remain readable for history but cannot satisfy

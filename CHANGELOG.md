@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.7.5 - 2026-07-30
+
+Cross-milestone durable-review roll-forward patch release.
+
+- Add append-only milestone activation so one durable review run can advance
+  through its declared milestones without rewriting the immutable plan,
+  run metadata, or existing journal.
+- Bind each activated source to its exact milestone, checkpoint, thread,
+  result receipt, disposition receipt, paths, and hashes. Completion consumes
+  only the latest valid activation, never the newest file by timestamp.
+- Require a new main-owner acceptance for each activated milestone. Earlier
+  `validated` state cannot approve a later checkpoint.
+- Pre-bind the acceptance authority, key, and evidence path/hash in milestone
+  activation so a caller cannot coherently re-sign only the acceptance tail.
+- Preserve independent source obligations and immutable P0/P1 blocking. One
+  source cannot substitute for another and an open blocker cannot be accepted.
+- Reject comma-joined typed evidence pointers before they enter the immutable
+  journal while still allowing ordinary commas inside observation text.
+- Preserve the boundary: this release does not repair platform `systemError`,
+  migrate business artifacts, prove Token savings, or claim resistance to an
+  attacker who can rewrite the entire history without an external head anchor.
+
 ## 0.7.4 - 2026-07-30
 
 Auditable immutable-run policy activation patch release.

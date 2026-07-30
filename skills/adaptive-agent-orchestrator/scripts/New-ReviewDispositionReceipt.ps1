@@ -17,6 +17,8 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
 $run = Get-Content -LiteralPath (Join-Path $runRoot 'run.json') -Raw |
     ConvertFrom-Json -Depth 20 -DateKind String
+$plan = Get-Content -LiteralPath (Join-Path $runRoot 'plan.json') -Raw |
+    ConvertFrom-Json -Depth 100 -DateKind String
 
 function Resolve-RunLocalPath {
     param([string] $Candidate, [string] $Label)
@@ -46,6 +48,29 @@ if ([string]$source.schema_version -ne '1.3') {
         'Durable review disposition requires a schema 1.3 source receipt ' +
         'with stable finding identity and severity. Migrate legacy receipts.'
     )
+}
+$durableSourceIds = @()
+if ($null -ne $plan.PSObject.Properties['durable_review_profile']) {
+    $durableSourceIds = @(
+        @($plan.durable_review_profile.domain_node_ids) +
+        @($plan.durable_review_profile.dissent_node_ids)
+    )
+}
+if ($SourceNodeId -in $durableSourceIds) {
+    if ($MilestoneId -notin @($plan.durable_review_profile.milestone_ids) -or
+        $null -eq $source.PSObject.Properties['milestone_id'] -or
+        [string]$source.milestone_id -ne $MilestoneId -or
+        $null -eq $source.PSObject.Properties['checkpoint_material_path'] -or
+        [string]::IsNullOrWhiteSpace(
+            [string]$source.checkpoint_material_path
+        ) -or
+        $null -eq $source.PSObject.Properties['checkpoint_material_hash'] -or
+        [string]$source.checkpoint_material_hash -notmatch '^[0-9a-f]{64}$') {
+        throw (
+            'Durable review disposition must match the source result milestone ' +
+            'and checkpoint binding.'
+        )
+    }
 }
 $decisions = @(
     Get-Content -LiteralPath $decisionsFullPath -Raw |

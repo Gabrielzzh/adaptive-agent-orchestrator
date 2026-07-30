@@ -454,7 +454,7 @@ try {
     $calibrationAdd = & $calibrationScript -Action Add `
         -ProjectRoot $calibrationProject -RunDirectory $reconcileRun `
         -MinWindowUsed 20 -AppVersion '26.7.26' -HostKind 'desktop' `
-        -ExecutionMode local -PolicyVersion '0.7.4' |
+        -ExecutionMode local -PolicyVersion '0.7.5' |
         ConvertFrom-Json -Depth 30
     Assert-True (
         $verifiedReceiptCount -gt 0 -and
@@ -477,7 +477,7 @@ try {
     $calibrationRepeat = & $calibrationScript -Action Add `
         -ProjectRoot $calibrationProject -RunDirectory $reconcileRun `
         -MinWindowUsed 20 -AppVersion '26.7.26' -HostKind 'desktop' `
-        -ExecutionMode local -PolicyVersion '0.7.4' |
+        -ExecutionMode local -PolicyVersion '0.7.5' |
         ConvertFrom-Json -Depth 30
     Assert-True (
         $calibrationRepeat.added -eq 0 -and
@@ -496,7 +496,7 @@ try {
         & $calibrationScript -Action Add -ProjectRoot $calibrationProject `
             -RunDirectory $reconcileRun -AppVersion '26.7.26' `
             -HostKind 'desktop' -ExecutionMode local `
-            -PolicyVersion '0.7.4' | Out-Null
+            -PolicyVersion '0.7.5' | Out-Null
     } 'hash mismatch' 'Calibration must reject a tampered receipt.'
     Set-Content -LiteralPath $adoptedReceiptPath -Value $adoptedReceiptRaw
 
@@ -518,7 +518,7 @@ try {
             app_version = '26.7.26'
             host_kind = 'desktop'
             execution_mode = 'local'
-            policy_version = '0.7.4'
+            policy_version = '0.7.5'
         } | ConvertTo-Json -Compress))
     }
     $seedCalibrationLines.Add(([ordered]@{
@@ -1626,7 +1626,7 @@ try {
     ) -RunDirectory $runDirectory -SkillRoot $skillRoot |
         ConvertFrom-Json -Depth 100
     Assert-True (
-        [string]$measureReport.policy_version -eq '0.7.4' -and
+        [string]$measureReport.policy_version -eq '0.7.5' -and
         @($measureReport.result_receipts).Count -ge 1
     ) (
         'Measure-OrchestrationRun must report the run policy version and receipts.'
@@ -3201,6 +3201,26 @@ try {
         'durable-review-consumer-output'
     ) 'consumer_output must be result-only'
 
+    $duplicateMilestones = Get-Content -LiteralPath (
+        $durableReviewPlanPath
+    ) -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+    $duplicateMilestones.durable_review_profile.milestone_ids = @(
+        'method-1', 'method-1'
+    )
+    Assert-InvalidPlan $duplicateMilestones (
+        'durable-review-duplicate-milestone'
+    ) 'milestone_ids must be unique safe IDs'
+
+    $unsafeMilestones = Get-Content -LiteralPath (
+        $durableReviewPlanPath
+    ) -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+    $unsafeMilestones.durable_review_profile.milestone_ids = @(
+        'method-1', '../method-2'
+    )
+    Assert-InvalidPlan $unsafeMilestones (
+        'durable-review-unsafe-milestone'
+    ) 'milestone_ids must be unique safe IDs'
+
     $illegalTransitionCaught = $false
     try {
         & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
@@ -3566,6 +3586,68 @@ try {
     Assert-True $emptyEvidenceCaught (
         'Completion evidence must use a typed evidence pointer.'
     )
+    $joinedJournalPath = Join-Path $questionRun 'events.jsonl'
+    $joinedEvidenceVariants = [Collections.Generic.List[string]]::new()
+    foreach ($leftType in @('artifact', 'test', 'source', 'observation')) {
+        foreach ($rightType in @('artifact', 'test', 'source', 'observation')) {
+            $joinedEvidenceVariants.Add(
+                "${leftType}:primary, ${rightType}:secondary"
+            )
+        }
+    }
+    foreach ($variant in @(
+        'artifact:primary,observation:zero-space',
+        'artifact:primary,   observation:multi-space',
+        "artifact:primary,`ttest:tab",
+        'ArTiFaCt:primary, TeSt:mixed-case',
+        'source:first, observation:second, test:third, artifact:fourth'
+    )) {
+        $joinedEvidenceVariants.Add($variant)
+    }
+    $joinedVariantIndex = 0
+    foreach ($joinedEvidenceValue in $joinedEvidenceVariants) {
+        $joinedVariantIndex += 1
+        $joinedJournalHashBefore = (
+            Get-FileHash -LiteralPath $joinedJournalPath -Algorithm SHA256
+        ).Hash
+        $joinedEvidenceCaught = $false
+        try {
+            & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+                -RunDirectory $questionRun -NodeId 'draft' -Status 'completed' `
+                -Message 'joined evidence must fail before journal append' `
+                -Evidence @($joinedEvidenceValue) `
+                -IdempotencyKey "question-joined-evidence-$joinedVariantIndex" |
+                Out-Null
+        }
+        catch {
+            $joinedEvidenceCaught = (
+                $_.Exception.Message -like '*multiple typed pointers*'
+            )
+        }
+        Assert-True $joinedEvidenceCaught (
+            "Joined Evidence variant $joinedVariantIndex must be rejected."
+        )
+        Assert-True (
+            (
+                Get-FileHash -LiteralPath $joinedJournalPath -Algorithm SHA256
+            ).Hash -eq $joinedJournalHashBefore
+        ) (
+            "Rejected Evidence variant $joinedVariantIndex must not change " +
+            'the immutable journal.'
+        )
+    }
+    $commaObservationEvent = & (
+        Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1'
+    ) -RunDirectory $questionRun -NodeId 'draft' -Status 'completed' `
+        -Message 'ordinary comma remains valid inside one observation' `
+        -Evidence @(
+            'artifact:artifacts/draft/output.md',
+            'observation:summary,with-comma'
+        ) -IdempotencyKey 'question-valid-comma-evidence' |
+        ConvertFrom-Json -Depth 50
+    Assert-True (
+        @($commaObservationEvent.evidence).Count -eq 2
+    ) 'A comma without another typed prefix must remain valid evidence text.'
 
     $metadataRun = Join-Path $testRoot 'metadata-run'
     & (Join-Path $scriptRoot 'New-OrchestrationRun.ps1') `
@@ -3746,6 +3828,13 @@ try {
         'Immutable predecessor run policy activation should pass its attack suite.'
     )
     $script:assertionCount += [int]$policyActivation.assertions
+    $durableMilestone = & (
+        Join-Path $scriptRoot 'Test-DurableReviewMilestone.ps1'
+    ) | ConvertFrom-Json -Depth 20
+    Assert-True $durableMilestone.pass (
+        'Durable review milestone roll-forward should pass its attack suite.'
+    )
+    $script:assertionCount += [int]$durableMilestone.assertions
 
     [pscustomobject]@{
         passed = $true

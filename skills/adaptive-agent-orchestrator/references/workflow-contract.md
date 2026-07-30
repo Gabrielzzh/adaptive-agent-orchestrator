@@ -5,7 +5,7 @@
 A durable plan is a JSON object with:
 
 - `schema_version`: currently `"1.0"`;
-- `policy_version`: currently `"0.7.4"`, used to validate and replay the run;
+- `policy_version`: currently `"0.7.5"`, used to validate and replay the run;
 - `run_id`: unique, stable identifier;
 - `orchestrator`: the single controller identity and delegation authority;
 - `goal`: concrete outcome;
@@ -239,6 +239,78 @@ source identity before adding its canonical cross-source ID. Schema 1.1 and
 disposition and completion. Durable completion always blocks both P0 and P1;
 the plan may add P2 but cannot narrow the required set.
 
+The immutable plan disposition paths define the first milestone baseline. For
+every later `milestone_id`, create each result with `-MilestoneId` and one
+shared run-local `-CheckpointMaterialPath`, then create the matching
+source-specific disposition. Record the exact set in a run-local selection
+file:
+
+```json
+[
+  {
+    "source_node_id": "domain-research",
+    "result_receipt_path": "receipts/domain.method-2.thread-result-receipt.json",
+    "disposition_receipt_path": "receipts/domain.method-2.disposition.json"
+  },
+  {
+    "source_node_id": "adversarial-review",
+    "result_receipt_path": "receipts/review.method-2.thread-result-receipt.json",
+    "disposition_receipt_path": "receipts/review.method-2.disposition.json"
+  }
+]
+```
+
+Activate only the next declared milestone:
+
+```json
+{
+  "schema_version": "1.0",
+  "milestone_id": "method-2",
+  "main_node_id": "integrate",
+  "acceptance_key": "controller:method-2-main-acceptance",
+  "evidence_material_path": "materials/method-2-main-acceptance.md",
+  "evidence_material_hash": "<sha256>"
+}
+```
+
+```powershell
+pwsh -File scripts/New-DurableReviewMilestoneActivationReceipt.ps1 `
+  -RunDirectory <run> -MilestoneId method-2 `
+  -SelectionPath <run>/materials/method-2-selection.json `
+  -AuthorizationMaterialPath <run>/materials/method-2-authorization.md `
+  -AcceptanceAuthorizationMaterialPath `
+    <run>/materials/method-2-acceptance-authorization.json `
+  -ActivationKey "controller:<stable-authority-reference>"
+```
+
+Activation is append-only and binds the immutable plan/run identity, journal
+head, previous milestone chain, current source result/disposition paths and
+hashes, source/thread identity, shared checkpoint, selection, and controller
+authorization. It also appends one hash-bound journal event. Completion uses
+the terminal valid activation chain, never a filename timestamp or unactivated
+"latest" receipt. Missing, duplicated, skipped, changed, cross-run,
+cross-source, or cross-checkpoint bindings fail closed. Policy activation is a
+different protocol and cannot select a milestone. Activation also anchors the
+only permitted main-owner acceptance key and the exact evidence path and hash;
+the later acceptance receipt cannot choose replacements.
+
+After every active non-baseline milestone has resolved all P0/P1 findings, the
+main integration owner must record a new acceptance:
+
+```powershell
+pwsh -File scripts/New-DurableReviewMilestoneAcceptanceReceipt.ps1 `
+  -RunDirectory <run> -MilestoneId method-2
+```
+
+The acceptance receipt and its append-only journal event bind the exact
+activation receipt, source-binding hash, shared checkpoint, main-owner node,
+and run-local evidence. Its event sequence must be later than activation.
+Completion never reuses a main node's `validated` state from the baseline or an
+earlier milestone. Missing, duplicated, changed, or pre-activation acceptance
+fails closed. The event directly repeats the anchored key and evidence
+path/hash; coherently re-signing only the acceptance receipt and chain-tail
+event cannot replace the earlier activation authorization anchor.
+
 When a durable source has no final answer, its node enters `result_pending`.
 The only legal continuations are a bounded same-source recovery or, after a
 verified 3/3 recovery chain, `replacement_pending` followed by the bound
@@ -354,6 +426,9 @@ still open, when a finding is omitted, when the source result changes, or when
 the receipt hash is invalid. P2 may remain open or deferred with rationale and
 evidence. A resolved adopted or partially adopted P0/P1 decision also requires
 typed evidence that the original role completed re-review.
+The configured paths remain the first milestone baseline. A validated
+milestone activation chain replaces them only for its exact active milestone;
+historical paths and receipts remain unchanged and replayable.
 Completion reports both source-decision count and canonical-finding count so
 the controller can deduplicate overlap without losing source provenance.
 
@@ -362,4 +437,8 @@ Every agent or main node completion event includes at least one typed evidence
 pointer using `artifact:`, `test:`, `source:`, or `observation:`. A generic
 success claim without a type is rejected. Typed pointers improve auditability
 but do not prove provenance; the main agent still verifies the referenced
-material before marking the node `validated`.
+material before marking the node `validated`. Pass each pointer as a separate
+`Evidence` array item. A shell-collapsed value such as
+`artifact:path,observation:note` is rejected before journal append; an ordinary
+comma inside one value remains valid when it does not introduce another typed
+pointer.
