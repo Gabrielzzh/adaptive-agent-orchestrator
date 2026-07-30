@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.7.4 release notes](docs/releases/v0.7.4.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.7.5 release notes](docs/releases/v0.7.5.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -48,6 +48,10 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
 - **Independent-source integrity:** each review source keeps its own report,
   evidence, disposition, and re-review obligation. One source cannot replace
   another, and unresolved P0/P1 findings always block completion.
+- **Cross-milestone review roll-forward:** the same durable review run can
+  activate its next declared milestone through an append-only receipt. Exact
+  source chains and fresh main-owner acceptance replace stale fixed paths
+  without rewriting the plan or guessing from file timestamps.
 - **Missing-final recovery:** a completed task without a final answer becomes
   `result_pending`, never success. The same source gets at most three bounded
   recovery attempts; an authorized replacement must preserve source, role,
@@ -225,13 +229,14 @@ state, integrates results, and performs authorized external actions.
 
 ## Validation
 
-The v0.7.4 release passes:
+The v0.7.5 release passes:
 
-- PowerShell parser validation for all 35 scripts;
+- PowerShell parser validation for all 38 scripts;
+- 19 durable-milestone assertions;
 - 15 run-policy activation assertions;
 - 45 recovery-protocol assertions;
-- 637 self-test assertions;
-- 57 intentionally invalid negative-test cases correctly rejected;
+- 704 self-test assertions;
+- 59 intentionally invalid negative-test cases correctly rejected;
 - strict parsing for all 8 bundled reference JSON files;
 - plan, metadata, journal, handoff, dependency, idempotency, ownership,
   context-overlap, progressive-dispatch, short-packet, durable-task selection,
@@ -240,8 +245,9 @@ The v0.7.4 release passes:
   completion tests;
 - strict JSON parsing and a real Windows Junction/reparse-point fixture;
 - Skill Creator validation;
-- independent dynamic re-attack of both release-blocking bypasses, ending
-  GREEN with P0=0, P1=0, and P2=0.
+- independent dynamic re-attack of milestone selection, main-owner acceptance,
+  and coherent chain-tail re-signing, ending GREEN with P0=0, P1=0, and P2=0;
+  an additional 30/30 attack set passed.
 
 Run:
 
@@ -258,6 +264,9 @@ pwsh -NoProfile -File `
   and replacement continuity.
 - It does not migrate business artifacts. Policy activation only authorizes the
   existing immutable run to use the newer orchestration contract.
+- The local hash chain detects in-chain changes, but an attacker able to
+  rewrite the earliest activation and every later journal entry still requires
+  an externally retained head/hash anchor for full-history resistance.
 - Natural-language exclusions cannot erase history already injected by a host;
   use fresh workers and explicit input references.
 - Exact context-overlap checks cannot detect two differently named references

@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[English](README.md) · [v0.7.4 正式版说明](docs/releases/v0.7.4.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+[English](README.md) · [v0.7.5 正式版说明](docs/releases/v0.7.5.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
 
 ![Adaptive Agent Orchestrator v0.7.0 发布图](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -44,6 +44,9 @@
   与反方角色；主 Agent仍是唯一 Writer，并必须逐项回应每份审核发现。
 - **独立来源不可互替：** 每个审核来源保留自己的报告、证据、处置与复审义务；
   一个来源不能替代另一个，未解决 P0/P1 始终阻断完成。
+- **跨里程碑审核推进：** 同一个长期审核 run 可通过追加式收据激活下一条已
+  声明里程碑，精确绑定来源链并要求主 Agent重新验收；无需改写 plan，也不
+  会按文件时间猜测“最新结果”。
 - **final 缺失恢复：** 任务显示 completed 却没有 final 时进入
   `result_pending`，绝不当作成功。同一来源最多进行三次有界回收；替代角色
   必须经过主控授权，并保持来源、角色、checkpoint、input 和恢复链连续性。
@@ -200,21 +203,22 @@ $adaptive-agent-orchestrator。共享上下文留在主 Agent，Worker 只拿引
 
 ## 验证情况
 
-v0.7.4 正式版本通过：
+v0.7.5 正式版本通过：
 
-- 35 个 PowerShell 脚本语法解析；
+- 38 个 PowerShell 脚本语法解析；
+- 19 项 durable milestone 专项断言；
 - 15 项 run policy activation 专项断言；
 - 45 项恢复协议专项断言；
-- 637 项完整自测断言；
-- 57 份故意构造的非法负面案例均被正确拦截；
+- 704 项完整自测断言；
+- 59 份故意构造的非法负面案例均被正确拦截；
 - 8 个 reference JSON 文件严格解析；
 - 计划、元数据、日志、handoff、依赖、幂等、所有权、上下文重叠、渐进
   派遣、短任务包、长期任务选择、排队创建、worktree 预检、任务收据、
   长期审核、结果恢复、替代连续性和完成门测试；
 - 严格 JSON 解析与真实 Windows Junction/reparse point 实体测试；
 - Skill Creator 校验；
-- 同一独立审核角色对两项发布阻断绕过完成动态复攻，最终 GREEN，
-  P0/P1/P2 均为 0。
+- 同一独立审核角色对里程碑选择、主 Agent验收与链尾一致性重签完成动态
+  复攻，最终 GREEN，P0/P1/P2 均为 0；额外攻击集 30/30 通过。
 
 ```powershell
 pwsh -NoProfile -File `

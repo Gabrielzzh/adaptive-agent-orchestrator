@@ -518,7 +518,7 @@ try {
         ) -IdempotencyKey 'bound-activated-lifecycle' |
         ConvertFrom-Json -Depth 100
     Assert-True (
-        $activatedLifecycle.runtime_policy_version -eq '0.7.4' -and
+        $activatedLifecycle.runtime_policy_version -eq '0.7.5' -and
         $activatedLifecycle.policy_activation_receipt_hash -eq
             $activationReceipt.receipt_hash -and
         $activatedLifecycle.replacement_receipt_hash -eq

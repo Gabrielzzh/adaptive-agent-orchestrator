@@ -1,6 +1,6 @@
 Set-StrictMode -Version Latest
-$script:OrchestrationCurrentPolicyVersion = '0.7.4'
-$script:OrchestrationMigratablePolicyVersions = @('0.7.2', '0.7.3')
+$script:OrchestrationCurrentPolicyVersion = '0.7.5'
+$script:OrchestrationMigratablePolicyVersions = @('0.7.2', '0.7.3', '0.7.4')
 
 function Get-TextSha256 {
     param([Parameter(Mandatory)][string] $Text)
