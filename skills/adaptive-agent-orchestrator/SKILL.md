@@ -317,6 +317,16 @@ checkpoint binding, create source-specific dispositions, and activate them with
 `New-DurableReviewMilestoneActivationReceipt.ps1`. The append-only activation
 receipt and journal event select the exact source chains; never edit the plan,
 overwrite old receipts, or infer the active milestone from file timestamps.
+If that first milestone needs a later checkpoint revision before advancing,
+first call `New-DurableReviewMilestoneRevisionAuthorizationReceipt.ps1`.
+Its manifest must bind every related pre-authorization event and artifact as
+non-completion evidence. Re-arm each original read-only source exactly once
+with the authorization, obtain fresh cumulative results, then call
+`New-DurableReviewMilestoneRevisionSelectionReceipt.ps1`. Selection conserves
+every prior source occurrence by source ID, severity, exact text/hash, and
+canonical ID; canonical grouping never deletes an occurrence. A pending or
+partially reviewed revision blocks completion, and selection does not replace
+fresh main-owner acceptance.
 The activation must also bind controller material that fixes the later
 main-owner acceptance key and evidence path/hash.
 After all active P0/P1 findings are resolved, the main integration owner must

@@ -56,6 +56,7 @@ param(
     [string] $ReconciliationReceiptPath,
     [string] $RecoveryReceiptPath,
     [string] $ReplacementContinuityReceiptPath,
+    [string] $MilestoneRevisionAuthorizationReceiptPath,
     [switch] $AdoptActivatedLifecycle
 )
 
@@ -396,6 +397,26 @@ foreach ($entry in $cleanEvidence) {
         )
     }
 }
+$revisionAuthorization = $null
+$normalizedRevisionAuthorizationPath = $null
+if (-not [string]::IsNullOrWhiteSpace(
+    $MilestoneRevisionAuthorizationReceiptPath
+)) {
+    if ([IO.Path]::IsPathRooted($MilestoneRevisionAuthorizationReceiptPath)) {
+        throw 'MilestoneRevisionAuthorizationReceiptPath must be run-relative.'
+    }
+    $normalizedRevisionAuthorizationPath = (
+        $MilestoneRevisionAuthorizationReceiptPath.Replace('\', '/')
+    )
+    $revisionAuthorization = Read-DurableReviewMilestoneRevisionAuthorization `
+        -Path (Join-Path $RunDirectory $normalizedRevisionAuthorizationPath) `
+        -RunDirectory $RunDirectory
+    $cleanEvidence += "artifact:$normalizedRevisionAuthorizationPath"
+    $cleanEvidence += (
+        'observation:milestone-revision-authorization-hash:' +
+        [string]$revisionAuthorization.receipt_hash
+    )
+}
 if ($Status -eq 'failed' -and $ErrorClass -eq 'startup_unmaterialized' -and
     $null -eq $reconciliationReceipt) {
     throw (
@@ -428,6 +449,12 @@ $requestPayload = [ordered]@{
             [string]$replacementReceipt.receipt_hash
         } else { $null }
         adopt_activated_lifecycle = [bool]$AdoptActivatedLifecycle
+}
+if ($revisionAuthorization) {
+    $requestPayload['milestone_revision_authorization_receipt_path'] =
+        $normalizedRevisionAuthorizationPath
+    $requestPayload['milestone_revision_authorization_receipt_hash'] =
+        [string]$revisionAuthorization.receipt_hash
 }
 if ($ModelVerificationState -eq 'unverified') {
     $requestPayload['model_verification_state'] = $ModelVerificationState
@@ -489,6 +516,7 @@ try {
     $history = @($events | Where-Object { $_.node_id -eq $NodeId })
     $priorState = if ($history.Count) { [string]$history[-1].status } else { 'planned' }
     $isRecoveryCycleReentry = $false
+    $isMilestoneRevisionRearm = $false
     $previousAdoptedEvent = $null
     if ($priorState -eq 'adopted' -and $Status -eq 'result_pending') {
         if ($null -eq $recoveryReceipt -or
@@ -582,6 +610,53 @@ try {
             )
         }
         $isRecoveryCycleReentry = $true
+    }
+    if ($priorState -eq 'adopted' -and $Status -eq 'running') {
+        if ($null -eq $revisionAuthorization) {
+            throw (
+                'An adopted durable source remains terminal unless a pending ' +
+                'first-milestone revision authorization explicitly re-arms it.'
+            )
+        }
+        $sourceBinding = @($revisionAuthorization.required_sources |
+            Where-Object { [string]$_.source_node_id -eq $NodeId })
+        if ($sourceBinding.Count -ne 1 -or
+            [string]$sourceBinding[0].role_id -ne [string]$node.role_id -or
+            [string]$sourceBinding[0].thread_id -ne $ThreadId -or
+            -not [bool]$node.read_only -or [bool]$node.allow_delegation -or
+            @($node.write_scope).Count -gt 0) {
+            throw 'Milestone revision re-arm changed source identity or permissions.'
+        }
+        $authorizationEvents = @($events | Where-Object {
+            [string]$_.event -eq 'milestone-revision-authorized' -and
+            [string]$_.milestone_revision_id -eq
+                [string]$revisionAuthorization.revision_id
+        })
+        $selectionEvents = @($events | Where-Object {
+            [string]$_.event -eq 'milestone-revision-selected' -and
+            [string]$_.milestone_revision_id -eq
+                [string]$revisionAuthorization.revision_id
+        })
+        $priorRearms = @($history | Where-Object {
+            $null -ne $_.PSObject.Properties['milestone_revision_id'] -and
+            $null -ne $_.PSObject.Properties[
+                'milestone_revision_authorization_receipt_hash'
+            ] -and
+            [string]$_.milestone_revision_id -eq
+                [string]$revisionAuthorization.revision_id -and
+            [string]$_.milestone_revision_authorization_receipt_hash -eq
+                [string]$revisionAuthorization.receipt_hash
+        })
+        if ($authorizationEvents.Count -ne 1 -or
+            $selectionEvents.Count -ne 0 -or $priorRearms.Count -ne 0) {
+            throw 'Milestone revision authorization is not pending or was already used.'
+        }
+        $isMilestoneRevisionRearm = $true
+    } elseif ($null -ne $revisionAuthorization) {
+        throw (
+            'MilestoneRevisionAuthorizationReceiptPath is only valid for the ' +
+            'narrow adopted-to-running revision re-arm.'
+        )
     }
     $isActivatedLifecycleAdoption = (
         $AdoptActivatedLifecycle -and
@@ -680,7 +755,8 @@ try {
 
     if ($Status -notin @($transitions[$priorState]) -and
         -not $isActivatedLifecycleAdoption -and
-        -not $isRecoveryCycleReentry) {
+        -not $isRecoveryCycleReentry -and
+        -not $isMilestoneRevisionRearm) {
         throw "Illegal state transition for '$NodeId': $priorState -> $Status."
     }
 
@@ -712,7 +788,8 @@ try {
     if ($kind -eq 'agent' -and $priorState -eq 'planned' -and
         $Status -ne 'launch_reserved' -and
         -not $isActivatedLifecycleAdoption -and
-        -not $isRecoveryCycleReentry) {
+        -not $isRecoveryCycleReentry -and
+        -not $isMilestoneRevisionRearm) {
         throw "Agent node '$NodeId' must reserve capacity before launch."
     }
     if ($kind -eq 'main' -and $priorState -eq 'planned' -and
@@ -1104,6 +1181,23 @@ try {
             [string]$runPolicy.activation_receipt_path
         $event['policy_activation_receipt_hash'] =
             [string]$runPolicy.activation_receipt_hash
+    }
+    if ($isMilestoneRevisionRearm) {
+        $event['milestone_id'] = [string]$revisionAuthorization.milestone_id
+        $event['milestone_activation_receipt_path'] =
+            $normalizedRevisionAuthorizationPath
+        $event['milestone_activation_receipt_hash'] =
+            [string]$revisionAuthorization.receipt_hash
+        $event['milestone_revision_id'] =
+            [string]$revisionAuthorization.revision_id
+        $event['milestone_revision_authorization_receipt_path'] =
+            $normalizedRevisionAuthorizationPath
+        $event['milestone_revision_authorization_receipt_hash'] =
+            [string]$revisionAuthorization.receipt_hash
+        $event['milestone_revision_checkpoint_hash'] =
+            [string]$revisionAuthorization.checkpoint_material_hash
+        $event['milestone_revision_input_hash'] =
+            [string]$revisionAuthorization.input_manifest_hash
     }
     if ($kind -eq 'agent' -and $Status -eq 'result_pending') {
         $priorPendingForThread = @($history | Where-Object {

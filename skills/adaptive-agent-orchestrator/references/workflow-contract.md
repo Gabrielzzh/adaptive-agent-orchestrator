@@ -227,9 +227,11 @@ role before resolution. Workers do not message one another or write project
 files; the main owner routes accepted changes and requests re-review.
 
 For multiple durable review roles, keep separate capture, result, disposition,
-and re-review evidence chains. The same `canonical_finding_id` may appear once
-in each source receipt to group overlap while preserving both source records.
-Unique findings use new IDs. Receipt paths must be unique per source, and every
+and re-review evidence chains. The same `canonical_finding_id` may group
+multiple distinct `source_finding_id` occurrences, including repeated
+observations from one source across checkpoints. Canonical grouping never
+deletes or substitutes a source occurrence. Unique findings use new IDs.
+Receipt paths must be unique per source, and every
 profile node requires its own completion check; another role's PASS cannot
 satisfy it.
 Schema 1.3 durable source findings bind `finding_id`, original `severity`,
@@ -244,6 +246,46 @@ every later `milestone_id`, create each result with `-MilestoneId` and one
 shared run-local `-CheckpointMaterialPath`, then create the matching
 source-specific disposition. Record the exact set in a run-local selection
 file:
+
+If the first milestone needs another checkpoint before the next declared
+milestone, do not overwrite its baseline aliases or select files by mtime.
+Create an append-only revision authorization first:
+
+```powershell
+pwsh -File scripts/New-DurableReviewMilestoneRevisionAuthorizationReceipt.ps1 `
+  -RunDirectory <run> -MilestoneId method-1 `
+  -CheckpointMaterialPath <run>/materials/method-1-checkpoint-02.json `
+  -InputManifestPath <run>/materials/method-1-checkpoint-02-input.json `
+  -ReviewMaterialManifestPath <run>/materials/method-1-review-materials.json `
+  -ExcludedEvidenceManifestPath <run>/materials/method-1-excluded.json `
+  -AuthorizationMaterialPath <run>/materials/method-1-authorization.md `
+  -AcceptanceAuthorizationMaterialPath `
+    <run>/materials/method-1-acceptance-authorization.json `
+  -ActivationKey "controller:<stable-authority-reference>"
+```
+
+The authorization is valid only while plan index 0 is active. It binds the
+current journal head, shared checkpoint/input, exact source/role/thread set,
+read-only/no-delegation contracts, review inputs, main-acceptance constraint,
+and a complete excluded-evidence inventory. That inventory enumerates every
+related pre-authorization event sequence/hash plus capture, recovery, result,
+and disposition path/file/internal hashes. Omitting or rewriting one fails
+before source re-arm.
+
+Each required source then uses `Add-OrchestrationEvent.ps1 -Status running`
+with `-MilestoneRevisionAuthorizationReceiptPath`; this is the sole narrow
+`adopted -> running` exception and is single-use per source. After all sources
+produce fresh post-anchor `completed -> validated -> adopted` chains, select
+them once with
+`New-DurableReviewMilestoneRevisionSelectionReceipt.ps1`.
+
+Selection rejects partial source sets, excluded chains, cross-source/thread or
+cross-checkpoint substitutions, and any prior occurrence that disappears or
+changes `source_finding_id`, severity, exact text/hash, or canonical ID.
+Resolved and open occurrences are both conserved; new occurrences may be
+appended. Completion overlays only the terminal valid first-milestone revision
+bindings. Open P0/P1 still block, and the main owner must record independent
+acceptance before completion or next-milestone activation.
 
 ```json
 [
