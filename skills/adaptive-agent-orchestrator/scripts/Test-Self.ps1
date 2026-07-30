@@ -1272,6 +1272,21 @@ try {
         @($draftReceipt.pending_findings).Count -eq 1 -and
         @($draftReceipt.adopted_findings).Count -eq 0
     ) 'Initial result collection may bind findings before adoption decisions.'
+    $singleFindingReceipt = & (
+        Join-Path $scriptRoot 'New-ThreadResultReceipt.ps1'
+    ) -RunDirectory $runDirectory -SourceNodeId 'draft' `
+        -ThreadId 'test-thread-draft' `
+        -HostId 'opaque-host-1' -ThreadReadPath $draftReadPath `
+        -OutputPath (
+            Join-Path $runDirectory (
+                'receipts/draft.single-finding.thread-result-receipt.json'
+            )
+        ) -AdoptedFindings @($draftFindingText) |
+        ConvertFrom-Json -Depth 20
+    Assert-True (
+        @($singleFindingReceipt.adopted_findings).Count -eq 1 -and
+        [string]$singleFindingReceipt.adopted_findings[0] -eq $draftFindingText
+    ) 'A single legacy finding must remain an array in the result receipt.'
     $legacyReceiptPath = Join-Path $runDirectory (
         'receipts/legacy.thread-result-receipt.json'
     )

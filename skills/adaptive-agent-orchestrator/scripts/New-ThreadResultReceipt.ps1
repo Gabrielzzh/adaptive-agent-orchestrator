@@ -218,6 +218,7 @@ $allFindings = if ($structuredPending.Count -gt 0) {
 } else {
     @($pending + $adopted + $rejected)
 }
+$allFindings = @($allFindings)
 if ($allFindings.Count -eq 0) {
     throw 'At least one pending, adopted, or rejected finding is required.'
 }
