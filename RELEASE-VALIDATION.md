@@ -73,9 +73,18 @@ replacement-of-replacement.
 Functional candidate `c9d87f6c0e552eb536287fa4b0babe73284c9ebf`
 was independently re-attacked before release preparation. The Reviewer used a
 clean 52-file archive matching that commit and ended GREEN with P0=0, P1=0,
-and P2=0. The final v0.7.3 Skill-tree and release-archive binding is recorded
-after the version-only release-preparation commit so the values describe the
-actual published package rather than this earlier functional checkpoint.
+and P2=0.
+
+The final v0.7.3 Skill content was last changed by release-preparation commit
+`e0b0abdfc338671f80d7cd5a95a3824228162049` and is bound to Git tree
+`7696e33247889768396b09c5850ba2b038306260`. The Skill-only archive contains
+52 files and has SHA-256
+`35f27ff5bd70a050209f725657a156ceecdc278487de322fd714436f2c80f7d8`.
+Git for Windows exported text files with CRLF line endings; after normalizing
+CRLF to the repository's LF blob form, all 52/52 archive files match that
+Skill tree. The archive was extracted and the 33-script parser, 41-assertion
+recovery suite, 617-assertion self-test with 57 rejected invalid cases, and
+Skill Creator validation all passed again.
 
 This receipt does not claim measured production Token savings. Synthetic and
 local validation prove contract and implementation behavior, not a universal
