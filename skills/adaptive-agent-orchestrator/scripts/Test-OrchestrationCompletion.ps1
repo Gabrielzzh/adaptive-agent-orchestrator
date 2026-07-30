@@ -173,7 +173,9 @@ $checkedDurableReviewNodeIds = [Collections.Generic.HashSet[string]]::new(
     [StringComparer]::Ordinal
 )
 $durableMilestoneChain = $null
+$durableMilestoneAcceptance = $null
 $durableMilestoneError = ''
+$durableAcceptanceError = ''
 $activeDurableBindings = @{}
 if ($durableReviewNodeIds.Count -gt 0) {
     try {
@@ -184,6 +186,22 @@ if ($durableReviewNodeIds.Count -gt 0) {
             $durableMilestoneChain.active_source_bindings
         )) {
             $activeDurableBindings[[string]$binding.source_node_id] = $binding
+        }
+        if (-not [string]::IsNullOrWhiteSpace(
+            [string]$durableMilestoneChain.activation_receipt_hash
+        )) {
+            try {
+                $durableMilestoneAcceptance =
+                    Read-DurableReviewMilestoneAcceptance `
+                        -RunDirectory $RunDirectory `
+                        -MilestoneChain $durableMilestoneChain
+            } catch {
+                $durableAcceptanceError = $_.Exception.Message
+                $errors.Add(
+                    'Active milestone main-owner acceptance is invalid: ' +
+                    $durableAcceptanceError
+                )
+            }
         }
     } catch {
         $durableMilestoneError = $_.Exception.Message

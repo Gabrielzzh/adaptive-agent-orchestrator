@@ -24,10 +24,14 @@ function Assert-ThrowsLike {
         [string] $Message
     )
     $caught = $false
+    $actual = ''
     try { & $Action } catch {
+        $actual = $_.Exception.Message
         $caught = $_.Exception.Message -like "*$Expected*"
     }
-    Assert-True $caught $Message
+    Assert-True $caught ($Message + $(if ($caught) { '' } else {
+        " Actual: $actual"
+    }))
 }
 
 function New-ReviewPlan {
@@ -371,6 +375,81 @@ try {
     )
     $preActivation = Join-Path $testRoot 'pre-activation'
     Copy-Item -LiteralPath $run -Destination $preActivation -Recurse
+    $resolvedRun = Join-Path $testRoot 'resolved-acceptance'
+    Copy-Item -LiteralPath $preActivation -Destination $resolvedRun -Recurse
+    $resolvedCheckpoint = Join-Path $resolvedRun (
+        'materials/checkpoint-method-2.json'
+    )
+    $resolvedReview = New-SourceChain -Run $resolvedRun `
+        -SourceNodeId 'review' -ThreadId 'review-thread' `
+        -MilestoneId 'method-2' -CheckpointPath $resolvedCheckpoint `
+        -Stem 'review.method-2.resolved' -Severity 'P1' `
+        -FindingText 'resolved-review-p1' -Resolution 'resolved'
+    $resolvedDomain = New-SourceChain -Run $resolvedRun `
+        -SourceNodeId 'domain' -ThreadId 'domain-thread' `
+        -MilestoneId 'method-2' -CheckpointPath $resolvedCheckpoint `
+        -Stem 'domain.method-2.resolved' -Severity 'P1' `
+        -FindingText 'resolved-domain-p1' -Resolution 'resolved'
+    $resolvedSelectionPath = Join-Path $resolvedRun (
+        'materials/method-2-resolved-selection.json'
+    )
+    @(
+        [ordered]@{
+            source_node_id = 'review'
+            result_receipt_path = $resolvedReview.result_path
+            disposition_receipt_path = $resolvedReview.disposition_path
+        },
+        [ordered]@{
+            source_node_id = 'domain'
+            result_receipt_path = $resolvedDomain.result_path
+            disposition_receipt_path = $resolvedDomain.disposition_path
+        }
+    ) | ConvertTo-Json -Depth 10 |
+        Set-Content -LiteralPath $resolvedSelectionPath -Encoding utf8
+    $resolvedAuthorizationPath = Join-Path $resolvedRun (
+        'materials/method-2-resolved-authorization.md'
+    )
+    Set-Content -LiteralPath $resolvedAuthorizationPath `
+        -Value 'Controller activates resolved method-2.'
+    & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneActivationReceipt.ps1'
+    )) -RunDirectory $resolvedRun -MilestoneId 'method-2' `
+        -SelectionPath $resolvedSelectionPath `
+        -AuthorizationMaterialPath $resolvedAuthorizationPath `
+        -ActivationKey 'controller:resolved-method-2' | Out-Null
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $resolvedRun | Out-Null
+    } 'lacks main-owner acceptance' (
+        'A later milestone cannot reuse the main acceptance from its baseline.'
+    )
+    $acceptanceEvidencePath = Join-Path $resolvedRun (
+        'materials/method-2-main-acceptance.md'
+    )
+    Set-Content -LiteralPath $acceptanceEvidencePath `
+        -Value 'Main owner integrated both resolved method-2 source reports.'
+    $acceptance = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneAcceptanceReceipt.ps1'
+    )) -RunDirectory $resolvedRun -MilestoneId 'method-2' `
+        -EvidenceMaterialPath $acceptanceEvidencePath `
+        -AcceptanceKey 'controller:accept-resolved-method-2' |
+        ConvertFrom-Json -Depth 100
+    $resolvedCompletion = & (
+        Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1'
+    ) -RunDirectory $resolvedRun | ConvertFrom-Json -Depth 30
+    Assert-True (
+        $resolvedCompletion.complete -and
+        $acceptance.milestone_id -eq 'method-2'
+    ) 'A fresh bound main-owner acceptance may complete the active milestone.'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneAcceptanceReceipt.ps1'
+        )) -RunDirectory $resolvedRun -MilestoneId 'method-2' `
+            -EvidenceMaterialPath $acceptanceEvidencePath `
+            -AcceptanceKey 'controller:duplicate-method-2-acceptance' |
+            Out-Null
+    } 'already exists' 'A milestone acceptance cannot be recorded twice.'
+
     $activation = & (
         Join-Path $scriptRoot (
             'New-DurableReviewMilestoneActivationReceipt.ps1'
@@ -399,9 +478,19 @@ try {
     Assert-True (
         $currentError -like '*current-review-p1*' -and
         $currentError -like '*current-domain-p1*' -and
+        $currentError -like '*lacks main-owner acceptance*' -and
         $currentError -notlike '*baseline-review-p0*' -and
         $currentError -notlike '*baseline-domain-p0*'
     ) 'Completion must report only the active milestone findings.'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneAcceptanceReceipt.ps1'
+        )) -RunDirectory $run -MilestoneId 'method-2' `
+            -EvidenceMaterialPath $authorizationPath `
+            -AcceptanceKey 'controller:accept-open-method-2' | Out-Null
+    } 'unresolved P0/P1' (
+        'Main-owner acceptance cannot precede resolution of active blockers.'
+    )
 
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot (

@@ -279,6 +279,23 @@ the terminal valid activation chain, never a filename timestamp or unactivated
 cross-source, or cross-checkpoint bindings fail closed. Policy activation is a
 different protocol and cannot select a milestone.
 
+After every active non-baseline milestone has resolved all P0/P1 findings, the
+main integration owner must record a new acceptance:
+
+```powershell
+pwsh -File scripts/New-DurableReviewMilestoneAcceptanceReceipt.ps1 `
+  -RunDirectory <run> -MilestoneId method-2 `
+  -EvidenceMaterialPath <run>/materials/method-2-main-acceptance.md `
+  -AcceptanceKey "controller:<stable-authority-reference>"
+```
+
+The acceptance receipt and its append-only journal event bind the exact
+activation receipt, source-binding hash, shared checkpoint, main-owner node,
+and run-local evidence. Its event sequence must be later than activation.
+Completion never reuses a main node's `validated` state from the baseline or an
+earlier milestone. Missing, duplicated, changed, or pre-activation acceptance
+fails closed.
+
 When a durable source has no final answer, its node enters `result_pending`.
 The only legal continuations are a bounded same-source recovery or, after a
 verified 3/3 recovery chain, `replacement_pending` followed by the bound
