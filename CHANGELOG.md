@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.7 - 2026-07-30
+
+Raw Codex thread-capture compatibility patch release.
+
+- Accept the current Codex `read_thread` identity shape, `thread.id`, directly
+  in read, progress, and result-receipt validation.
+- Preserve historical `thread.threadId` and top-level `threadId` captures.
+- Fail closed when any concurrently present identity is empty or differs,
+  including case-only differences, instead of selecting one field.
+- Preserve a single legacy finding as a one-element JSON array when generating
+  a schema 1.2 result receipt.
+- Keep orchestration policy `0.7.6`: this parser-compatible patch does not
+  rewrite plans, runs, journals, or require policy activation.
+- Validate against two real raw captures and real schema 1.3 result/disposition
+  generation. The release does not legitimize retroactive lifecycle events.
+
 ## 0.7.6 - 2026-07-30
 
 Auditable durable-review successor-run patch release.

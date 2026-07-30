@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.7.6 release notes](docs/releases/v0.7.6.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.7.7 release notes](docs/releases/v0.7.7.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -234,13 +234,13 @@ state, integrates results, and performs authorized external actions.
 
 ## Validation
 
-The v0.7.6 release passes:
+The v0.7.7 release passes:
 
-- PowerShell parser validation for all 41 scripts;
+- PowerShell parser validation for all 42 scripts;
 - 37 durable-milestone and successor-run assertions;
 - 15 run-policy activation assertions;
 - 45 recovery-protocol assertions;
-- 722 self-test assertions;
+- 724 self-test assertions;
 - 59 intentionally invalid negative-test cases correctly rejected;
 - strict parsing for all 8 bundled reference JSON files;
 - plan, metadata, journal, handoff, dependency, idempotency, ownership,
@@ -250,11 +250,17 @@ The v0.7.6 release passes:
   completion tests;
 - strict JSON parsing and a real Windows Junction/reparse-point fixture;
 - Skill Creator validation;
+- 13 focused raw-capture compatibility assertions and an independent 27/27
+  re-attack covering current `thread.id`, both historical identity shapes,
+  conflicting or empty identities, case-only differences, and expected-ID
+  mismatches;
 - independent dynamic re-attack of predecessor export, successor adoption,
   lineage fields, source continuity, and coherent receipt re-signing, ending
   GREEN with P0=0, P1=0, and P2=0; an additional 28/28 attack set passed;
 - a temporary-copy adoption test of the real durable-review run inherited
-  17/17 P1 findings across two sources and remained correctly `BLOCKED`.
+  17/17 P1 findings across two sources and remained correctly `BLOCKED`;
+- two real raw Codex captures generated separate schema 1.3 result and
+  disposition receipts without caller-side conversion.
 
 Run:
 

@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[English](README.md) · [v0.7.6 正式版说明](docs/releases/v0.7.6.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+[English](README.md) · [v0.7.7 正式版说明](docs/releases/v0.7.7.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
 
 ![Adaptive Agent Orchestrator v0.7.0 发布图](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -207,13 +207,13 @@ $adaptive-agent-orchestrator。共享上下文留在主 Agent，Worker 只拿引
 
 ## 验证情况
 
-v0.7.6 正式版本通过：
+v0.7.7 正式版本通过：
 
-- 41 个 PowerShell 脚本语法解析；
+- 42 个 PowerShell 脚本语法解析；
 - 37 项 durable milestone 与 successor-run 专项断言；
 - 15 项 run policy activation 专项断言；
 - 45 项恢复协议专项断言；
-- 722 项完整自测断言；
+- 724 项完整自测断言；
 - 59 份故意构造的非法负面案例均被正确拦截；
 - 8 个 reference JSON 文件严格解析；
 - 计划、元数据、日志、handoff、依赖、幂等、所有权、上下文重叠、渐进
@@ -221,11 +221,16 @@ v0.7.6 正式版本通过：
   长期审核、结果恢复、替代连续性和完成门测试；
 - 严格 JSON 解析与真实 Windows Junction/reparse point 实体测试；
 - Skill Creator 校验；
+- 13 项原始 capture 兼容断言，以及独立 27/27 动态复攻，覆盖当前
+  `thread.id`、两种历史身份字段、冲突或空身份、仅大小写不同和期望 ID
+  不匹配；
 - 同一独立审核角色对 predecessor export、successor adoption、谱系字段、
   来源连续性与一致性重签完成动态复攻，最终 GREEN，P0/P1/P2 均为 0；
   额外攻击集 28/28 通过；
 - 使用真实长期审核 run 的临时副本完成采用测试：两个来源的 17/17 条 P1
-  全部继承，完成门继续正确保持 `BLOCKED`。
+  全部继承，完成门继续正确保持 `BLOCKED`；
+- 两份真实 Codex 原始 capture 无需调用方转换，分别生成 schema 1.3
+  result 与 disposition 收据。
 
 ```powershell
 pwsh -NoProfile -File `

@@ -7,6 +7,7 @@ release records.
 
 | Version | Channel | Focus | Details |
 | --- | --- | --- | --- |
+| `v0.7.7` | Stable | Raw Codex `thread.id` capture compatibility | [Notes](v0.7.7.md) |
 | `v0.7.6` | Stable | Auditable durable-review successor runs | [Notes](v0.7.6.md) |
 | `v0.7.5` | Stable | Append-only cross-milestone durable review | [Notes](v0.7.5.md) |
 | `v0.7.4` | Stable | Auditable activation of immutable older runs | [Notes](v0.7.4.md) |
