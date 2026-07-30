@@ -31,6 +31,32 @@ if ($null -eq $node -or [string]$node.kind -ne 'agent' -or
     [string]$node.topology -ne 'background-thread') {
     throw 'Recovery source must be a durable background-thread node.'
 }
+$events = @(Read-OrchestrationJournal (Join-Path $runRoot 'events.jsonl'))
+$history = @($events | Where-Object {
+    [string]$_.node_id -eq $SourceNodeId
+})
+$derivedRecoveryStage = if (@($history | Where-Object {
+    [string]$_.status -eq 'replacement_pending' -and
+    [string]$_.thread_id -eq $OriginalThreadId
+}).Count -gt 0) {
+    'replacement'
+} elseif (@($history | Where-Object {
+    [string]$_.status -eq 'materialized' -and
+    [string]$_.thread_id -eq $OriginalThreadId
+}).Count -gt 0) {
+    'original'
+} else {
+    throw (
+        'Recovery thread has no materialized or replacement_pending ' +
+        'lifecycle binding.'
+    )
+}
+if ($RecoveryStage -ne $derivedRecoveryStage) {
+    throw (
+        "RecoveryStage '$RecoveryStage' does not match lifecycle-derived " +
+        "stage '$derivedRecoveryStage'."
+    )
+}
 
 function Resolve-InputPath {
     param([string] $Path, [string] $Label)
@@ -54,6 +80,14 @@ if (-not $outputFullPath.StartsWith(
     [StringComparison]::OrdinalIgnoreCase
 )) {
     throw 'Recovery receipt must remain inside the run.'
+}
+$canonicalReceiptDirectory = [IO.Path]::GetFullPath(
+    (Join-Path $runRoot 'receipts')
+).TrimEnd('\', '/')
+if ([IO.Path]::GetFullPath(
+    (Split-Path -Parent $outputFullPath)
+).TrimEnd('\', '/') -ne $canonicalReceiptDirectory) {
+    throw 'Recovery receipt must use the canonical run receipts directory.'
 }
 if (Test-Path -LiteralPath $outputFullPath) {
     throw "Recovery receipt already exists: $outputFullPath"

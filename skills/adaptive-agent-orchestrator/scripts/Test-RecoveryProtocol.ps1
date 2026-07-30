@@ -506,6 +506,47 @@ try {
     Assert-True ($replacementRecovery.outcome -eq 'recovery-exhausted') (
         'A replacement source receives its own bounded 3/3 recovery epoch.'
     )
+    $alternateRecoveryDirectory = Join-Path $run 'alternate-recovery'
+    $null = New-Item -ItemType Directory -Path $alternateRecoveryDirectory
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ThreadResultRecoveryReceipt.ps1') `
+            -RunDirectory $run -SourceNodeId 'review' `
+            -OriginalThreadId 'replacement-review-thread' `
+            -CheckpointManifestPath $checkpointPath `
+            -InputManifestPath $inputPath `
+            -ThreadReadPath $replacementProgressPath `
+            -RecoveryStage 'replacement' `
+            -ReplacementContinuityReceiptPath $replacementPath `
+            -Attempt 1 -OutputPath (Join-Path $alternateRecoveryDirectory (
+                'review.replacement.attempt-1.result-recovery.json'
+            )) | Out-Null
+    } 'canonical run receipts directory' (
+        'A new directory cannot reset an exhausted replacement recovery epoch.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ThreadResultRecoveryReceipt.ps1') `
+            -RunDirectory $run -SourceNodeId 'review' `
+            -OriginalThreadId 'replacement-review-thread' `
+            -CheckpointManifestPath $checkpointPath `
+            -InputManifestPath $inputPath `
+            -ThreadReadPath $replacementProgressPath `
+            -RecoveryStage 'original' -Attempt 1 `
+            -OutputPath (Join-Path $alternateRecoveryDirectory (
+                'review.attempt-1.result-recovery.json'
+            )) | Out-Null
+    } 'does not match lifecycle-derived stage' (
+        'A replacement thread cannot relabel recovery as original.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $run -NodeId 'review' -Status 'running' `
+            -Message 'forbidden fourth replacement recovery' `
+            -ThreadId 'replacement-review-thread' `
+            -IdempotencyKey 'forbidden-fourth-replacement-recovery' |
+            Out-Null
+    } 'attempt 3 is exhausted' (
+        'An exhausted replacement recovery epoch cannot return to running.'
+    )
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
             -RunDirectory $run | Out-Null

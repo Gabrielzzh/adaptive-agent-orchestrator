@@ -598,6 +598,18 @@ try {
         if ([string]$lastPending.thread_id -ne $ThreadId) {
             throw 'Same-source recovery must keep the original thread.'
         }
+        $lastRecovery = Read-ThreadResultRecoveryReceipt `
+            -Path (Join-Path $RunDirectory (
+                [string]$lastPending.recovery_receipt_path
+            )) -RunDirectory $RunDirectory `
+            -ExpectedSourceNodeId $NodeId `
+            -ExpectedOriginalThreadId ([string]$lastPending.thread_id)
+        if ([string]$lastRecovery.outcome -eq 'recovery-exhausted') {
+            throw (
+                'Recovery attempt 3 is exhausted; the same recovery epoch ' +
+                'cannot return to running.'
+            )
+        }
     }
     if ($priorState -eq 'result_pending' -and
         $Status -eq 'replacement_pending') {
@@ -881,6 +893,22 @@ try {
         result_receipt_hash = $archiveReceiptHash
         idempotency_key = $IdempotencyKey
         request_fingerprint = $requestFingerprint
+    }
+    if ($kind -eq 'agent' -and $Status -eq 'result_pending') {
+        $priorPendingForThread = @($history | Where-Object {
+            [string]$_.status -eq 'result_pending' -and
+            [string]$_.thread_id -eq $ThreadId
+        })
+        if (@($priorPendingForThread | Where-Object {
+            [string]$_.recovery_receipt_hash -eq
+                [string]$recoveryReceipt.receipt_hash
+        }).Count -gt 0) {
+            throw 'A recovery receipt cannot be reused for another attempt.'
+        }
+        if ([int]$recoveryReceipt.attempt -ne
+            ($priorPendingForThread.Count + 1)) {
+            throw 'Recovery attempts must be recorded once in sequential order.'
+        }
     }
     if ($ModelVerificationState -eq 'unverified') {
         $event['model_verification_state'] = $ModelVerificationState
