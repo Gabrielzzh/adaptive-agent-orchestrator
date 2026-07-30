@@ -87,7 +87,7 @@ The final v0.7.4 Skill content was last changed by functional commit
 `e580b6ab71afed0a56c916aefd6ad71219b10ddd` and is bound to Git tree
 `5a090450cc0b5ee0ca0c554fa544a769bb12b437`. The final Skill-only archive
 contains 54 files and has SHA-256
-`05c753da6abd1304d7b9cdb60136e59c04ccdf7c21efd5189a9ddd36d1f40a77`.
+`51281eab92cea8ebc3625fbde6f70a514d8e594d5b75077393b0c348e64d651e`.
 Git for Windows exported text files with CRLF line endings; after normalizing
 CRLF to the repository's LF blob form, all 54/54 archive files match that
 Skill tree. The archive was extracted and the 35-script parser, 15-assertion
