@@ -150,6 +150,11 @@ the actual task ID, collect the final turn through `read_thread`, and bind it to
 unavailable, fall back once to bounded reads; do not retry the unavailable
 handler. Native subagents never depend on `wait_threads`.
 
+Save the raw `read_thread` JSON without converting its identity fields. Current
+captures use `thread.id`; historical `thread.threadId` and top-level `threadId`
+remain readable. If more than one form is present, every value must match
+exactly or capture validation fails closed.
+
 Poll with bounded intervals while the main agent continues its own ready work.
 The first read should normally occur about thirty seconds after materialized
 existence is confirmed, followed by sixty seconds and then five-minute
