@@ -906,9 +906,18 @@ if ($null -ne $durableReview) {
         $reviewNodeIds.Count) {
         Add-PlanError 'durable_review_profile node roles must be distinct.'
     }
-    if (@(Get-PlanProperty $durableReview 'milestone_ids').Count -lt 2) {
+    $milestoneIds = @(Get-PlanProperty $durableReview 'milestone_ids')
+    if ($milestoneIds.Count -lt 2) {
         Add-PlanError (
             'durable_review_profile requires at least two milestone_ids.'
+        )
+    }
+    if (@($milestoneIds | Select-Object -Unique).Count -ne
+        $milestoneIds.Count -or @($milestoneIds | Where-Object {
+            [string]$_ -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$'
+        }).Count -gt 0) {
+        Add-PlanError (
+            'durable_review_profile milestone_ids must be unique safe IDs.'
         )
     }
     if ((Get-PlanProperty $durableReview 'consumer_output') -ne 'result-only') {

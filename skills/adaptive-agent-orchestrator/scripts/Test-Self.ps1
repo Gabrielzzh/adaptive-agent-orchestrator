@@ -3201,6 +3201,26 @@ try {
         'durable-review-consumer-output'
     ) 'consumer_output must be result-only'
 
+    $duplicateMilestones = Get-Content -LiteralPath (
+        $durableReviewPlanPath
+    ) -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+    $duplicateMilestones.durable_review_profile.milestone_ids = @(
+        'method-1', 'method-1'
+    )
+    Assert-InvalidPlan $duplicateMilestones (
+        'durable-review-duplicate-milestone'
+    ) 'milestone_ids must be unique safe IDs'
+
+    $unsafeMilestones = Get-Content -LiteralPath (
+        $durableReviewPlanPath
+    ) -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+    $unsafeMilestones.durable_review_profile.milestone_ids = @(
+        'method-1', '../method-2'
+    )
+    Assert-InvalidPlan $unsafeMilestones (
+        'durable-review-unsafe-milestone'
+    ) 'milestone_ids must be unique safe IDs'
+
     $illegalTransitionCaught = $false
     try {
         & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
@@ -3808,6 +3828,13 @@ try {
         'Immutable predecessor run policy activation should pass its attack suite.'
     )
     $script:assertionCount += [int]$policyActivation.assertions
+    $durableMilestone = & (
+        Join-Path $scriptRoot 'Test-DurableReviewMilestone.ps1'
+    ) | ConvertFrom-Json -Depth 20
+    Assert-True $durableMilestone.pass (
+        'Durable review milestone roll-forward should pass its attack suite.'
+    )
+    $script:assertionCount += [int]$durableMilestone.assertions
 
     [pscustomobject]@{
         passed = $true

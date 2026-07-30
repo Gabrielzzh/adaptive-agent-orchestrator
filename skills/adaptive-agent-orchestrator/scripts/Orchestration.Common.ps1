@@ -55,6 +55,21 @@ function Get-OrchestrationEventHash {
             $keys[$policyIndex..($keys.Count - 1)]
         )
     }
+    if ($null -ne $Event.PSObject.Properties['milestone_id'] -or
+        $null -ne $Event.PSObject.Properties[
+            'milestone_activation_receipt_path'
+        ] -or $null -ne $Event.PSObject.Properties[
+            'milestone_activation_receipt_hash'
+        ]) {
+        $statusIndex = [Array]::IndexOf($keys, 'status') + 1
+        $keys = @(
+            $keys[0..($statusIndex - 1)]
+            'milestone_id'
+            'milestone_activation_receipt_path'
+            'milestone_activation_receipt_hash'
+            $keys[$statusIndex..($keys.Count - 1)]
+        )
+    }
     $payload = [ordered]@{}
     foreach ($key in $keys) {
         $property = $Event.PSObject.Properties[$key]
@@ -250,6 +265,49 @@ function Read-ThreadResultReceipt {
         $plan = Get-Content -LiteralPath (
             Join-Path $RunDirectory 'plan.json'
         ) -Raw | ConvertFrom-Json -Depth 100 -DateKind String
+        $milestoneFields = @(
+            'milestone_id', 'checkpoint_material_path',
+            'checkpoint_material_hash'
+        )
+        $milestoneFieldCount = @($milestoneFields | Where-Object {
+            $null -ne $receipt.PSObject.Properties[$_]
+        }).Count
+        if ($milestoneFieldCount -notin @(0, $milestoneFields.Count)) {
+            throw 'Thread result receipt has a partial milestone binding.'
+        }
+        if ($milestoneFieldCount -eq $milestoneFields.Count) {
+            $allMilestoneFieldsEmpty = @($milestoneFields | Where-Object {
+                -not [string]::IsNullOrWhiteSpace([string]$receipt.$_)
+            }).Count -eq 0
+            if (-not $allMilestoneFieldsEmpty) {
+                if (@($milestoneFields | Where-Object {
+                    [string]::IsNullOrWhiteSpace([string]$receipt.$_)
+                }).Count -gt 0) {
+                    throw 'Thread result receipt has an incomplete milestone binding.'
+                }
+                if ($null -eq $plan.PSObject.Properties[
+                    'durable_review_profile'
+                ] -or [string]$receipt.milestone_id -notin @(
+                    $plan.durable_review_profile.milestone_ids
+                )) {
+                    throw (
+                        'Thread result receipt milestone is not declared by ' +
+                        'the plan.'
+                    )
+                }
+                $checkpointPath = Get-RunLocalReceiptPath `
+                    -RunDirectory $RunDirectory `
+                    -RelativePath ([string]$receipt.checkpoint_material_path) `
+                    -Label 'Checkpoint material'
+                if (-not (
+                    Test-Path -LiteralPath $checkpointPath -PathType Leaf
+                ) -or [string]$receipt.checkpoint_material_hash -ne (
+                    Get-FileHash -LiteralPath $checkpointPath -Algorithm SHA256
+                ).Hash.ToLowerInvariant()) {
+                    throw 'Thread result receipt checkpoint binding changed.'
+                }
+            }
+        }
         $sourceNode = @($plan.nodes | Where-Object {
             [string]$_.id -eq [string]$receipt.source_node_id
         }) | Select-Object -First 1
@@ -395,6 +453,15 @@ function Read-ThreadResultReceipt {
         $payload.replacement_continuity_receipt_hash = [string](
             $receipt.replacement_continuity_receipt_hash
         )
+        if ($null -ne $receipt.PSObject.Properties['milestone_id']) {
+            $payload.milestone_id = [string]$receipt.milestone_id
+            $payload.checkpoint_material_path = [string](
+                $receipt.checkpoint_material_path
+            )
+            $payload.checkpoint_material_hash = [string](
+                $receipt.checkpoint_material_hash
+            )
+        }
     }
     $payload.adopted_findings = @($receipt.adopted_findings)
     $payload.rejected_findings = @($receipt.rejected_findings)
@@ -1131,6 +1198,11 @@ function Read-ReviewDispositionReceipt {
         [string]$receipt.source_result_receipt_hash) {
         throw 'Review disposition receipt is not bound to its source result receipt.'
     }
+    if ($null -ne $source.PSObject.Properties['milestone_id'] -and
+        -not [string]::IsNullOrWhiteSpace([string]$source.milestone_id) -and
+        [string]$source.milestone_id -ne [string]$receipt.milestone_id) {
+        throw 'Review disposition milestone does not match its source result.'
+    }
 
     $sourceFindings = @($source.pending_findings)
     $sourceById = @{}
@@ -1265,6 +1337,371 @@ function Read-ReviewDispositionReceipt {
         throw 'Review disposition receipt hash mismatch.'
     }
     return $receipt
+}
+
+function Get-DurableReviewDispositionBinding {
+    param(
+        [Parameter(Mandatory)][string] $RunDirectory,
+        [Parameter(Mandatory)][object] $Plan,
+        [Parameter(Mandatory)][string] $SourceNodeId,
+        [Parameter(Mandatory)][string] $DispositionRelativePath,
+        [Parameter(Mandatory)][string] $ExpectedMilestoneId,
+        [switch] $AllowHistoricalMilestoneAlias,
+        [switch] $RequireResultMilestoneBinding
+    )
+
+    $dispositionPath = Get-RunLocalReceiptPath `
+        -RunDirectory $RunDirectory -RelativePath $DispositionRelativePath `
+        -Label 'Review disposition receipt'
+    if (-not (Test-Path -LiteralPath $dispositionPath -PathType Leaf)) {
+        throw "Review disposition receipt does not exist: $DispositionRelativePath"
+    }
+    $rawDisposition = Get-Content -LiteralPath $dispositionPath -Raw |
+        ConvertFrom-Json -Depth 50 -DateKind String
+    $sourceThreadId = [string]$rawDisposition.source_thread_id
+    if ([string]::IsNullOrWhiteSpace($sourceThreadId)) {
+        throw 'Review disposition receipt lacks a source thread.'
+    }
+    $disposition = Read-ReviewDispositionReceipt -Path $dispositionPath `
+        -RunDirectory $RunDirectory -ExpectedSourceNodeId $SourceNodeId `
+        -ExpectedThreadId $sourceThreadId
+    if (-not $AllowHistoricalMilestoneAlias -and
+        [string]$disposition.milestone_id -ne $ExpectedMilestoneId) {
+        throw (
+            "Review disposition for '$SourceNodeId' does not match milestone " +
+            "'$ExpectedMilestoneId'."
+        )
+    }
+    $resultRelativePath = [string]$disposition.source_result_receipt_path
+    $resultPath = Get-RunLocalReceiptPath -RunDirectory $RunDirectory `
+        -RelativePath $resultRelativePath -Label 'Thread result receipt'
+    $result = Read-ThreadResultReceipt -Path $resultPath `
+        -ExpectedThreadId $sourceThreadId `
+        -ExpectedSourceNodeId $SourceNodeId -RunDirectory $RunDirectory
+
+    $checkpointPath = ''
+    $checkpointHash = ''
+    if ($RequireResultMilestoneBinding) {
+        foreach ($name in @(
+            'milestone_id', 'checkpoint_material_path',
+            'checkpoint_material_hash'
+        )) {
+            if ($null -eq $result.PSObject.Properties[$name] -or
+                [string]::IsNullOrWhiteSpace([string]$result.$name)) {
+                throw (
+                    "Current milestone result for '$SourceNodeId' lacks its " +
+                    'milestone or checkpoint binding.'
+                )
+            }
+        }
+        if ([string]$result.milestone_id -ne $ExpectedMilestoneId) {
+            throw (
+                "Current result for '$SourceNodeId' is bound to another " +
+                'milestone.'
+            )
+        }
+        $checkpointPath = [string]$result.checkpoint_material_path
+        $checkpointHash = [string]$result.checkpoint_material_hash
+    } elseif (-not $AllowHistoricalMilestoneAlias -and
+        $null -ne $result.PSObject.Properties['milestone_id'] -and
+        -not [string]::IsNullOrWhiteSpace([string]$result.milestone_id)) {
+        if ([string]$result.milestone_id -ne $ExpectedMilestoneId) {
+            throw (
+                "Historical result for '$SourceNodeId' is bound to another " +
+                'milestone.'
+            )
+        }
+        $checkpointPath = [string]$result.checkpoint_material_path
+        $checkpointHash = [string]$result.checkpoint_material_hash
+    }
+
+    return [pscustomobject][ordered]@{
+        source_node_id = $SourceNodeId
+        source_thread_id = $sourceThreadId
+        milestone_id = $ExpectedMilestoneId
+        checkpoint_material_path = $checkpointPath
+        checkpoint_material_hash = $checkpointHash
+        result_receipt_path = $resultRelativePath.Replace('\', '/')
+        result_receipt_hash = [string]$result.receipt_hash
+        result_file_hash = (
+            Get-FileHash -LiteralPath $resultPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        disposition_receipt_path = $DispositionRelativePath.Replace('\', '/')
+        disposition_receipt_hash = [string]$disposition.receipt_hash
+        disposition_file_hash = (
+            Get-FileHash -LiteralPath $dispositionPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+    }
+}
+
+function Read-DurableReviewMilestoneActivationChain {
+    param(
+        [Parameter(Mandatory)][string] $RunDirectory
+    )
+
+    $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+    $planPath = Join-Path $runRoot 'plan.json'
+    $runPath = Join-Path $runRoot 'run.json'
+    $eventsPath = Join-Path $runRoot 'events.jsonl'
+    $planRaw = Get-Content -LiteralPath $planPath -Raw
+    $plan = $planRaw | ConvertFrom-Json -Depth 100 -DateKind String
+    $run = Get-Content -LiteralPath $runPath -Raw |
+        ConvertFrom-Json -Depth 30 -DateKind String
+    $events = @(Read-OrchestrationJournal $eventsPath)
+    if ($null -eq $plan.PSObject.Properties['durable_review_profile']) {
+        throw 'The run has no durable_review_profile.'
+    }
+    if ((Get-TextSha256 $planRaw) -ne [string]$run.plan_hash -or
+        [string]$run.run_id -ne [string]$plan.run_id) {
+        throw 'Durable review milestone chain does not match the immutable run.'
+    }
+    $milestoneIds = @(
+        $plan.durable_review_profile.milestone_ids | ForEach-Object {
+            [string]$_
+        }
+    )
+    if ($milestoneIds.Count -lt 2 -or
+        @($milestoneIds | Select-Object -Unique).Count -ne
+            $milestoneIds.Count -or
+        @($milestoneIds | Where-Object {
+            $_ -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$'
+        }).Count -gt 0) {
+        throw 'Durable review milestone IDs are invalid.'
+    }
+    $requiredSourceIds = @(
+        @($plan.durable_review_profile.domain_node_ids) +
+        @($plan.durable_review_profile.dissent_node_ids) |
+        ForEach-Object { [string]$_ }
+    )
+    $checks = @($plan.completion.review_disposition_checks)
+    if ($checks.Count -ne $requiredSourceIds.Count) {
+        throw 'Durable review completion checks do not match required sources.'
+    }
+    $baselineBindings = [Collections.Generic.List[object]]::new()
+    foreach ($sourceNodeId in $requiredSourceIds) {
+        $matchingChecks = @($checks | Where-Object {
+            [string]$_.source_node_id -eq $sourceNodeId
+        })
+        if ($matchingChecks.Count -ne 1) {
+            throw "Durable source '$sourceNodeId' needs one baseline check."
+        }
+        $baselineBindings.Add((
+            Get-DurableReviewDispositionBinding -RunDirectory $runRoot `
+                -Plan $plan -SourceNodeId $sourceNodeId `
+                -DispositionRelativePath ([string]$matchingChecks[0].path) `
+                -ExpectedMilestoneId $milestoneIds[0] `
+                -AllowHistoricalMilestoneAlias
+        ))
+    }
+
+    $receiptDirectory = Join-Path $runRoot 'receipts'
+    $knownReceiptNames = @($milestoneIds | Select-Object -Skip 1 |
+        ForEach-Object { "durable-review-milestone.$_.activation.json" })
+    $actualActivationFiles = @()
+    if (Test-Path -LiteralPath $receiptDirectory -PathType Container) {
+        $actualActivationFiles = @(
+            Get-ChildItem -LiteralPath $receiptDirectory -File -Filter (
+                'durable-review-milestone.*.activation.json'
+            )
+        )
+    }
+    foreach ($activationFile in $actualActivationFiles) {
+        if ($activationFile.Name -notin $knownReceiptNames) {
+            throw 'A milestone activation receipt targets an unknown milestone.'
+        }
+    }
+    $activationEvents = @($events | Where-Object {
+        [string]$_.event -eq 'milestone-activated'
+    })
+    if ($activationEvents.Count -ne $actualActivationFiles.Count) {
+        throw (
+            'Milestone activation receipt and journal event counts do not match.'
+        )
+    }
+
+    $activeMilestoneId = $milestoneIds[0]
+    $activeBindings = @($baselineBindings)
+    $previousActivationPath = ''
+    $previousActivationHash = ''
+    $activeReceipt = $null
+    $gapSeen = $false
+    for ($index = 1; $index -lt $milestoneIds.Count; $index++) {
+        $milestoneId = $milestoneIds[$index]
+        $relativePath = (
+            "receipts/durable-review-milestone.$milestoneId.activation.json"
+        )
+        $receiptPath = Join-Path $runRoot $relativePath
+        if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
+            $gapSeen = $true
+            continue
+        }
+        if ($gapSeen) {
+            throw 'Durable review milestone activation skipped a predecessor.'
+        }
+        $receipt = Get-Content -LiteralPath $receiptPath -Raw |
+            ConvertFrom-Json -Depth 100 -DateKind String
+        $required = @(
+            'schema_version', 'run_id', 'plan_hash', 'milestone_id',
+            'milestone_index', 'previous_milestone_id',
+            'previous_activation_receipt_path',
+            'previous_activation_receipt_hash',
+            'previous_source_bindings_hash', 'source_journal_head',
+            'source_journal_event_count', 'selection_material_path',
+            'selection_material_hash', 'source_bindings',
+            'source_bindings_hash', 'checkpoint_material_path',
+            'checkpoint_material_hash', 'authorization_material_path',
+            'authorization_material_hash', 'activation_key',
+            'created_at_utc', 'receipt_hash'
+        )
+        foreach ($name in $required) {
+            if ($null -eq $receipt.PSObject.Properties[$name]) {
+                throw "Milestone activation receipt is missing '$name'."
+            }
+        }
+        if ([string]$receipt.schema_version -ne '1.0' -or
+            [string]$receipt.run_id -ne [string]$run.run_id -or
+            [string]$receipt.plan_hash -ne [string]$run.plan_hash -or
+            [string]$receipt.milestone_id -ne $milestoneId -or
+            [int]$receipt.milestone_index -ne $index -or
+            [string]$receipt.previous_milestone_id -ne
+                $milestoneIds[$index - 1] -or
+            [string]$receipt.previous_activation_receipt_path -ne
+                $previousActivationPath -or
+            [string]$receipt.previous_activation_receipt_hash -ne
+                $previousActivationHash -or
+            [string]$receipt.previous_source_bindings_hash -ne (
+                Get-TextSha256 (
+                    @($activeBindings) |
+                        ConvertTo-Json -Compress -Depth 30
+                )
+            )) {
+            throw 'Milestone activation predecessor or run binding is invalid.'
+        }
+        $eventCount = [int]$receipt.source_journal_event_count
+        if ($eventCount -lt 1 -or $eventCount -gt $events.Count -or
+            [string]$events[$eventCount - 1].hash -ne
+                [string]$receipt.source_journal_head) {
+            throw 'Milestone activation journal binding changed.'
+        }
+        $matchingEvents = @($activationEvents | Where-Object {
+            [string]$_.milestone_id -eq $milestoneId -and
+            [string]$_.milestone_activation_receipt_path -eq $relativePath -and
+            [string]$_.milestone_activation_receipt_hash -eq
+                [string]$receipt.receipt_hash
+        })
+        if ($matchingEvents.Count -ne 1 -or
+            [int]$matchingEvents[0].sequence -ne $eventCount -or
+            [string]$matchingEvents[0].prev_hash -ne
+                [string]$receipt.source_journal_head) {
+            throw 'Milestone activation lacks its exact append-only journal event.'
+        }
+        $authorizationPath = Get-RunLocalReceiptPath `
+            -RunDirectory $runRoot `
+            -RelativePath ([string]$receipt.authorization_material_path) `
+            -Label 'Milestone authorization material'
+        if (-not (Test-Path -LiteralPath $authorizationPath -PathType Leaf) -or
+            [string]$receipt.authorization_material_hash -ne (
+                Get-FileHash -LiteralPath $authorizationPath -Algorithm SHA256
+            ).Hash.ToLowerInvariant() -or
+            [string]$receipt.activation_key -notmatch (
+                '^(user|controller):[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$'
+            )) {
+            throw 'Milestone activation authorization binding changed.'
+        }
+        $selectionPath = Get-RunLocalReceiptPath `
+            -RunDirectory $runRoot `
+            -RelativePath ([string]$receipt.selection_material_path) `
+            -Label 'Milestone selection material'
+        if (-not (Test-Path -LiteralPath $selectionPath -PathType Leaf) -or
+            [string]$receipt.selection_material_hash -ne (
+                Get-FileHash -LiteralPath $selectionPath -Algorithm SHA256
+            ).Hash.ToLowerInvariant()) {
+            throw 'Milestone activation selection binding changed.'
+        }
+        $sourceBindings = @($receipt.source_bindings)
+        if ($sourceBindings.Count -ne $requiredSourceIds.Count -or
+            [string]$receipt.source_bindings_hash -ne (
+                Get-TextSha256 (
+                    $sourceBindings | ConvertTo-Json -Compress -Depth 30
+                )
+            )) {
+            throw 'Milestone activation source binding set is invalid.'
+        }
+        $verifiedBindings = [Collections.Generic.List[object]]::new()
+        foreach ($sourceNodeId in $requiredSourceIds) {
+            $matches = @($sourceBindings | Where-Object {
+                [string]$_.source_node_id -eq $sourceNodeId
+            })
+            if ($matches.Count -ne 1) {
+                throw "Milestone activation source '$sourceNodeId' is not unique."
+            }
+            $binding = $matches[0]
+            $verified = Get-DurableReviewDispositionBinding `
+                -RunDirectory $runRoot -Plan $plan `
+                -SourceNodeId $sourceNodeId `
+                -DispositionRelativePath (
+                    [string]$binding.disposition_receipt_path
+                ) -ExpectedMilestoneId $milestoneId `
+                -RequireResultMilestoneBinding
+            foreach ($name in @(
+                'source_thread_id', 'milestone_id',
+                'checkpoint_material_path', 'checkpoint_material_hash',
+                'result_receipt_path', 'result_receipt_hash',
+                'result_file_hash', 'disposition_receipt_path',
+                'disposition_receipt_hash', 'disposition_file_hash'
+            )) {
+                if ([string]$binding.$name -ne [string]$verified.$name) {
+                    throw (
+                        "Milestone activation source '$sourceNodeId' changed " +
+                        "its '$name' binding."
+                    )
+                }
+            }
+            $verifiedBindings.Add($verified)
+        }
+        $checkpointPaths = @($verifiedBindings |
+            Select-Object -ExpandProperty checkpoint_material_path -Unique)
+        $checkpointHashes = @($verifiedBindings |
+            Select-Object -ExpandProperty checkpoint_material_hash -Unique)
+        if ($checkpointPaths.Count -ne 1 -or $checkpointHashes.Count -ne 1 -or
+            [string]$receipt.checkpoint_material_path -ne $checkpointPaths[0] -or
+            [string]$receipt.checkpoint_material_hash -ne $checkpointHashes[0]) {
+            throw 'Milestone activation sources do not share one checkpoint.'
+        }
+        $payload = [ordered]@{}
+        foreach ($property in $receipt.PSObject.Properties) {
+            if ($property.Name -ne 'receipt_hash') {
+                $payload[$property.Name] = $property.Value
+            }
+        }
+        if ([string]$receipt.receipt_hash -ne (
+            Get-TextSha256 (
+                $payload | ConvertTo-Json -Compress -Depth 100
+            )
+        )) {
+            throw 'Milestone activation receipt hash mismatch.'
+        }
+        $activeMilestoneId = $milestoneId
+        $activeBindings = @($verifiedBindings)
+        $previousActivationPath = $relativePath
+        $previousActivationHash = [string]$receipt.receipt_hash
+        $activeReceipt = $receipt
+    }
+    return [pscustomobject]@{
+        active_milestone_id = $activeMilestoneId
+        active_source_bindings = @($activeBindings)
+        activation_receipt = $activeReceipt
+        activation_receipt_path = $previousActivationPath
+        activation_receipt_hash = $previousActivationHash
+        next_milestone_id = if (
+            ([Array]::IndexOf($milestoneIds, $activeMilestoneId) + 1) -lt
+                $milestoneIds.Count
+        ) {
+            $milestoneIds[
+                [Array]::IndexOf($milestoneIds, $activeMilestoneId) + 1
+            ]
+        } else { '' }
+    }
 }
 
 function Read-ThreadReconciliationReceipt {
