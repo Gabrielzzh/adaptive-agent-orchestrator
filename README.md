@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.7.9 release notes](docs/releases/v0.7.9.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.7.10 release notes](docs/releases/v0.7.10.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -52,6 +52,10 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   activate its next declared milestone through an append-only receipt. Exact
   source chains and fresh main-owner acceptance replace stale fixed paths
   without rewriting the plan or guessing from file timestamps.
+- **First-milestone review revisions:** before advancing to a later milestone,
+  one pre-authorized revision may re-arm every required read-only source and
+  select one exact set of fresh cumulative results. Older evidence remains
+  retained but cannot be retroactively promoted into the selected review.
 - **Auditable successor runs:** after the final declared milestone, a new run
   can inherit every unresolved P1 through a hash-bound predecessor export and
   successor adoption. The old run stays immutable, source/thread continuity is
@@ -61,9 +65,11 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   `result_pending`, never success. Each new checkpoint/input for the same
   original durable source opens a separate hash-bound recovery cycle with at
   most three same-thread attempts; an earlier cycle cannot extend or reset a
-  later one. An authorized replacement must preserve source, role, checkpoint,
-  input, and recovery-chain continuity. If the replacement also loses its
-  final, it receives one separate bounded recovery epoch—not another
+  later one. An already adopted source may re-enter recovery only through an
+  unused attempt-1 cycle for a different checkpoint/input; ordinary `adopted`
+  remains terminal. An authorized replacement must preserve source, role,
+  checkpoint, input, and recovery-chain continuity. If the replacement also
+  loses its final, it receives one separate bounded recovery epoch—not another
   replacement.
 - **Honest legacy adoption:** older tasks can capture the role, checkpoint,
   input, observed turns, and authorization that actually exist while listing
@@ -236,13 +242,13 @@ state, integrates results, and performs authorized external actions.
 
 ## Validation
 
-The v0.7.9 release passes:
+The v0.7.10 release passes:
 
-- PowerShell parser validation for all 45 scripts;
-- 56 recovery-protocol assertions;
-- 37 durable-milestone and successor-run assertions;
+- PowerShell parser validation for all 47 scripts;
+- 66 recovery-protocol assertions;
+- 79 durable-milestone, revision, and successor-run assertions;
 - 15 run-policy activation assertions;
-- 750 self-test assertions;
+- 787 self-test assertions;
 - 59 intentionally invalid negative-test cases correctly rejected;
 - strict parsing for all 8 bundled reference JSON files;
 - plan, metadata, journal, handoff, dependency, idempotency, ownership,
@@ -271,6 +277,11 @@ The v0.7.9 release passes:
   isolated from its completed checkpoint07 cycle, recovered a same-source final,
   generated schema 1.3 result/disposition receipts, and remained correctly
   `BLOCKED` by an open business P1 and unfinished nodes.
+- a real first-milestone revision re-armed the same two read-only sources after
+  authorization, obtained fresh cumulative reviews, selected exactly one
+  checkpoint10 result set, retained all 11 later P1 source occurrences, and did
+  not revive resolved older findings. The product then advanced to its next
+  group without a new Orchestrator P0/P1.
 
 Run:
 

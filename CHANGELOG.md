@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.7.10 - 2026-07-30
+
+First-milestone review-revision and verified recovery re-entry release.
+
+- Let an adopted durable source enter `result_pending` for a later
+  checkpoint/input only when an unused schema 1.2 attempt-1 recovery cycle
+  binds the same run, source, role, thread, and active milestone.
+- Keep ordinary `adopted` terminal. Reject missing or replayed recovery cycles,
+  same-checkpoint reuse, direct attempt 2/3 entry, and cross-source, thread, or
+  milestone substitution.
+- Add a pre-authorized, append-only revision path for the first declared
+  durable-review milestone before any later milestone is activated.
+- Bind one immutable selection identity before fresh results exist, re-arm each
+  required read-only source once, and select only the complete, exact
+  post-authorization source chains.
+- Preserve every prior finding occurrence by source ID, severity, exact text
+  hash, and canonical ID. One source cannot replace another, and open P0/P1
+  findings remain blockers.
+- Validate the real multi-divination control run: both fresh domain and
+  adversarial reviews passed, the unique revision selected checkpoint10, all
+  11 later P1 source occurrences remained open, resolved older findings did not
+  reappear, and development safely advanced to the next group.
+- Preserve the boundary: this release does not repair platform `systemError`,
+  prove Token savings or business accuracy, modify multi-divination product
+  files, or protect against coherent rewriting of the entire retained history.
+
 ## 0.7.9 - 2026-07-30
 
 Per-review-cycle durable-source recovery release.

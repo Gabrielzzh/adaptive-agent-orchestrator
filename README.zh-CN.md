@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[English](README.md) · [v0.7.9 正式版说明](docs/releases/v0.7.9.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+[English](README.md) · [v0.7.10 正式版说明](docs/releases/v0.7.10.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
 
 ![Adaptive Agent Orchestrator v0.7.0 发布图](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -47,6 +47,9 @@
 - **跨里程碑审核推进：** 同一个长期审核 run 可通过追加式收据激活下一条已
   声明里程碑，精确绑定来源链并要求主 Agent重新验收；无需改写 plan，也不
   会按文件时间猜测“最新结果”。
+- **首里程碑版本复审：** 在推进下一里程碑前，可事先授权一次版本复审，
+  让每个必需的只读来源重新审查，并只采用一组精确、完整的新结论；旧证据
+  继续保留，但不能事后冒充本轮正式结果。
 - **可审计 successor run：** 最后一条预声明里程碑用完后，新 run 可通过
   哈希绑定的 predecessor export 与 successor adoption 精确继承全部未解决
   P1。旧 run 保持不可变，来源/thread 连续性不丢失；同一来源完成处置和复审
@@ -54,9 +57,11 @@
 - **final 缺失恢复：** 任务显示 completed 却没有 final 时进入
   `result_pending`，绝不当作成功。同一 original durable source 的每个新
   checkpoint/input 都建立独立哈希绑定的恢复 cycle，每个 cycle 最多三次
-  同 thread 回收；旧 cycle 不能延长或重置新 cycle。替代角色必须经过主控
-  授权，并保持来源、角色、checkpoint、input 和恢复链连续性。如果
-  replacement 也丢失 final，只能使用自己独立的三次恢复阶段，不能再创建
+  同 thread 回收；旧 cycle 不能延长或重置新 cycle。已经 adopted 的来源
+  只有在不同 checkpoint/input 存在未使用的 attempt-1 cycle 时才能重新进入
+  恢复，普通 `adopted` 仍是终态。替代角色必须经过主控授权，并保持来源、
+  角色、checkpoint、input 和恢复链连续性。如果 replacement 也丢失 final，
+  只能使用自己独立的三次恢复阶段，不能再创建
   replacement-of-replacement。
 - **诚实接入旧任务：** 对旧任务只捕获真实存在的角色、checkpoint、input、
   turn 与授权材料；平台从未提供的机器身份字段明确标为 unknown，不补造。
@@ -209,13 +214,13 @@ $adaptive-agent-orchestrator。共享上下文留在主 Agent，Worker 只拿引
 
 ## 验证情况
 
-v0.7.9 正式版本通过：
+v0.7.10 正式版本通过：
 
-- 45 个 PowerShell 脚本语法解析；
-- 56 项恢复协议专项断言；
-- 37 项 durable milestone 与 successor-run 专项断言；
+- 47 个 PowerShell 脚本语法解析；
+- 66 项恢复协议专项断言；
+- 79 项 durable milestone、revision 与 successor-run 专项断言；
 - 15 项 run policy activation 专项断言；
-- 750 项完整自测断言；
+- 787 项完整自测断言；
 - 59 份故意构造的非法负面案例均被正确拦截；
 - 8 个 reference JSON 文件严格解析；
 - 计划、元数据、日志、handoff、依赖、幂等、所有权、上下文重叠、渐进
@@ -239,6 +244,9 @@ v0.7.9 正式版本通过：
 - 同一长期 original source 在 checkpoint08 建立了与 checkpoint07 隔离的
   recovery cycle，回收同源正式 final 并生成 schema 1.3 result/disposition；
   开放业务 P1 和未完成节点继续让 completion 正确保持 `BLOCKED`。
+- 真实首里程碑版本复审在授权后重新启用同一两组只读来源，取得累计复审
+  结果并唯一选定 checkpoint10：11 条后续 P1 来源记录全部保留，旧的已解决
+  问题没有回流，且没有发现新的 Orchestrator P0/P1；占卜研发已进入下一组。
 
 ```powershell
 pwsh -NoProfile -File `
