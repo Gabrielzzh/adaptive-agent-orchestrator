@@ -7,6 +7,9 @@ param(
     [Parameter(Mandatory)][string] $InputManifestPath,
     [string] $ThreadReadPath,
     [string] $LegacySourceAdoptionReceiptPath,
+    [ValidateSet('original', 'replacement')]
+    [string] $RecoveryStage = 'original',
+    [string] $ReplacementContinuityReceiptPath,
     [Parameter(Mandatory)][ValidateRange(1, 3)][int] $Attempt,
     [Parameter(Mandatory)][string] $OutputPath
 )
@@ -27,6 +30,32 @@ $node = @($plan.nodes | Where-Object {
 if ($null -eq $node -or [string]$node.kind -ne 'agent' -or
     [string]$node.topology -ne 'background-thread') {
     throw 'Recovery source must be a durable background-thread node.'
+}
+$events = @(Read-OrchestrationJournal (Join-Path $runRoot 'events.jsonl'))
+$history = @($events | Where-Object {
+    [string]$_.node_id -eq $SourceNodeId
+})
+$derivedRecoveryStage = if (@($history | Where-Object {
+    [string]$_.status -eq 'replacement_pending' -and
+    [string]$_.thread_id -eq $OriginalThreadId
+}).Count -gt 0) {
+    'replacement'
+} elseif (@($history | Where-Object {
+    [string]$_.status -eq 'materialized' -and
+    [string]$_.thread_id -eq $OriginalThreadId
+}).Count -gt 0) {
+    'original'
+} else {
+    throw (
+        'Recovery thread has no materialized or replacement_pending ' +
+        'lifecycle binding.'
+    )
+}
+if ($RecoveryStage -ne $derivedRecoveryStage) {
+    throw (
+        "RecoveryStage '$RecoveryStage' does not match lifecycle-derived " +
+        "stage '$derivedRecoveryStage'."
+    )
 }
 
 function Resolve-InputPath {
@@ -52,17 +81,54 @@ if (-not $outputFullPath.StartsWith(
 )) {
     throw 'Recovery receipt must remain inside the run.'
 }
+$canonicalReceiptDirectory = [IO.Path]::GetFullPath(
+    (Join-Path $runRoot 'receipts')
+).TrimEnd('\', '/')
+if ([IO.Path]::GetFullPath(
+    (Split-Path -Parent $outputFullPath)
+).TrimEnd('\', '/') -ne $canonicalReceiptDirectory) {
+    throw 'Recovery receipt must use the canonical run receipts directory.'
+}
 if (Test-Path -LiteralPath $outputFullPath) {
     throw "Recovery receipt already exists: $outputFullPath"
 }
 
-$expectedName = "$SourceNodeId.attempt-$Attempt.result-recovery.json"
+$expectedName = if ($RecoveryStage -eq 'replacement') {
+    "$SourceNodeId.replacement.attempt-$Attempt.result-recovery.json"
+} else {
+    "$SourceNodeId.attempt-$Attempt.result-recovery.json"
+}
 if ([IO.Path]::GetFileName($outputFullPath) -ne $expectedName) {
     throw "Recovery receipt filename must be '$expectedName'."
 }
 $evidenceSource = ''
 $legacyRelativePath = ''
 $legacyHash = ''
+$replacementRelativePath = ''
+$replacementHash = ''
+if ($RecoveryStage -eq 'replacement') {
+    if (-not [string]::IsNullOrWhiteSpace($LegacySourceAdoptionReceiptPath) -or
+        [string]::IsNullOrWhiteSpace($ReplacementContinuityReceiptPath)) {
+        throw (
+            'Replacement-stage recovery requires replacement continuity and ' +
+            'cannot use legacy adoption directly.'
+        )
+    }
+    $replacementPath = Resolve-InputPath $ReplacementContinuityReceiptPath (
+        'Replacement continuity receipt'
+    )
+    $replacement = Read-ReplacementContinuityReceipt -Path $replacementPath `
+        -RunDirectory $runRoot -ExpectedSourceNodeId $SourceNodeId `
+        -ExpectedReplacementThreadId $OriginalThreadId
+    $replacementRelativePath = [IO.Path]::GetRelativePath(
+        $runRoot, $replacementPath
+    ).Replace('\', '/')
+    $replacementHash = [string]$replacement.receipt_hash
+} elseif (-not [string]::IsNullOrWhiteSpace(
+    $ReplacementContinuityReceiptPath
+)) {
+    throw 'Original-stage recovery cannot bind replacement continuity.'
+}
 if (-not [string]::IsNullOrWhiteSpace($LegacySourceAdoptionReceiptPath)) {
     if (-not [string]::IsNullOrWhiteSpace($ThreadReadPath)) {
         throw 'Use either a platform progress capture or legacy adoption.'
@@ -110,13 +176,18 @@ if (-not [string]::IsNullOrWhiteSpace($LegacySourceAdoptionReceiptPath)) {
 $previousPath = ''
 $previousHash = ''
 if ($Attempt -gt 1) {
-    $previousName = "$SourceNodeId.attempt-$($Attempt - 1).result-recovery.json"
+    $previousName = if ($RecoveryStage -eq 'replacement') {
+        "$SourceNodeId.replacement.attempt-$($Attempt - 1).result-recovery.json"
+    } else {
+        "$SourceNodeId.attempt-$($Attempt - 1).result-recovery.json"
+    }
     $previousFullPath = Join-Path (Split-Path -Parent $outputFullPath) (
         $previousName
     )
     $previous = Read-ThreadResultRecoveryReceipt -Path $previousFullPath `
         -RunDirectory $runRoot -ExpectedSourceNodeId $SourceNodeId `
-        -ExpectedOriginalThreadId $OriginalThreadId
+        -ExpectedOriginalThreadId $OriginalThreadId `
+        -ExpectedRecoveryStage $RecoveryStage
     $previousPath = [IO.Path]::GetRelativePath(
         $runRoot, $previousFullPath
     ).Replace('\', '/')
@@ -124,7 +195,7 @@ if ($Attempt -gt 1) {
 }
 
 $payload = [ordered]@{
-    schema_version = '1.0'
+    schema_version = if ($RecoveryStage -eq 'replacement') { '1.1' } else { '1.0' }
     run_id = [string]$run.run_id
     source_node_id = $SourceNodeId
     role_id = [string]$node.role_id
@@ -164,6 +235,11 @@ $payload = [ordered]@{
     previous_receipt_hash = $previousHash
     created_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
 }
+if ($RecoveryStage -eq 'replacement') {
+    $payload['recovery_stage'] = 'replacement'
+    $payload['replacement_continuity_receipt_path'] = $replacementRelativePath
+    $payload['replacement_continuity_receipt_hash'] = $replacementHash
+}
 $receipt = [ordered]@{}
 foreach ($key in $payload.Keys) { $receipt[$key] = $payload[$key] }
 $receipt.receipt_hash = Get-TextSha256 (
@@ -178,7 +254,8 @@ $receipt | ConvertTo-Json -Depth 30 |
 try {
     $verified = Read-ThreadResultRecoveryReceipt -Path $outputFullPath `
         -RunDirectory $runRoot -ExpectedSourceNodeId $SourceNodeId `
-        -ExpectedOriginalThreadId $OriginalThreadId
+        -ExpectedOriginalThreadId $OriginalThreadId `
+        -ExpectedRecoveryStage $RecoveryStage
 } catch {
     Remove-Item -LiteralPath $outputFullPath -Force
     throw

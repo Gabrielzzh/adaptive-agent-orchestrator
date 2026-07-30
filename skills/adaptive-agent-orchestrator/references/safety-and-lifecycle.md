@@ -166,6 +166,13 @@ The replacement may satisfy only that source obligation and must be labeled as
 a replacement. It cannot substitute for another durable role or claim that the
 original thread passed.
 
+If the replacement itself returns no final answer, it receives a separate
+`replacement` recovery epoch with filenames and hashes distinct from the
+original source's recovery chain. That epoch binds the existing replacement
+continuity receipt, replacement thread, source role, checkpoint, and input, and
+allows at most three same-thread attempts. Exhausting it leaves completion
+blocked; it never authorizes a replacement-of-replacement.
+
 Legacy durable sources may lack machine identifiers and immutable captures that
 the current protocol requires. Never synthesize those values. A one-time legacy
 adoption receipt assigns a new stable source/role identity while binding the

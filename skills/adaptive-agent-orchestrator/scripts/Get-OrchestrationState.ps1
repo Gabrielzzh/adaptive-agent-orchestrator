@@ -40,9 +40,30 @@ $nodeStates = foreach ($node in $plan.nodes) {
     $lastThread = $history | Where-Object {
         -not [string]::IsNullOrWhiteSpace([string]$_.thread_id)
     } | Select-Object -Last 1
-    $lastModel = $history | Where-Object {
-        -not [string]::IsNullOrWhiteSpace([string]$_.model_id)
+    $lastMaterialization = $history | Where-Object {
+        [string]$_.status -eq 'materialized'
     } | Select-Object -Last 1
+    $modelVerificationState = if ($lastMaterialization) {
+        $property = $lastMaterialization.PSObject.Properties[
+            'model_verification_state'
+        ]
+        if ($null -ne $property -and
+            -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            [string]$property.Value
+        } elseif (-not [string]::IsNullOrWhiteSpace(
+            [string]$lastMaterialization.model_id
+        )) {
+            'verified'
+        } else {
+            'unverified'
+        }
+    } else { $null }
+    $modelVerificationEvidence = if ($lastMaterialization) {
+        $property = $lastMaterialization.PSObject.Properties[
+            'model_verification_evidence'
+        ]
+        if ($null -ne $property) { $property.Value } else { $null }
+    } else { $null }
     $lastArtifact = $history | Where-Object {
         -not [string]::IsNullOrWhiteSpace([string]$_.artifact)
     } | Select-Object -Last 1
@@ -66,7 +87,12 @@ $nodeStates = foreach ($node in $plan.nodes) {
         status = if ($latest) { $latest.status } else { 'planned' }
         thread_id = if ($lastThread) { $lastThread.thread_id } else { $null }
         planned_model = if ($node.kind -eq 'agent') { $node.model } else { $null }
-        actual_model = if ($lastModel) { $lastModel.model_id } else { $null }
+        actual_model = if ($lastMaterialization -and
+            $modelVerificationState -eq 'verified') {
+            $lastMaterialization.model_id
+        } else { $null }
+        actual_model_verification = $modelVerificationState
+        actual_model_verification_evidence = $modelVerificationEvidence
         artifact = if ($lastArtifact) { $lastArtifact.artifact } else { $null }
         attempts = $attempts
         latest_message = if ($latest) { $latest.message } else { $null }

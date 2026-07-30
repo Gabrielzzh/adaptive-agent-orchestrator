@@ -5,7 +5,7 @@
 A durable plan is a JSON object with:
 
 - `schema_version`: currently `"1.0"`;
-- `policy_version`: currently `"0.7.2"`, used to validate and replay the run;
+- `policy_version`: currently `"0.7.3"`, used to validate and replay the run;
 - `run_id`: unique, stable identifier;
 - `orchestrator`: the single controller identity and delegation authority;
 - `goal`: concrete outcome;
@@ -128,7 +128,11 @@ The default automatic Codex pool is defined in
 `experimental-user-request`. Model or effort escalation requires
 `user-confirmed` or a verified bounded `policy-confirmed` authorization.
 Creation reports the actual model; it never treats the planned model as proof
-of materialization. Retry routing derives the prior actual model and planned
+of materialization. When the platform omits the actual model, the materialized
+event records `model_verification_state=unverified`, leaves `model_id` empty,
+and binds source or observation evidence for that limitation. Completion and
+task receipts preserve the unverified state instead of claiming the requested
+route was observed. Retry routing derives the prior actual model and planned
 effort from the validated prior run; callers cannot restate those values.
 
 ## Optional manuscript profile
@@ -216,6 +220,10 @@ verified 3/3 recovery chain, `replacement_pending` followed by the bound
 replacement thread. Neither pending state satisfies a dependency or completion
 gate. A replacement result uses the same logical `source_node_id`, declares
 `source_kind=replacement`, and binds its replacement-continuity receipt.
+If the replacement has no final answer, its recovery receipts use a separate
+`replacement` stage and namespace, bind the parent replacement-continuity hash,
+and remain limited to three attempts on that replacement thread. Exhaustion
+stays blocked and cannot create a replacement-of-replacement.
 
 For legacy sources, `New-LegacySourceAdoptionReceipt.ps1` captures observable
 material and explicitly lists unavailable machine fields. This migration path

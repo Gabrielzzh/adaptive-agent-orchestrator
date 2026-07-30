@@ -1,7 +1,7 @@
 # Release validation receipt
 
-Release: `0.7.2`
-Policy version: `0.7.2`
+Release: `0.7.3`
+Policy version: `0.7.3`
 Date: `2026-07-30`
 
 ## Environment
@@ -39,8 +39,8 @@ python `
 
 - Exit code: 0
 - PowerShell scripts parsed: 33
-- Recovery-protocol assertions: 30 passed
-- Self-test assertions: 601 passed
+- Recovery-protocol assertions: 41 passed
+- Self-test assertions: 617 passed
 - Intentional invalid negative cases: 57 correctly rejected
 - Strict reference JSON files parsed: 8
 - Skill Creator validation: `Skill is valid!`
@@ -65,29 +65,26 @@ main-agent review, not by parsing free-form text as a security sandbox.
 
 The release also covers the successful-create/returned-task-ID retry guard,
 platform-bound model launch, platform-independent write-scope overlap
-comparison, and read-only run measurement.
+comparison, read-only run measurement, honest unverified actual-model
+materialization, a separate replacement recovery epoch, lifecycle-derived
+recovery stage, canonical receipt uniqueness, and rejection of
+replacement-of-replacement.
 
-Commit `5e2f2a9ce86493567083c0d1fe5ee3558854ff7b` and its independently
-reviewed 52-file archive are the fixed functional GREEN baseline, not the
-final v0.7.2 archive binding. The v0.7.2 Skill content was last changed by
-release-prep commit `64a5df26a1433c5fb857072e926f42b2beb445bc` and is bound
-to Git tree `0f86279a51167ce29dd8c881f0d7c45702967082`. The final
-Skill-only archive contains 52 files and has SHA-256
-`befc0a2c9ba8ee29b9f066ad1a794ef440071dd517028eb0642d5f11658d1751`.
-It was generated with `git archive --mtime=2026-07-30T00:00:00Z` so a
-receipt-only repository commit cannot change ZIP metadata for an unchanged
-Skill tree.
+Functional candidate `c9d87f6c0e552eb536287fa4b0babe73284c9ebf`
+was independently re-attacked before release preparation. The Reviewer used a
+clean 52-file archive matching that commit and ended GREEN with P0=0, P1=0,
+and P2=0.
+
+The final v0.7.3 Skill content was last changed by release-preparation commit
+`e0b0abdfc338671f80d7cd5a95a3824228162049` and is bound to Git tree
+`7696e33247889768396b09c5850ba2b038306260`. The Skill-only archive contains
+52 files and has SHA-256
+`35f27ff5bd70a050209f725657a156ceecdc278487de322fd714436f2c80f7d8`.
 Git for Windows exported text files with CRLF line endings; after normalizing
 CRLF to the repository's LF blob form, all 52/52 archive files match that
-Skill tree. The archive was extracted and the complete parser, recovery,
-self-test, invalid-case, and Skill Creator gates were run again successfully.
-
-The repository HEAD that adds this receipt-only correction is reported with
-the external release-preparation result. It cannot be embedded in the same
-tracked file without changing its own commit ID; the immutable Skill-tree
-binding above is the artifact identity used for verification. The independent
-dynamic re-attack of the functional baseline ended GREEN with P0=0, P1=0, and
-P2=0.
+Skill tree. The archive was extracted and the 33-script parser, 41-assertion
+recovery suite, 617-assertion self-test with 57 rejected invalid cases, and
+Skill Creator validation all passed again.
 
 This receipt does not claim measured production Token savings. Synthetic and
 local validation prove contract and implementation behavior, not a universal

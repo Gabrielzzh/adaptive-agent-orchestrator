@@ -77,7 +77,7 @@ $cleanEvidence = @($Evidence | Where-Object {
     -not [string]::IsNullOrWhiteSpace($_)
 })
 $receipt = [ordered]@{
-    schema_version = '1.0'
+    schema_version = '1.1'
     run_id = [string]$run.run_id
     plan_hash = [string]$run.plan_hash
     journal_head = $journalHead
@@ -87,6 +87,22 @@ $receipt = [ordered]@{
     failure_class = $FailureClass
     fallback_action = if ($FallbackAction) { $FallbackAction.Trim() } else { $null }
     evidence = $cleanEvidence
+    model_verification = if ($null -ne $completion.PSObject.Properties[
+        'model_verification'
+    ]) {
+        $completion.model_verification
+    } else {
+        $unverifiedNodeIds = @(
+            $completion.nodes | Where-Object {
+                $_.kind -eq 'agent' -and
+                $_.actual_model_verification -eq 'unverified'
+            } | Select-Object -ExpandProperty id
+        )
+        [ordered]@{
+            all_actual_models_verified = ($unverifiedNodeIds.Count -eq 0)
+            unverified_node_ids = $unverifiedNodeIds
+        }
+    }
 }
 $receipt.receipt_hash = Get-TextSha256 (
     $receipt | ConvertTo-Json -Compress -Depth 20

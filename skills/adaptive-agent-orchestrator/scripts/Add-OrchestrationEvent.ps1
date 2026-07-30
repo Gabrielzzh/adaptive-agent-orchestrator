@@ -22,6 +22,9 @@ param(
 
     [string] $ThreadId,
     [string] $ModelId,
+    [ValidateSet('verified', 'unverified')]
+    [string] $ModelVerificationState,
+    [string] $ModelVerificationEvidence,
     [string] $Artifact,
     [string] $Decision,
     [string] $HumanActor,
@@ -106,15 +109,49 @@ if ($ModelId -and $ModelId -notin @(
     throw "Unsupported actual model '$ModelId'."
 }
 if ($node.kind -eq 'agent' -and $Status -eq 'materialized') {
-    if ([string]::IsNullOrWhiteSpace($ModelId)) {
-        throw 'Agent materialization requires the actual ModelId.'
+    if ([string]::IsNullOrWhiteSpace($ModelVerificationState)) {
+        if ([string]::IsNullOrWhiteSpace($ModelId)) {
+            throw (
+                'Agent materialization without an exposed actual model requires ' +
+                "ModelVerificationState 'unverified'."
+            )
+        }
+        $ModelVerificationState = 'verified'
     }
-    if ($ModelId -ne [string]$node.model) {
-        throw (
-            "Actual model '$ModelId' differs from planned model " +
-            "'$($node.model)'; obtain confirmation and create a revised plan."
-        )
+    if ($ModelVerificationState -eq 'verified') {
+        if ([string]::IsNullOrWhiteSpace($ModelId)) {
+            throw 'Verified agent materialization requires the actual ModelId.'
+        }
+        if ($ModelId -ne [string]$node.model) {
+            throw (
+                "Actual model '$ModelId' differs from planned model " +
+                "'$($node.model)'; obtain confirmation and create a revised plan."
+            )
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ModelVerificationEvidence)) {
+            throw 'Verified materialization does not accept unverified-model evidence.'
+        }
+    } else {
+        if (-not [string]::IsNullOrWhiteSpace($ModelId)) {
+            throw (
+                'Unverified materialization must leave ModelId empty; ' +
+                'the requested model is not actual-model evidence.'
+            )
+        }
+        if ([string]::IsNullOrWhiteSpace($ModelVerificationEvidence) -or
+            $ModelVerificationEvidence -notmatch '^(source|observation):\S.+$') {
+            throw (
+                'Unverified materialization requires ModelVerificationEvidence ' +
+                'using source:value or observation:value.'
+            )
+        }
     }
+} elseif (-not [string]::IsNullOrWhiteSpace($ModelVerificationState) -or
+    -not [string]::IsNullOrWhiteSpace($ModelVerificationEvidence)) {
+    throw (
+        'ModelVerificationState and ModelVerificationEvidence are only valid ' +
+        'for agent materialization.'
+    )
 }
 $usageDelta = $InputTokensDelta + $OutputTokensDelta
 if ($CoordinationTokensDelta -gt $usageDelta) {
@@ -348,8 +385,7 @@ if ($Status -eq 'failed' -and $ErrorClass -eq 'startup_unmaterialized' -and
         'ReconciliationReceiptPath.'
     )
 }
-$requestFingerprint = Get-TextSha256 (
-    [ordered]@{
+$requestPayload = [ordered]@{
         node_id = $NodeId
         status = $Status
         message = $Message
@@ -373,7 +409,13 @@ $requestFingerprint = Get-TextSha256 (
         replacement_receipt_hash = if ($replacementReceipt) {
             [string]$replacementReceipt.receipt_hash
         } else { $null }
-    } | ConvertTo-Json -Compress -Depth 10
+}
+if ($ModelVerificationState -eq 'unverified') {
+    $requestPayload['model_verification_state'] = $ModelVerificationState
+    $requestPayload['model_verification_evidence'] = $ModelVerificationEvidence
+}
+$requestFingerprint = Get-TextSha256 (
+    $requestPayload | ConvertTo-Json -Compress -Depth 10
 )
 $archiveReceiptHash = $null
 $archiveReceiptRelativePath = $null
@@ -555,6 +597,44 @@ try {
         }) | Select-Object -Last 1
         if ([string]$lastPending.thread_id -ne $ThreadId) {
             throw 'Same-source recovery must keep the original thread.'
+        }
+        $lastRecovery = Read-ThreadResultRecoveryReceipt `
+            -Path (Join-Path $RunDirectory (
+                [string]$lastPending.recovery_receipt_path
+            )) -RunDirectory $RunDirectory `
+            -ExpectedSourceNodeId $NodeId `
+            -ExpectedOriginalThreadId ([string]$lastPending.thread_id)
+        if ([string]$lastRecovery.outcome -eq 'recovery-exhausted') {
+            throw (
+                'Recovery attempt 3 is exhausted; the same recovery epoch ' +
+                'cannot return to running.'
+            )
+        }
+    }
+    if ($priorState -eq 'result_pending' -and
+        $Status -eq 'replacement_pending') {
+        $lastPending = @($history | Where-Object {
+            [string]$_.status -eq 'result_pending'
+        }) | Select-Object -Last 1
+        if (-not [string]::IsNullOrWhiteSpace(
+            [string]$lastPending.recovery_receipt_path
+        )) {
+            $pendingRecovery = Read-ThreadResultRecoveryReceipt `
+                -Path (Join-Path $RunDirectory (
+                    [string]$lastPending.recovery_receipt_path
+                )) -RunDirectory $RunDirectory `
+                -ExpectedSourceNodeId $NodeId `
+                -ExpectedOriginalThreadId ([string]$lastPending.thread_id)
+            $stageProperty = $pendingRecovery.PSObject.Properties[
+                'recovery_stage'
+            ]
+            if ($null -ne $stageProperty -and
+                [string]$stageProperty.Value -eq 'replacement') {
+                throw (
+                    'A replacement source may use bounded same-thread recovery ' +
+                    'but cannot authorize a replacement-of-replacement.'
+                )
+            }
         }
     }
     if ($priorState -eq 'replacement_pending' -and $Status -eq 'running') {
@@ -813,6 +893,26 @@ try {
         result_receipt_hash = $archiveReceiptHash
         idempotency_key = $IdempotencyKey
         request_fingerprint = $requestFingerprint
+    }
+    if ($kind -eq 'agent' -and $Status -eq 'result_pending') {
+        $priorPendingForThread = @($history | Where-Object {
+            [string]$_.status -eq 'result_pending' -and
+            [string]$_.thread_id -eq $ThreadId
+        })
+        if (@($priorPendingForThread | Where-Object {
+            [string]$_.recovery_receipt_hash -eq
+                [string]$recoveryReceipt.receipt_hash
+        }).Count -gt 0) {
+            throw 'A recovery receipt cannot be reused for another attempt.'
+        }
+        if ([int]$recoveryReceipt.attempt -ne
+            ($priorPendingForThread.Count + 1)) {
+            throw 'Recovery attempts must be recorded once in sequential order.'
+        }
+    }
+    if ($ModelVerificationState -eq 'unverified') {
+        $event['model_verification_state'] = $ModelVerificationState
+        $event['model_verification_evidence'] = $ModelVerificationEvidence
     }
     $event.hash = Get-OrchestrationEventHash ([pscustomobject]$event)
     Add-Content -LiteralPath $eventsPath -Value ($event | ConvertTo-Json -Compress)
