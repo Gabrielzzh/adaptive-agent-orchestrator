@@ -108,6 +108,8 @@ function Get-OrchestrationEventHash {
             'milestone_revision_checkpoint_hash'
         ] -or $null -ne $Event.PSObject.Properties[
             'milestone_revision_input_hash'
+        ] -or $null -ne $Event.PSObject.Properties[
+            'milestone_revision_selection_key'
         ]) {
         $statusIndex = [Array]::IndexOf($keys, 'status') + 1
         $keys = @(
@@ -117,6 +119,7 @@ function Get-OrchestrationEventHash {
             'milestone_revision_authorization_receipt_hash'
             'milestone_revision_checkpoint_hash'
             'milestone_revision_input_hash'
+            'milestone_revision_selection_key'
             $keys[$statusIndex..($keys.Count - 1)]
         )
     }
@@ -211,6 +214,7 @@ function New-MilestoneRevisionJournalEvent {
         milestone_revision_checkpoint_hash =
             [string]$Receipt.checkpoint_material_hash
         milestone_revision_input_hash = [string]$Receipt.input_manifest_hash
+        milestone_revision_selection_key = [string]$Receipt.selection_key
         message = $Message
         thread_id = $null
         model_id = $null
@@ -1968,7 +1972,8 @@ function Read-DurableReviewMilestoneRevisionAuthorization {
         'acceptance_authorization_material_path',
         'acceptance_authorization_material_hash', 'main_node_id',
         'acceptance_key', 'acceptance_evidence_material_path',
-        'acceptance_evidence_material_hash', 'activation_key',
+        'acceptance_evidence_material_hash', 'selection_authority_key',
+        'selection_key', 'activation_key',
         'created_at_utc', 'receipt_hash'
     )
     foreach ($name in $required) {
@@ -1991,9 +1996,23 @@ function Read-DurableReviewMilestoneRevisionAuthorization {
         [string]$receipt.genesis_hash -ne [string]$events[0].hash -or
         [string]$receipt.milestone_id -ne $milestoneIds[0] -or
         [int]$receipt.milestone_index -ne 0 -or
+        [string]$receipt.selection_key -cnotmatch
+            '^(user|controller):[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$' -or
         [string]$receipt.activation_key -notmatch
             '^(user|controller):[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$') {
         throw 'Milestone revision authorization run or milestone binding is invalid.'
+    }
+    $selectionAuthorityPrefix = (
+        [string]$receipt.selection_authority_key
+    ).Split(':', 2)[0]
+    $expectedSelectionKey = (
+        "$selectionAuthorityPrefix`:milestone-revision-selection:" +
+        [string]$receipt.revision_id
+    )
+    if ([string]$receipt.selection_authority_key -cnotmatch
+            '^(user|controller):[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$' -or
+        [string]$receipt.selection_key -cne $expectedSelectionKey) {
+        throw 'Milestone revision selection key derivation is invalid.'
     }
     $eventCount = [int]$receipt.source_journal_event_count
     if ($eventCount -lt 1 -or $eventCount -ge $events.Count -or
@@ -2010,7 +2029,9 @@ function Read-DurableReviewMilestoneRevisionAuthorization {
         [string]$_.milestone_revision_authorization_receipt_path -eq
             $relativePath -and
         [string]$_.milestone_revision_authorization_receipt_hash -eq
-            [string]$receipt.receipt_hash
+            [string]$receipt.receipt_hash -and
+        [string]$_.milestone_revision_selection_key -ceq
+            [string]$receipt.selection_key
     })
     if ($matchingEvents.Count -ne 1 -or
         [int]$matchingEvents[0].sequence -ne $eventCount -or
@@ -2291,7 +2312,7 @@ function Read-DurableReviewMilestoneRevisionSelection {
         'acceptance_authorization_material_path',
         'acceptance_authorization_material_hash', 'main_node_id',
         'acceptance_key', 'acceptance_evidence_material_path',
-        'acceptance_evidence_material_hash', 'activation_key',
+        'acceptance_evidence_material_hash', 'selection_key', 'activation_key',
         'created_at_utc', 'receipt_hash'
     )) {
         if ($null -eq $receipt.PSObject.Properties[$name]) {
@@ -2308,7 +2329,8 @@ function Read-DurableReviewMilestoneRevisionSelection {
         [string]$receipt.plan_hash -ne [string]$run.plan_hash -or
         [int]$receipt.milestone_index -ne 0 -or
         [string]$receipt.milestone_id -ne
-            [string]$plan.durable_review_profile.milestone_ids[0]) {
+            [string]$plan.durable_review_profile.milestone_ids[0] -or
+        [string]$receipt.selection_key -cne [string]$receipt.activation_key) {
         throw 'Milestone revision selection run or milestone binding is invalid.'
     }
     $authorizationPath = Get-RunLocalReceiptPath -RunDirectory $runRoot `
@@ -2341,7 +2363,9 @@ function Read-DurableReviewMilestoneRevisionSelection {
         [string]$authorization.acceptance_evidence_material_path -ne
             [string]$receipt.acceptance_evidence_material_path -or
         [string]$authorization.acceptance_evidence_material_hash -ne
-            [string]$receipt.acceptance_evidence_material_hash) {
+            [string]$receipt.acceptance_evidence_material_hash -or
+        [string]$authorization.selection_key -cne
+            [string]$receipt.selection_key) {
         throw 'Milestone revision selection changed its authorization.'
     }
     foreach ($bindingName in @('source_bindings', 'source_lifecycle_bindings')) {
@@ -2525,7 +2549,9 @@ function Read-DurableReviewMilestoneRevisionSelection {
         [string]$_.milestone_revision_id -eq [string]$receipt.revision_id -and
         [string]$_.milestone_activation_receipt_path -eq $relativePath -and
         [string]$_.milestone_activation_receipt_hash -eq
-            [string]$receipt.receipt_hash
+            [string]$receipt.receipt_hash -and
+        [string]$_.milestone_revision_selection_key -ceq
+            [string]$receipt.selection_key
     })
     if ($selectionEvents.Count -ne 1 -or
         [int]$selectionEvents[0].sequence -ne $eventCount -or

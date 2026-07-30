@@ -8,6 +8,7 @@ param(
     [Parameter(Mandatory)][string] $ExcludedEvidenceManifestPath,
     [Parameter(Mandatory)][string] $AuthorizationMaterialPath,
     [Parameter(Mandatory)][string] $AcceptanceAuthorizationMaterialPath,
+    [Parameter(Mandatory)][string] $SelectionKey,
     [Parameter(Mandatory)][string] $ActivationKey
 )
 
@@ -40,6 +41,10 @@ if ($MilestoneId -ne $milestoneIds[0]) {
 if ($ActivationKey -notmatch
     '^(user|controller):[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$') {
     throw 'Milestone revision requires a stable user: or controller: key.'
+}
+if ($SelectionKey -cnotmatch
+    '^(user|controller):[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$') {
+    throw 'Milestone revision must pre-bind a stable selection key.'
 }
 $chain = Read-DurableReviewMilestoneActivationChain -RunDirectory $runRoot
 if ([string]$chain.active_milestone_id -ne $MilestoneId) {
@@ -305,6 +310,10 @@ $revisionSeed = [ordered]@{
 $revisionId = Get-TextSha256 (
     $revisionSeed | ConvertTo-Json -Compress -Depth 20
 )
+$selectionAuthorityPrefix = $SelectionKey.Split(':', 2)[0]
+$boundSelectionKey = (
+    "$selectionAuthorityPrefix`:milestone-revision-selection:$revisionId"
+)
 $receiptName = (
     "durable-review-milestone.$MilestoneId.revision-$revisionId." +
     'authorization.json'
@@ -376,6 +385,8 @@ $payload = [ordered]@{
     acceptance_evidence_material_hash = [string](
         $acceptanceAuthorization.evidence_material_hash
     )
+    selection_authority_key = $SelectionKey
+    selection_key = $boundSelectionKey
     activation_key = $ActivationKey
     created_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
 }

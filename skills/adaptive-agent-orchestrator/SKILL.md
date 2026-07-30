@@ -319,6 +319,8 @@ receipt and journal event select the exact source chains; never edit the plan,
 overwrite old receipts, or infer the active milestone from file timestamps.
 If that first milestone needs a later checkpoint revision before advancing,
 first call `New-DurableReviewMilestoneRevisionAuthorizationReceipt.ps1`.
+That authorization must pre-bind the only permitted selection key; selection
+cannot choose a different authority identity after source results arrive.
 Its manifest must bind every related pre-authorization event and artifact as
 non-completion evidence. Re-arm each original read-only source exactly once
 with the authorization, obtain fresh cumulative results, then call

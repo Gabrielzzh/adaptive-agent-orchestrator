@@ -261,13 +261,20 @@ pwsh -File scripts/New-DurableReviewMilestoneRevisionAuthorizationReceipt.ps1 `
   -AuthorizationMaterialPath <run>/materials/method-1-authorization.md `
   -AcceptanceAuthorizationMaterialPath `
     <run>/materials/method-1-acceptance-authorization.json `
+  -SelectionKey "controller:<prebound-selection-reference>" `
   -ActivationKey "controller:<stable-authority-reference>"
 ```
+
+`-SelectionKey` is the stable authority seed. The authorization derives and
+records the only permitted key as
+`<user-or-controller>:milestone-revision-selection:<revision_id>`, so the same
+seed cannot be replayed across runs or revisions.
 
 The authorization is valid only while plan index 0 is active. It binds the
 current journal head, shared checkpoint/input, exact source/role/thread set,
 read-only/no-delegation contracts, review inputs, main-acceptance constraint,
-and a complete excluded-evidence inventory. That inventory enumerates every
+the one permitted selection key, and a complete excluded-evidence inventory.
+The selection caller cannot replace that pre-bound key. The inventory enumerates every
 related pre-authorization event sequence/hash plus capture, recovery, result,
 and disposition path/file/internal hashes. Omitting or rewriting one fails
 before source re-arm.

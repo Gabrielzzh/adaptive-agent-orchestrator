@@ -12,7 +12,7 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $scriptRoot 'Orchestration.Common.ps1')
 
 $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
-if ($SelectionKey -notmatch
+if ($SelectionKey -cnotmatch
     '^(user|controller):[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$') {
     throw 'Milestone revision selection requires a stable authority key.'
 }
@@ -27,6 +27,9 @@ foreach ($candidate in @($AuthorizationReceiptPath, $SelectionMaterialPath)) {
 }
 $authorization = Read-DurableReviewMilestoneRevisionAuthorization `
     -Path $AuthorizationReceiptPath -RunDirectory $runRoot
+if ($SelectionKey -cne [string]$authorization.selection_key) {
+    throw 'Milestone revision selection key does not match its authorization.'
+}
 $plan = Get-Content -LiteralPath (Join-Path $runRoot 'plan.json') -Raw |
     ConvertFrom-Json -Depth 100 -DateKind String
 $run = Get-Content -LiteralPath (Join-Path $runRoot 'run.json') -Raw |
@@ -242,6 +245,7 @@ $payload = [ordered]@{
         [string]$authorization.acceptance_evidence_material_path
     acceptance_evidence_material_hash =
         [string]$authorization.acceptance_evidence_material_hash
+    selection_key = [string]$authorization.selection_key
     activation_key = $SelectionKey
     created_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
 }
