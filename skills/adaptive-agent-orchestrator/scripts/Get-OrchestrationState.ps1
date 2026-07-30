@@ -78,7 +78,14 @@ $nodeStates = foreach ($node in $plan.nodes) {
             Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
             Select-Object -Unique
     )
-    $attempts = @($history | Where-Object { $_.status -eq 'launch_reserved' }).Count
+    $attemptValues = @($history | ForEach-Object {
+        if ($null -ne $_.PSObject.Properties['attempt']) {
+            [int]$_.attempt
+        }
+    })
+    $attempts = if ($attemptValues.Count) {
+        [int](($attemptValues | Measure-Object -Maximum).Maximum)
+    } else { 0 }
     $retryUsed += [Math]::Max(0, $attempts - 1)
     [pscustomobject]@{
         id = $node.id

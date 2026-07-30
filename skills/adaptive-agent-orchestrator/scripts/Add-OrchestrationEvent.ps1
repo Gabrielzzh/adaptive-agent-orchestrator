@@ -738,7 +738,14 @@ try {
         throw "Node '$NodeId' completion requires at least one Evidence entry."
     }
 
-    $attempt = @($history | Where-Object { $_.status -eq 'launch_reserved' }).Count
+    $attemptValues = @($history | ForEach-Object {
+        if ($null -ne $_.PSObject.Properties['attempt']) {
+            [int]$_.attempt
+        }
+    })
+    $attempt = if ($attemptValues.Count) {
+        [int](($attemptValues | Measure-Object -Maximum).Maximum)
+    } else { 0 }
     $executionSlotDelta = 0
     if ($Status -eq 'launch_reserved') {
         $attempt++

@@ -384,6 +384,51 @@ with unchanged ID, canonical ID, severity and exact text/hash, then be resolved
 and re-reviewed by that source. The successor may add findings, but it cannot
 omit, downgrade, merge across sources, or claim completion from adoption alone.
 
+If a successor is cancelled before its first durable milestone because the
+controller changed the checkpoint, do not restart the cancelled node, reset its
+attempt, edit the journal, or reuse the ordinary final-milestone export. A
+strict abandoned-successor roll-forward is allowed only when:
+
+- the run is already a valid first-generation successor;
+- no durable milestone or main acceptance was activated;
+- at least one durable source is terminal `cancelled`;
+- its cancellation binds `observation:no-review-message-dispatched`;
+- no source has a result lifecycle or dispatched-review evidence.
+
+Capture the next checkpoint, every newly discovered P1, any unactivated
+result/disposition receipts as explicitly non-completion evidence, and the
+controller authorization inside the abandoned run. The fresh plan uses the
+same ordered source/role/thread set, declares
+`predecessor_active_milestone_id = abandoned-before-first-milestone`, and gives
+each source enough `max_attempts` to preserve already consumed attempts.
+
+```powershell
+pwsh -File scripts/New-AbandonedSuccessorExportReceipt.ps1 `
+  -AbandonedRunDirectory <abandoned-run> `
+  -SuccessorPlanPath <fresh-plan> -SuccessorRunDirectory <fresh-run> `
+  -CheckpointMaterialPath <abandoned-run>/materials/<checkpoint>.json `
+  -AdditionalFindingRecordsPath <abandoned-run>/materials/<findings>.json `
+  -UnactivatedEvidenceManifestPath <abandoned-run>/materials/<manifest>.json `
+  -AuthorizationMaterialPath <abandoned-run>/materials/<authorization>.md `
+  -ActivationKey "controller:<stable-authority-reference>"
+
+pwsh -File scripts/New-AbandonedSuccessorRun.ps1 `
+  -PlanPath <fresh-plan> -RunDirectory <fresh-run> `
+  -WorkspaceRoot <workspace> -AbandonedRunDirectory <abandoned-run> `
+  -AbandonedExportReceiptPath `
+    <abandoned-run>/receipts/durable-review-abandoned-successor.export.json
+```
+
+The export and adoption are single-use and append-only. They bind the original
+successor adoption chain, journal head/count, cancelled event, source
+identities, checkpoint, authorization, all inherited and added P1 occurrences,
+target plan/run/milestones, and the non-completion evidence manifest. The fresh
+genesis carries consumed attempt counts in `source-attempt-carried` events.
+Completion stays blocked until every inherited occurrence has a current,
+same-source disposition and re-review. This path cannot create a replacement
+source, revive the old run, merge duplicate findings, or turn an unactivated
+receipt into completion evidence.
+
 - `session_policy`: `fresh` by default, or explicitly justified `reuse`;
 - `continuity_key`: stable workstream identity;
 - optional `selection_reason`: controller-only diagnostic justification for

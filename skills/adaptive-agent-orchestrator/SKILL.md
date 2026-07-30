@@ -328,6 +328,10 @@ protocol in [workflow-contract.md](references/workflow-contract.md): export the
 terminal predecessor chain with
 `New-DurableReviewSuccessorExportReceipt.ps1`, then create the new run only
 through `New-OrchestrationSuccessorRun.ps1`. Never copy or edit the old run.
+If that successor is cancelled before any review message or milestone because
+the controller changes the checkpoint, do not restart its terminal node.
+Use the strictly bound abandoned-successor export and fresh-run commands in the
+workflow contract; they preserve consumed attempts and every inherited/new P1.
 Inherited P1 items retain their exact source, severity, text/hash, role and
 thread identity until that source resolves and re-reviews them.
 Durable source receipts use schema 1.3 findings bound to a source finding ID,
