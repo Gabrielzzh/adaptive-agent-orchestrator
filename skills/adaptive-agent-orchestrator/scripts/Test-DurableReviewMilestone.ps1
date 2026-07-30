@@ -141,7 +141,11 @@ function New-SourceChain {
         [string] $FindingText,
         [string] $Resolution,
         [string] $FindingId = '',
-        [string] $CanonicalFindingId = ''
+        [string] $CanonicalFindingId = '',
+        [string] $AdditionalFindingId = '',
+        [string] $AdditionalFindingText = '',
+        [string] $AdditionalSeverity = '',
+        [string] $AdditionalCanonicalFindingId = ''
     )
     $capturePath = Join-Path $Run "thread-reads/$Stem.json"
     New-ThreadCapture -Path $capturePath -ThreadId $ThreadId `
@@ -153,13 +157,22 @@ function New-SourceChain {
         $CanonicalFindingId = "canonical-$FindingId"
     }
     $findingPath = Join-Path $Run "materials/$Stem-findings.json"
-    @(
+    $findingRecords = [Collections.Generic.List[object]]::new()
+    $findingRecords.Add(
         [ordered]@{
             finding_id = $FindingId
             severity = $Severity
             text = $FindingText
         }
-    ) | ConvertTo-Json -Depth 10 |
+    )
+    if (-not [string]::IsNullOrWhiteSpace($AdditionalFindingId)) {
+        $findingRecords.Add([ordered]@{
+            finding_id = $AdditionalFindingId
+            severity = $AdditionalSeverity
+            text = $AdditionalFindingText
+        })
+    }
+    @($findingRecords) | ConvertTo-Json -Depth 10 |
         Set-Content -LiteralPath $findingPath -Encoding utf8
     $resultPath = Join-Path $Run (
         "receipts/$Stem.thread-result-receipt.json"
@@ -176,7 +189,8 @@ function New-SourceChain {
     $reReviewStatus = if ($Resolution -eq 'resolved') {
         'completed'
     } else { 'requested' }
-    @(
+    $decisionRecords = [Collections.Generic.List[object]]::new()
+    $decisionRecords.Add(
         [ordered]@{
             source_finding_id = $FindingId
             finding = $FindingText
@@ -193,7 +207,26 @@ function New-SourceChain {
                 @("test:$Stem-rereview")
             } else { @() }
         }
-    ) | ConvertTo-Json -Depth 20 |
+    )
+    if (-not [string]::IsNullOrWhiteSpace($AdditionalFindingId)) {
+        $decisionRecords.Add([ordered]@{
+            source_finding_id = $AdditionalFindingId
+            finding = $AdditionalFindingText
+            finding_hash = Get-TextSha256 $AdditionalFindingText
+            canonical_finding_id = $AdditionalCanonicalFindingId
+            severity = $AdditionalSeverity
+            disposition = 'adopted'
+            rationale = 'Self-test second source occurrence.'
+            resolution_status = $Resolution
+            evidence = @("test:$Stem-additional")
+            re_review_status = $reReviewStatus
+            re_review_source_node_id = $SourceNodeId
+            re_review_evidence = if ($Resolution -eq 'resolved') {
+                @("test:$Stem-additional-rereview")
+            } else { @() }
+        })
+    }
+    @($decisionRecords) | ConvertTo-Json -Depth 20 |
         Set-Content -LiteralPath $decisionPath -Encoding utf8
     $dispositionPath = Join-Path $Run "receipts/$Stem.disposition.json"
     $disposition = & (
@@ -399,6 +432,81 @@ function Complete-SourceLifecycle {
     }
 }
 
+function Add-SyntheticPreAuthorizationChain {
+    param(
+        [string] $Run,
+        [string] $SourceNodeId,
+        [string] $ThreadId,
+        [string] $ResultPath,
+        [string] $DispositionPath
+    )
+    $plan = Get-Content -LiteralPath (Join-Path $Run 'plan.json') -Raw |
+        ConvertFrom-Json -Depth 100
+    $metadata = Get-Content -LiteralPath (Join-Path $Run 'run.json') -Raw |
+        ConvertFrom-Json -Depth 30
+    $node = @($plan.nodes | Where-Object {
+        [string]$_.id -eq $SourceNodeId
+    }) | Select-Object -First 1
+    $eventsPath = Join-Path $Run 'events.jsonl'
+    foreach ($transition in @(
+        @{ prior = 'adopted'; status = 'completed'; path = $ResultPath },
+        @{ prior = 'completed'; status = 'validated'; path = $DispositionPath },
+        @{ prior = 'validated'; status = 'adopted'; path = $DispositionPath }
+    )) {
+        $events = @(Read-OrchestrationJournal $eventsPath)
+        $event = [ordered]@{
+            sequence = $events.Count
+            prev_hash = [string]$events[-1].hash
+            timestamp = [DateTimeOffset]::UtcNow.ToString('o')
+            event = 'node-status'
+            run_id = [string]$plan.run_id
+            plan_hash = [string]$metadata.plan_hash
+            workspace_root = [string]$metadata.workspace_root
+            policy_version = [string]$plan.policy_version
+            actor = [string]$plan.orchestrator.id
+            node_id = $SourceNodeId
+            role_id = [string]$node.role_id
+            prior_state = [string]$transition.prior
+            status = [string]$transition.status
+            message = 'Caller timing error before revision authorization.'
+            thread_id = $ThreadId
+            model_id = $null
+            artifact = [string]$transition.path
+            topology = [string]$node.topology
+            capability = [string]$node.capability
+            effort = [string]$node.effort
+            wave = [int]$node.wave
+            attempt = 1
+            execution_slot_delta = 0
+            input_tokens_delta = 0
+            output_tokens_delta = 0
+            coordination_tokens_delta = 0
+            usage_source = 'none'
+            error_class = $null
+            decision = $null
+            human_actor = $null
+            evidence = @("artifact:$([string]$transition.path)")
+            recovery_receipt_path = $null
+            recovery_receipt_hash = $null
+            replacement_receipt_path = $null
+            replacement_receipt_hash = $null
+            result_receipt_path = $null
+            result_receipt_hash = $null
+            idempotency_key = (
+                "caller-timing-error-$SourceNodeId-$($transition.status)"
+            )
+            request_fingerprint = Get-TextSha256 (
+                "$SourceNodeId|$([string]$transition.status)|" +
+                [string]$transition.path
+            )
+        }
+        $event.hash = Get-OrchestrationEventHash ([pscustomobject]$event)
+        Add-Content -LiteralPath $eventsPath -Value (
+            $event | ConvertTo-Json -Compress -Depth 50
+        )
+    }
+}
+
 try {
     $null = New-Item -ItemType Directory -Path $testRoot
     $planPath = Join-Path $testRoot 'plan.json'
@@ -418,7 +526,11 @@ try {
     $baselineReview = New-SourceChain -Run $run -SourceNodeId 'review' `
         -ThreadId 'review-thread' -MilestoneId 'method-1' `
         -CheckpointPath $checkpoint1 -Stem 'review' -Severity 'P0' `
-        -FindingText 'baseline-review-p0' -Resolution 'resolved'
+        -FindingText 'baseline-review-p0' -Resolution 'resolved' `
+        -AdditionalFindingId 'review-method-1-finding-r08' `
+        -AdditionalFindingText 'baseline-review-p0-second-occurrence' `
+        -AdditionalSeverity 'P0' `
+        -AdditionalCanonicalFindingId 'canonical-review-method-1-finding'
     $baselineDomain = New-SourceChain -Run $run -SourceNodeId 'domain' `
         -ThreadId 'domain-thread' -MilestoneId 'method-1' `
         -CheckpointPath $checkpoint1 -Stem 'domain' -Severity 'P0' `
@@ -461,6 +573,814 @@ try {
         'The immutable plan paths, including historical receipt milestone ' +
         'aliases, must remain the first milestone baseline.'
     )
+
+    # A later checkpoint inside the immutable first milestone needs an
+    # append-only authorization before either durable source is re-armed.
+    $revisionRun = Join-Path $testRoot 'first-milestone-revision-run'
+    Copy-Item -LiteralPath $run -Destination $revisionRun -Recurse
+    $revisionCheckpoint = Join-Path $revisionRun (
+        'materials/checkpoint-method-1-revision-1.json'
+    )
+    $revisionInput = Join-Path $revisionRun (
+        'materials/input-method-1-revision-1.json'
+    )
+    Set-Content -LiteralPath $revisionCheckpoint `
+        -Value '{"milestone":"method-1","revision":1}'
+    Set-Content -LiteralPath $revisionInput `
+        -Value '{"scope":"method-1-revision-1"}'
+    $preAnchorReview = New-SourceChain -Run $revisionRun `
+        -SourceNodeId 'review' -ThreadId 'review-thread' `
+        -MilestoneId 'method-1' -CheckpointPath $revisionCheckpoint `
+        -Stem 'review.method-1-revision-1-preanchor' -Severity 'P0' `
+        -FindingText 'pre-anchor review must not be selected' `
+        -Resolution 'resolved' -FindingId 'preanchor-review' `
+        -CanonicalFindingId 'preanchor-review'
+    $preAnchorDomain = New-SourceChain -Run $revisionRun `
+        -SourceNodeId 'domain' -ThreadId 'domain-thread' `
+        -MilestoneId 'method-1' -CheckpointPath $revisionCheckpoint `
+        -Stem 'domain.method-1-revision-1-preanchor' -Severity 'P0' `
+        -FindingText 'pre-anchor domain must not be selected' `
+        -Resolution 'resolved' -FindingId 'preanchor-domain' `
+        -CanonicalFindingId 'preanchor-domain'
+    Add-SyntheticPreAuthorizationChain -Run $revisionRun `
+        -SourceNodeId 'review' -ThreadId 'review-thread' `
+        -ResultPath $preAnchorReview.result_path `
+        -DispositionPath $preAnchorReview.disposition_path
+    Add-SyntheticPreAuthorizationChain -Run $revisionRun `
+        -SourceNodeId 'domain' -ThreadId 'domain-thread' `
+        -ResultPath $preAnchorDomain.result_path `
+        -DispositionPath $preAnchorDomain.disposition_path
+    $reviewPrompt = Join-Path $revisionRun 'materials/review-revision-1.md'
+    $domainPrompt = Join-Path $revisionRun 'materials/domain-revision-1.md'
+    Set-Content -LiteralPath $reviewPrompt -Value 'Review revision one.'
+    Set-Content -LiteralPath $domainPrompt -Value 'Audit revision one.'
+    $reviewMaterialManifest = Join-Path $revisionRun (
+        'materials/method-1-revision-1-review-materials.json'
+    )
+    @(
+        [ordered]@{
+            source_node_id = 'review'
+            material_path = 'materials/review-revision-1.md'
+        },
+        [ordered]@{
+            source_node_id = 'domain'
+            material_path = 'materials/domain-revision-1.md'
+        }
+    ) | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $reviewMaterialManifest
+    $excludedEvidenceManifest = Join-Path $revisionRun (
+        'materials/method-1-revision-1-excluded-evidence.json'
+    )
+    $revisionPlanForInventory = Get-Content -LiteralPath (
+        Join-Path $revisionRun 'plan.json'
+    ) -Raw | ConvertFrom-Json -Depth 100
+    $revisionEventsForInventory = @(Read-OrchestrationJournal (
+        Join-Path $revisionRun 'events.jsonl'
+    ))
+    $excludedInventory = Get-MilestoneRevisionExcludedInventory `
+        -RunDirectory $revisionRun -Events $revisionEventsForInventory `
+        -RequiredSourceIds @('domain', 'review') `
+        -CheckpointHash (
+            Get-FileHash -LiteralPath $revisionCheckpoint -Algorithm SHA256
+        ).Hash.ToLowerInvariant() `
+        -EventCount $revisionEventsForInventory.Count
+    $excludedManifestEntries = [Collections.Generic.List[object]]::new()
+    foreach ($sourceNodeId in @('domain', 'review')) {
+        $eventBindings = @($excludedInventory.events | Where-Object {
+            [string]$_.source_node_id -eq $sourceNodeId
+        } | ForEach-Object {
+            [ordered]@{
+                sequence = [int]$_.event_sequence
+                event_hash = [string]$_.event_hash
+            }
+        })
+        $artifacts = @($excludedInventory.artifacts | Where-Object {
+            [string]$_.source_node_id -eq $sourceNodeId
+        } | ForEach-Object {
+            [ordered]@{
+                type = [string]$_.type
+                path = [string]$_.path
+                file_hash = [string]$_.file_hash
+                internal_hash = [string]$_.internal_hash
+            }
+        })
+        $excludedManifestEntries.Add([ordered]@{
+            source_node_id = $sourceNodeId
+            reason = 'caller-timing-error/non-completion evidence'
+            event_bindings = $eventBindings
+            artifacts = $artifacts
+        })
+    }
+    @($excludedManifestEntries) | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $excludedEvidenceManifest
+    $revisionAuthorizationMaterial = Join-Path $revisionRun (
+        'materials/method-1-revision-1-controller-authorization.md'
+    )
+    Set-Content -LiteralPath $revisionAuthorizationMaterial -Value (
+        'Controller authorizes a first-milestone checkpoint revision.'
+    )
+    $revisionAcceptanceEvidence = Join-Path $revisionRun (
+        'materials/method-1-revision-1-main-acceptance.md'
+    )
+    Set-Content -LiteralPath $revisionAcceptanceEvidence `
+        -Value 'Main owner must independently accept revision one.'
+    $revisionAcceptanceAuthorization = Join-Path $revisionRun (
+        'materials/method-1-revision-1-acceptance-authorization.json'
+    )
+    [ordered]@{
+        schema_version = '1.0'
+        milestone_id = 'method-1'
+        main_node_id = 'integrate'
+        acceptance_key = 'controller:method-1-revision-1-acceptance'
+        evidence_material_path = [IO.Path]::GetRelativePath(
+            $revisionRun, $revisionAcceptanceEvidence
+        ).Replace('\', '/')
+        evidence_material_hash = (
+            Get-FileHash -LiteralPath $revisionAcceptanceEvidence `
+                -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+    } | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $revisionAcceptanceAuthorization
+    $revisionPreAuthorizationRun = Join-Path $testRoot (
+        'revision-pre-authorization-snapshot'
+    )
+    Copy-Item -LiteralPath $revisionRun `
+        -Destination $revisionPreAuthorizationRun -Recurse
+    $revisionAuthorization = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionAuthorizationReceipt.ps1'
+    )) -RunDirectory $revisionRun -MilestoneId 'method-1' `
+        -CheckpointMaterialPath $revisionCheckpoint `
+        -InputManifestPath $revisionInput `
+        -ReviewMaterialManifestPath $reviewMaterialManifest `
+        -ExcludedEvidenceManifestPath $excludedEvidenceManifest `
+        -AuthorizationMaterialPath $revisionAuthorizationMaterial `
+        -AcceptanceAuthorizationMaterialPath $revisionAcceptanceAuthorization `
+        -SelectionKey 'controller:select-method-1-revision-1' `
+        -ActivationKey 'controller:method-1-revision-1' |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$revisionAuthorization.schema_version -eq '1.0' -and
+        [string]$revisionAuthorization.milestone_id -eq 'method-1' -and
+        [string]$revisionAuthorization.receipt_hash -match '^[0-9a-f]{64}$'
+    ) 'First-milestone revision authorization must be created before review.'
+    $authorizedSelectionKey = [string]$revisionAuthorization.selection_key
+    Assert-True (
+        $authorizedSelectionKey -ceq (
+            'controller:milestone-revision-selection:' +
+            [string]$revisionAuthorization.revision_id
+        )
+    ) 'The authorization must derive a run/revision-unique selection key.'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $revisionRun | Out-Null
+    } 'authorized but not yet selected' (
+        'A pending first-milestone revision must block completion.'
+    )
+    $revisionAuthorizedRun = Join-Path $testRoot 'revision-authorized-snapshot'
+    Copy-Item -LiteralPath $revisionRun -Destination $revisionAuthorizedRun `
+        -Recurse
+    $revisionAuthorizationRelative = [IO.Path]::GetRelativePath(
+        $revisionRun, (
+            Join-Path $revisionRun (
+                "receipts/durable-review-milestone.method-1.revision-" +
+                "$($revisionAuthorization.revision_id).authorization.json"
+            )
+        )
+    ).Replace('\', '/')
+    foreach ($keyMutation in @('missing', 'empty')) {
+        $keyRun = Join-Path $testRoot "revision-selection-key-$keyMutation"
+        Copy-Item -LiteralPath $revisionAuthorizedRun -Destination $keyRun `
+            -Recurse
+        $keyReceiptPath = Join-Path $keyRun $revisionAuthorizationRelative
+        $keyReceipt = Get-Content -LiteralPath $keyReceiptPath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        if ($keyMutation -eq 'missing') {
+            $keyReceipt.Remove('selection_key')
+        } else {
+            $keyReceipt.selection_key = ''
+        }
+        $keyPayload = [ordered]@{}
+        foreach ($key in $keyReceipt.Keys | Where-Object {
+            $_ -ne 'receipt_hash'
+        }) {
+            $keyPayload[$key] = $keyReceipt[$key]
+        }
+        $keyReceipt.receipt_hash = Get-TextSha256 (
+            $keyPayload | ConvertTo-Json -Compress -Depth 100
+        )
+        $keyReceipt | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $keyReceiptPath
+        Assert-ThrowsLike {
+            Read-DurableReviewMilestoneRevisionAuthorization `
+                -Path $keyReceiptPath -RunDirectory $keyRun | Out-Null
+        } $(if ($keyMutation -eq 'missing') {
+            "missing 'selection_key'"
+        } else {
+            'run or milestone binding is invalid'
+        }) "Authorization selection_key $keyMutation must fail closed."
+    }
+    foreach ($source in @(
+        @{ id = 'review'; thread = 'review-thread' },
+        @{ id = 'domain'; thread = 'domain-thread' }
+    )) {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $revisionRun -NodeId $source.id -Status running `
+            -ThreadId $source.thread `
+            -MilestoneRevisionAuthorizationReceiptPath (
+                $revisionAuthorizationRelative
+            ) -Message "Fresh revision review for $($source.id)." `
+            -Evidence @('observation:fresh-post-authorization-review') `
+            -IdempotencyKey "revision-rearm-$($source.id)" | Out-Null
+    }
+    $revisionReview = New-SourceChain -Run $revisionRun `
+        -SourceNodeId 'review' -ThreadId 'review-thread' `
+        -MilestoneId 'method-1' -CheckpointPath $revisionCheckpoint `
+        -Stem 'review.method-1-revision-1' -Severity 'P0' `
+        -FindingText 'baseline-review-p0' -Resolution 'resolved' `
+        -FindingId 'review-method-1-finding' `
+        -CanonicalFindingId 'canonical-review-method-1-finding' `
+        -AdditionalFindingId 'review-method-1-finding-r08' `
+        -AdditionalFindingText 'baseline-review-p0-second-occurrence' `
+        -AdditionalSeverity 'P0' `
+        -AdditionalCanonicalFindingId 'canonical-review-method-1-finding'
+    $revisionDomain = New-SourceChain -Run $revisionRun `
+        -SourceNodeId 'domain' -ThreadId 'domain-thread' `
+        -MilestoneId 'method-1' -CheckpointPath $revisionCheckpoint `
+        -Stem 'domain.method-1-revision-1' -Severity 'P0' `
+        -FindingText 'baseline-domain-p0' -Resolution 'resolved' `
+        -FindingId 'domain-method-1-finding' `
+        -CanonicalFindingId 'canonical-domain-method-1-finding'
+    foreach ($source in @(
+        @{
+            id = 'review'; thread = 'review-thread'
+            result = $revisionReview.result_path
+            disposition = $revisionReview.disposition_path
+        },
+        @{
+            id = 'domain'; thread = 'domain-thread'
+            result = $revisionDomain.result_path
+            disposition = $revisionDomain.disposition_path
+        }
+    )) {
+        foreach ($status in @('completed', 'validated', 'adopted')) {
+            $pointer = if ($status -eq 'completed') {
+                "artifact:$($source.result)"
+            } else {
+                "artifact:$($source.disposition)"
+            }
+            & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+                -RunDirectory $revisionRun -NodeId $source.id `
+                -Status $status -ThreadId $source.thread `
+                -Message "Revision $($source.id) $status." `
+                -Evidence @($pointer) `
+                -IdempotencyKey "revision-$($source.id)-$status" | Out-Null
+        }
+    }
+    $revisionReadyRun = Join-Path $testRoot 'revision-ready-snapshot'
+    Copy-Item -LiteralPath $revisionRun -Destination $revisionReadyRun -Recurse
+    $revisionSelectionMaterial = Join-Path $revisionRun (
+        'materials/method-1-revision-1-selection.json'
+    )
+    @(
+        [ordered]@{
+            source_node_id = 'review'
+            disposition_receipt_path = $revisionReview.disposition_path
+        },
+        [ordered]@{
+            source_node_id = 'domain'
+            disposition_receipt_path = $revisionDomain.disposition_path
+        }
+    ) | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $revisionSelectionMaterial
+    $preboundSelectionJournalHash = (
+        Get-FileHash -LiteralPath (Join-Path $revisionRun 'events.jsonl') `
+            -Algorithm SHA256
+    ).Hash
+    foreach ($wrongSelectionKey in @(
+        (
+            'controller:' +
+            $authorizedSelectionKey.Substring(11).ToUpperInvariant()
+        ),
+        $authorizedSelectionKey.Replace('controller:', 'user:'),
+        ($authorizedSelectionKey + ':other-revision')
+    )) {
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+            )) -RunDirectory $revisionRun `
+                -AuthorizationReceiptPath (
+                    Join-Path $revisionRun $revisionAuthorizationRelative
+                ) -SelectionMaterialPath $revisionSelectionMaterial `
+                -SelectionKey $wrongSelectionKey | Out-Null
+        } 'does not match its authorization' (
+            'A revision selection cannot replace its pre-bound selection key.'
+        )
+        Assert-True (
+            $preboundSelectionJournalHash -eq (
+                Get-FileHash -LiteralPath (
+                    Join-Path $revisionRun 'events.jsonl'
+                ) -Algorithm SHA256
+            ).Hash
+        ) 'Rejected selection-key variants must not mutate the journal.'
+    }
+    $revisionSelection = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+    )) -RunDirectory $revisionRun `
+        -AuthorizationReceiptPath (
+            Join-Path $revisionRun $revisionAuthorizationRelative
+        ) -SelectionMaterialPath $revisionSelectionMaterial `
+        -SelectionKey $authorizedSelectionKey |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$revisionSelection.schema_version -eq '1.1' -and
+        @($revisionSelection.source_bindings).Count -eq 2
+    ) 'A revision selection must bind both fresh source lifecycles.'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+        )) -RunDirectory $revisionRun `
+            -AuthorizationReceiptPath (
+                Join-Path $revisionRun $revisionAuthorizationRelative
+            ) -SelectionMaterialPath $revisionSelectionMaterial `
+            -SelectionKey $authorizedSelectionKey |
+            Out-Null
+    } 'already selected' 'A milestone revision cannot fork or select twice.'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $revisionRun | Out-Null
+    } 'lacks main-owner acceptance' (
+        'Revision selection does not replace independent main acceptance.'
+    )
+    & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneAcceptanceReceipt.ps1'
+    )) -RunDirectory $revisionRun -MilestoneId 'method-1' | Out-Null
+    $revisionCompletion = & (
+        Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1'
+    ) -RunDirectory $revisionRun | ConvertFrom-Json -Depth 30
+    Assert-True (
+        $revisionCompletion.complete -and
+        $revisionCompletion.active_review_milestone -eq 'method-1'
+    ) 'A selected revision plus independent acceptance may complete method-1.'
+
+    $resignedTailRun = Join-Path $testRoot 'revision-resigned-tail'
+    Copy-Item -LiteralPath $revisionRun -Destination $resignedTailRun -Recurse
+    $selectionReceiptPath = Join-Path $resignedTailRun (
+        "receipts/durable-review-milestone.method-1.revision-" +
+        "$($revisionAuthorization.revision_id).selection.json"
+    )
+    $resignedSelection = Get-Content -LiteralPath $selectionReceiptPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $resignedSelection.activation_key = 'controller:self-resigned-selection'
+    $resignedSelectionPayload = [ordered]@{}
+    foreach ($key in $resignedSelection.Keys | Where-Object {
+        $_ -ne 'receipt_hash'
+    }) {
+        $resignedSelectionPayload[$key] = $resignedSelection[$key]
+    }
+    $resignedSelection.receipt_hash = Get-TextSha256 (
+        $resignedSelectionPayload | ConvertTo-Json -Compress -Depth 100
+    )
+    $resignedSelection | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $selectionReceiptPath
+
+    $resignedEventsPath = Join-Path $resignedTailRun 'events.jsonl'
+    $resignedEvents = @(
+        Get-Content -LiteralPath $resignedEventsPath | ForEach-Object {
+            $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+        }
+    )
+    $selectionEventIndex = [Array]::FindIndex(
+        [object[]]$resignedEvents,
+        [Predicate[object]]{
+            param($event)
+            [string]$event.event -eq 'milestone-revision-selected'
+        }
+    )
+    $resignedEvents[$selectionEventIndex].milestone_activation_receipt_hash =
+        [string]$resignedSelection.receipt_hash
+    $resignedEvents[$selectionEventIndex].request_fingerprint =
+        [string]$resignedSelection.receipt_hash
+    $resignedEvents[$selectionEventIndex].hash = Get-OrchestrationEventHash (
+        [pscustomobject]$resignedEvents[$selectionEventIndex]
+    )
+
+    $acceptanceReceiptPath = Join-Path $resignedTailRun (
+        'receipts/durable-review-milestone.method-1.acceptance.json'
+    )
+    $resignedAcceptance = Get-Content -LiteralPath $acceptanceReceiptPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $resignedAcceptance.activation_receipt_hash =
+        [string]$resignedSelection.receipt_hash
+    $resignedAcceptance.source_journal_head =
+        [string]$resignedEvents[$selectionEventIndex].hash
+    $resignedAcceptancePayload = [ordered]@{}
+    foreach ($key in $resignedAcceptance.Keys | Where-Object {
+        $_ -ne 'receipt_hash'
+    }) {
+        $resignedAcceptancePayload[$key] = $resignedAcceptance[$key]
+    }
+    $resignedAcceptance.receipt_hash = Get-TextSha256 (
+        $resignedAcceptancePayload | ConvertTo-Json -Compress -Depth 100
+    )
+    $resignedAcceptance | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $acceptanceReceiptPath
+
+    $acceptanceEventIndex = $selectionEventIndex + 1
+    $resignedEvents[$acceptanceEventIndex].prev_hash =
+        [string]$resignedEvents[$selectionEventIndex].hash
+    $resignedEvents[$acceptanceEventIndex].milestone_activation_receipt_hash =
+        [string]$resignedSelection.receipt_hash
+    $resignedEvents[$acceptanceEventIndex].milestone_acceptance_receipt_hash =
+        [string]$resignedAcceptance.receipt_hash
+    $resignedEvents[$acceptanceEventIndex].request_fingerprint =
+        [string]$resignedAcceptance.receipt_hash
+    $resignedEvents[$acceptanceEventIndex].hash = Get-OrchestrationEventHash (
+        [pscustomobject]$resignedEvents[$acceptanceEventIndex]
+    )
+    @($resignedEvents | ForEach-Object {
+        $_ | ConvertTo-Json -Compress -Depth 100
+    }) | Set-Content -LiteralPath $resignedEventsPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $resignedTailRun | Out-Null
+    } 'selection run or milestone binding is invalid' (
+        'Re-signing selection and downstream tail cannot replace the pre-bound key.'
+    )
+
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionAuthorizationReceipt.ps1'
+        )) -RunDirectory $revisionRun -MilestoneId 'method-1' `
+            -CheckpointMaterialPath $revisionCheckpoint `
+            -InputManifestPath $revisionInput `
+            -ReviewMaterialManifestPath $reviewMaterialManifest `
+            -ExcludedEvidenceManifestPath $excludedEvidenceManifest `
+            -AuthorizationMaterialPath $revisionAuthorizationMaterial `
+            -AcceptanceAuthorizationMaterialPath (
+                $revisionAcceptanceAuthorization
+            ) -SelectionKey 'controller:reject-same-checkpoint-selection' `
+            -ActivationKey 'controller:reject-same-checkpoint-revision' |
+            Out-Null
+    } 'cannot be revised in place' (
+        'A selected checkpoint cannot be replayed as another revision.'
+    )
+
+    $omittedExcludedRun = Join-Path $testRoot 'revision-omitted-excluded'
+    Copy-Item -LiteralPath $revisionPreAuthorizationRun `
+        -Destination $omittedExcludedRun -Recurse
+    $omittedManifestPath = Join-Path $omittedExcludedRun (
+        'materials/method-1-revision-1-excluded-evidence.json'
+    )
+    $omittedManifest = @(
+        Get-Content -LiteralPath $omittedManifestPath -Raw |
+            ConvertFrom-Json -Depth 100
+    )
+    $omittedManifest[0].event_bindings = @(
+        $omittedManifest[0].event_bindings | Select-Object -Skip 1
+    )
+    $omittedManifest | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $omittedManifestPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionAuthorizationReceipt.ps1'
+        )) -RunDirectory $omittedExcludedRun -MilestoneId 'method-1' `
+            -CheckpointMaterialPath (
+                Join-Path $omittedExcludedRun (
+                    'materials/checkpoint-method-1-revision-1.json'
+                )
+            ) -InputManifestPath (
+                Join-Path $omittedExcludedRun (
+                    'materials/input-method-1-revision-1.json'
+                )
+            ) -ReviewMaterialManifestPath (
+                Join-Path $omittedExcludedRun (
+                    'materials/method-1-revision-1-review-materials.json'
+                )
+            ) -ExcludedEvidenceManifestPath $omittedManifestPath `
+            -AuthorizationMaterialPath (
+                Join-Path $omittedExcludedRun (
+                    'materials/method-1-revision-1-controller-authorization.md'
+                )
+            ) -AcceptanceAuthorizationMaterialPath (
+                Join-Path $omittedExcludedRun (
+                    'materials/method-1-revision-1-acceptance-authorization.json'
+                )
+            ) -SelectionKey 'controller:reject-omitted-selection' `
+            -ActivationKey 'controller:reject-omitted-excluded' | Out-Null
+    } 'omitted or changed' (
+        'Authorization must reject an omitted pre-anchor event binding.'
+    )
+
+    $relabeledExcludedRun = Join-Path $testRoot 'revision-relabeled-excluded'
+    Copy-Item -LiteralPath $revisionPreAuthorizationRun `
+        -Destination $relabeledExcludedRun -Recurse
+    $relabeledManifestPath = Join-Path $relabeledExcludedRun (
+        'materials/method-1-revision-1-excluded-evidence.json'
+    )
+    $relabeledManifest = @(
+        Get-Content -LiteralPath $relabeledManifestPath -Raw |
+            ConvertFrom-Json -Depth 100
+    )
+    $relabeledManifest[0].reason = 'caller-selected harmless evidence'
+    $relabeledManifest | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $relabeledManifestPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionAuthorizationReceipt.ps1'
+        )) -RunDirectory $relabeledExcludedRun -MilestoneId 'method-1' `
+            -CheckpointMaterialPath (
+                Join-Path $relabeledExcludedRun (
+                    'materials/checkpoint-method-1-revision-1.json'
+                )
+            ) -InputManifestPath (
+                Join-Path $relabeledExcludedRun (
+                    'materials/input-method-1-revision-1.json'
+                )
+            ) -ReviewMaterialManifestPath (
+                Join-Path $relabeledExcludedRun (
+                    'materials/method-1-revision-1-review-materials.json'
+                )
+            ) -ExcludedEvidenceManifestPath $relabeledManifestPath `
+            -AuthorizationMaterialPath (
+                Join-Path $relabeledExcludedRun (
+                    'materials/method-1-revision-1-controller-authorization.md'
+                )
+            ) -AcceptanceAuthorizationMaterialPath (
+                Join-Path $relabeledExcludedRun (
+                    'materials/method-1-revision-1-acceptance-authorization.json'
+                )
+            ) -SelectionKey 'controller:reject-relabeled-selection' `
+            -ActivationKey 'controller:reject-relabeled-excluded' | Out-Null
+    } 'manifest is invalid' (
+        'Authorization must reject caller-relabelled excluded evidence.'
+    )
+
+    $excludedSelectionRun = Join-Path $testRoot 'revision-excluded-selection'
+    Copy-Item -LiteralPath $revisionReadyRun `
+        -Destination $excludedSelectionRun -Recurse
+    $excludedSelectionMaterial = Join-Path $excludedSelectionRun (
+        'materials/excluded-chain-selection.json'
+    )
+    @(
+        [ordered]@{
+            source_node_id = 'review'
+            disposition_receipt_path = $preAnchorReview.disposition_path
+        },
+        [ordered]@{
+            source_node_id = 'domain'
+            disposition_receipt_path = $preAnchorDomain.disposition_path
+        }
+    ) | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $excludedSelectionMaterial
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+        )) -RunDirectory $excludedSelectionRun `
+            -AuthorizationReceiptPath (
+                Join-Path $excludedSelectionRun $revisionAuthorizationRelative
+            ) -SelectionMaterialPath $excludedSelectionMaterial `
+            -SelectionKey $authorizedSelectionKey | Out-Null
+    } 'used excluded evidence' (
+        'Selection must not reference an excluded pre-authorization chain.'
+    )
+
+    $partialSelectionRun = Join-Path $testRoot 'revision-partial-selection'
+    Copy-Item -LiteralPath $revisionReadyRun -Destination $partialSelectionRun `
+        -Recurse
+    $partialSelectionMaterial = Join-Path $partialSelectionRun (
+        'materials/partial-revision-selection.json'
+    )
+    @(
+        [ordered]@{
+            source_node_id = 'review'
+            disposition_receipt_path = $revisionReview.disposition_path
+        }
+    ) | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $partialSelectionMaterial
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+        )) -RunDirectory $partialSelectionRun `
+            -AuthorizationReceiptPath (
+                Join-Path $partialSelectionRun $revisionAuthorizationRelative
+            ) -SelectionMaterialPath $partialSelectionMaterial `
+            -SelectionKey $authorizedSelectionKey | Out-Null
+    } 'include every required source' (
+        'Partial-source revision selection must be rejected.'
+    )
+
+    $partialRearmRun = Join-Path $testRoot 'revision-partial-rearm'
+    Copy-Item -LiteralPath $revisionAuthorizedRun `
+        -Destination $partialRearmRun -Recurse
+    foreach ($relativePath in @(
+        $revisionReview.result_path, $revisionReview.disposition_path,
+        $revisionDomain.result_path, $revisionDomain.disposition_path,
+        'thread-reads/review.method-1-revision-1.json',
+        'thread-reads/domain.method-1-revision-1.json'
+    )) {
+        Copy-Item -LiteralPath (Join-Path $revisionReadyRun $relativePath) `
+            -Destination (Join-Path $partialRearmRun $relativePath) -Force
+    }
+    & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+        -RunDirectory $partialRearmRun -NodeId 'domain' -Status running `
+        -ThreadId 'domain-thread' `
+        -MilestoneRevisionAuthorizationReceiptPath (
+            $revisionAuthorizationRelative
+        ) -Message 'Only one source is re-armed.' `
+        -Evidence @('observation:partial-rearm') `
+        -IdempotencyKey 'revision-partial-rearm-domain' | Out-Null
+    foreach ($status in @('completed', 'validated', 'adopted')) {
+        $pointer = if ($status -eq 'completed') {
+            "artifact:$($revisionDomain.result_path)"
+        } else { "artifact:$($revisionDomain.disposition_path)" }
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $partialRearmRun -NodeId 'domain' `
+            -Status $status -ThreadId 'domain-thread' `
+            -Message "Partial rearm domain $status." -Evidence @($pointer) `
+            -IdempotencyKey "revision-partial-domain-$status" | Out-Null
+    }
+    $partialRearmSelection = Join-Path $partialRearmRun (
+        'materials/partial-rearm-selection.json'
+    )
+    Copy-Item -LiteralPath $revisionSelectionMaterial `
+        -Destination $partialRearmSelection
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+        )) -RunDirectory $partialRearmRun `
+            -AuthorizationReceiptPath (
+                Join-Path $partialRearmRun $revisionAuthorizationRelative
+            ) -SelectionMaterialPath $partialRearmSelection `
+            -SelectionKey $authorizedSelectionKey | Out-Null
+    } 'lacks one fresh re-arm' (
+        'Selection must reject a revision that re-armed only one source.'
+    )
+
+    $missingOccurrenceRun = Join-Path $testRoot (
+        'revision-missing-source-occurrence'
+    )
+    Copy-Item -LiteralPath $revisionReadyRun `
+        -Destination $missingOccurrenceRun -Recurse
+    foreach ($relativePath in @(
+        $revisionReview.result_path, $revisionReview.disposition_path
+    )) {
+        Remove-Item -LiteralPath (Join-Path $missingOccurrenceRun $relativePath)
+    }
+    $null = New-SourceChain -Run $missingOccurrenceRun `
+        -SourceNodeId 'review' -ThreadId 'review-thread' `
+        -MilestoneId 'method-1' -CheckpointPath (
+            Join-Path $missingOccurrenceRun (
+                'materials/checkpoint-method-1-revision-1.json'
+            )
+        ) -Stem 'review.method-1-revision-1' -Severity 'P0' `
+        -FindingText 'replacement summary that omits the source occurrence' `
+        -Resolution 'resolved' -FindingId 'review-summary-only' `
+        -CanonicalFindingId 'canonical-review-method-1-finding'
+    $missingSelectionMaterial = Join-Path $missingOccurrenceRun (
+        'materials/missing-occurrence-selection.json'
+    )
+    @(
+        [ordered]@{
+            source_node_id = 'review'
+            disposition_receipt_path = $revisionReview.disposition_path
+        },
+        [ordered]@{
+            source_node_id = 'domain'
+            disposition_receipt_path = $revisionDomain.disposition_path
+        }
+    ) | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $missingSelectionMaterial
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+        )) -RunDirectory $missingOccurrenceRun `
+            -AuthorizationReceiptPath (
+                Join-Path $missingOccurrenceRun $revisionAuthorizationRelative
+            ) -SelectionMaterialPath $missingSelectionMaterial `
+            -SelectionKey $authorizedSelectionKey | Out-Null
+    } 'did not conserve finding occurrence' (
+        'Canonical merging must not delete a source_finding_id occurrence.'
+    )
+
+    $downgradeRun = Join-Path $testRoot 'revision-severity-downgrade'
+    Copy-Item -LiteralPath $revisionReadyRun -Destination $downgradeRun -Recurse
+    foreach ($relativePath in @(
+        $revisionReview.result_path, $revisionReview.disposition_path
+    )) {
+        Remove-Item -LiteralPath (Join-Path $downgradeRun $relativePath)
+    }
+    $null = New-SourceChain -Run $downgradeRun `
+        -SourceNodeId 'review' -ThreadId 'review-thread' `
+        -MilestoneId 'method-1' -CheckpointPath (
+            Join-Path $downgradeRun (
+                'materials/checkpoint-method-1-revision-1.json'
+            )
+        ) -Stem 'review.method-1-revision-1' -Severity 'P1' `
+        -FindingText 'baseline-review-p0' -Resolution 'resolved' `
+        -FindingId 'review-method-1-finding' `
+        -CanonicalFindingId 'canonical-review-method-1-finding'
+    $downgradeSelectionMaterial = Join-Path $downgradeRun (
+        'materials/downgrade-selection.json'
+    )
+    Copy-Item -LiteralPath $revisionSelectionMaterial `
+        -Destination $downgradeSelectionMaterial
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+        )) -RunDirectory $downgradeRun `
+            -AuthorizationReceiptPath (
+                Join-Path $downgradeRun $revisionAuthorizationRelative
+            ) -SelectionMaterialPath $downgradeSelectionMaterial `
+            -SelectionKey $authorizedSelectionKey | Out-Null
+    } 'did not conserve finding occurrence' (
+        'A revision must reject source occurrence severity downgrade.'
+    )
+
+    $textDriftRun = Join-Path $testRoot 'revision-text-drift'
+    Copy-Item -LiteralPath $revisionReadyRun -Destination $textDriftRun -Recurse
+    foreach ($relativePath in @(
+        $revisionReview.result_path, $revisionReview.disposition_path
+    )) {
+        Remove-Item -LiteralPath (Join-Path $textDriftRun $relativePath)
+    }
+    $null = New-SourceChain -Run $textDriftRun `
+        -SourceNodeId 'review' -ThreadId 'review-thread' `
+        -MilestoneId 'method-1' -CheckpointPath (
+            Join-Path $textDriftRun (
+                'materials/checkpoint-method-1-revision-1.json'
+            )
+        ) -Stem 'review.method-1-revision-1' -Severity 'P0' `
+        -FindingText 'rewritten text cannot replace the old occurrence' `
+        -Resolution 'resolved' -FindingId 'review-method-1-finding' `
+        -CanonicalFindingId 'canonical-review-method-1-finding' `
+        -AdditionalFindingId 'review-method-1-finding-r08' `
+        -AdditionalFindingText 'baseline-review-p0-second-occurrence' `
+        -AdditionalSeverity 'P0' `
+        -AdditionalCanonicalFindingId 'canonical-review-method-1-finding'
+    $textDriftSelection = Join-Path $textDriftRun (
+        'materials/text-drift-selection.json'
+    )
+    Copy-Item -LiteralPath $revisionSelectionMaterial `
+        -Destination $textDriftSelection
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+        )) -RunDirectory $textDriftRun `
+            -AuthorizationReceiptPath (
+                Join-Path $textDriftRun $revisionAuthorizationRelative
+            ) -SelectionMaterialPath $textDriftSelection `
+            -SelectionKey $authorizedSelectionKey | Out-Null
+    } 'did not conserve finding occurrence' (
+        'A revision must reject exact finding text or text-hash drift.'
+    )
+
+    $crossSourceRun = Join-Path $testRoot 'revision-cross-source-move'
+    Copy-Item -LiteralPath $revisionReadyRun -Destination $crossSourceRun `
+        -Recurse
+    foreach ($relativePath in @(
+        $revisionReview.result_path, $revisionReview.disposition_path
+    )) {
+        Remove-Item -LiteralPath (Join-Path $crossSourceRun $relativePath)
+    }
+    $null = New-SourceChain -Run $crossSourceRun `
+        -SourceNodeId 'review' -ThreadId 'review-thread' `
+        -MilestoneId 'method-1' -CheckpointPath (
+            Join-Path $crossSourceRun (
+                'materials/checkpoint-method-1-revision-1.json'
+            )
+        ) -Stem 'review.method-1-revision-1' -Severity 'P0' `
+        -FindingText 'baseline-domain-p0' -Resolution 'resolved' `
+        -FindingId 'domain-method-1-finding' `
+        -CanonicalFindingId 'canonical-domain-method-1-finding'
+    $crossSourceSelection = Join-Path $crossSourceRun (
+        'materials/cross-source-selection.json'
+    )
+    Copy-Item -LiteralPath $revisionSelectionMaterial `
+        -Destination $crossSourceSelection
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+        )) -RunDirectory $crossSourceRun `
+            -AuthorizationReceiptPath (
+                Join-Path $crossSourceRun $revisionAuthorizationRelative
+            ) -SelectionMaterialPath $crossSourceSelection `
+            -SelectionKey $authorizedSelectionKey | Out-Null
+    } 'did not conserve finding occurrence' (
+        'A finding occurrence cannot move from one durable source to another.'
+    )
+
+    $rearmReuseRun = Join-Path $testRoot 'revision-rearm-reuse'
+    Copy-Item -LiteralPath $revisionReadyRun -Destination $rearmReuseRun -Recurse
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $rearmReuseRun -NodeId 'review' -Status running `
+            -ThreadId 'review-thread' `
+            -MilestoneRevisionAuthorizationReceiptPath (
+                $revisionAuthorizationRelative
+            ) -Message 'Attempt duplicate revision re-arm.' `
+            -Evidence @('observation:duplicate-rearm') `
+            -IdempotencyKey 'controller:duplicate-rearm' | Out-Null
+    } 'already used' 'Each source may be re-armed only once per revision.'
 
     $checkpoint2 = Join-Path $run 'materials/checkpoint-method-2.json'
     Set-Content -LiteralPath $checkpoint2 -Value '{"milestone":"method-2"}'

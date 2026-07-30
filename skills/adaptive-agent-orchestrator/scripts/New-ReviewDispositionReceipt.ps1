@@ -92,9 +92,6 @@ foreach ($sourceFinding in $sourceFindings) {
 $seen = [Collections.Generic.HashSet[string]]::new(
     [StringComparer]::Ordinal
 )
-$seenCanonical = [Collections.Generic.HashSet[string]]::new(
-    [StringComparer]::Ordinal
-)
 $normalized = [Collections.Generic.List[object]]::new()
 $blocking = [Collections.Generic.List[string]]::new()
 foreach ($decision in $decisions) {
@@ -126,11 +123,10 @@ foreach ($decision in $decisions) {
     }
     $canonicalFindingId = [string]$decision.canonical_finding_id
     if ($canonicalFindingId -notmatch
-        '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' -or
-        -not $seenCanonical.Add($canonicalFindingId)) {
+        '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$') {
         throw (
-            'Review decisions require a unique stable canonical_finding_id ' +
-            'within each source receipt.'
+            'Review decisions require a stable canonical_finding_id; source ' +
+            'occurrences may share one canonical identity.'
         )
     }
     $severity = [string]$decision.severity

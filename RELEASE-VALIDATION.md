@@ -1,6 +1,6 @@
 # Release validation receipt
 
-Release: `0.7.9`
+Release: `0.7.10`
 Policy version: `0.7.6` (unchanged)
 Date: `2026-07-30`
 
@@ -12,141 +12,109 @@ Date: `2026-07-30`
 
 ## Scope
 
-v0.7.9 separates original durable-source result recovery by review cycle.
-Every new checkpoint/input under the active milestone gets a deterministic
-cycle binding the run, source, role, thread, milestone activation, checkpoint,
-and input manifest.
+v0.7.10 closes two fail-closed gaps in repeated durable review.
 
-Each cycle starts at attempt 1 and permits at most three same-thread,
-same-role attempts. A receipt from another checkpoint, input, milestone,
-source, role, or thread cannot start, extend, reset, or authorize the cycle.
-Historical schema 1.0 original and schema 1.1 replacement receipts remain
-readable; new original-source cycles use schema 1.2.
+First, a source that adopted an earlier checkpoint may enter `result_pending`
+for a different checkpoint/input only through an unused schema 1.2 attempt-1
+recovery cycle bound to the same run, source, role, thread, and active
+milestone. Ordinary `adopted` remains terminal.
 
-The orchestration policy remains `0.7.6`. This patch changes the recovery
-receipt namespace and validation under that policy; it does not rewrite an
-older plan, run, genesis, or journal.
+Second, before the first declared milestone advances, a pre-authorized revision
+may re-arm every required read-only source once and select one exact set of
+fresh cumulative results. Authorization fixes the only selection identity
+before results exist. Selection conserves each prior source finding occurrence
+by source ID, severity, exact text/hash, and canonical ID. Completion reads only
+the terminal valid selection; open P0/P1 and missing main acceptance remain
+blockers.
+
+The orchestration policy remains `0.7.6`. This patch does not rewrite an older
+plan, run, genesis, result, disposition, or journal.
 
 ## Fixed functional candidate
 
 Functional commit:
-`38a5c8e67dc90fce7204df3a2d4fea6d6a3515a5`
+`cbf98d4ab1bfc48fb65008a2f13ca0aa492d8e5a`
 
 Parent:
-`63fb6155088ab2ff222161841d739a40f8b75235`
+`9321bd414469f60a60558716cae98e3dd46a1e36`
 
-The fixed Skill contains 64 files.
+The fixed Skill contains 66 files.
 
 ## Repository results
 
 - Exit code: 0
-- PowerShell scripts parsed: 45
-- Recovery-protocol focused assertions: 56 passed
-- Self-test assertions: 750 passed
+- PowerShell scripts parsed: 47
+- Recovery-protocol focused assertions: 66 passed
+- Durable-milestone/revision focused assertions: 79 passed
+- Self-test assertions: 787 passed
 - Intentional invalid negative cases: 59 correctly rejected
 - Strict reference JSON files parsed: 8
 - Skill Creator validation: `Skill is valid!`
-- Local Markdown links checked: 101
+- Local Markdown links checked: 60
 - `git diff --check`: passed
 - Symbolic-link fixture: skipped because this Windows session did not permit
   symbolic-link creation
 
 ## Independent acceptance
 
-The same read-only Noether reviewer dynamically re-attacked the fixed
-functional commit and its 64-file candidate archive:
+The same read-only Noether reviewer dynamically re-attacked fixed functional
+commit `cbf98d4` and candidate archive SHA-256
+`413888a0e5b628401fdfbb62dac9fb9817058d2521f1f2c40915fc8ca4f0d4dd`.
+The final disposition was GREEN with no blocking finding.
 
-- P0: 0
-- P1: 0
-- P2: 0
-- independent attack-harness assertions: 61 passed
-- PowerShell parse: 45/45
-- focused recovery assertions: 56
-- self-test assertions: 750
-- invalid cases rejected: 59/59
-- strict reference JSON: 8/8
-- Skill Creator validation: passed
-- Git/archive content comparison: 64/64
-
-The reviewer confirmed that a new checkpoint/input can begin attempt 1 after a
-completed earlier recovery cycle, while replay, mixed-cycle chaining, attempt
-reset, milestone/input changes, and cross-source/thread reuse fail closed.
-`result_pending` and incomplete review obligations never satisfy completion.
+The reviewer confirmed that authorization pre-binds the only permitted
+selection identity; a caller cannot choose or re-sign another identity after
+results exist. Missing, empty, case/prefix-mutated, cross-run, or cross-revision
+selection keys fail closed. Existing recovery, milestone, completion, and
+history-tamper boundaries remain in force.
 
 ## Real adoption
 
 The installed candidate was exercised against the real multi-divination
 control run without modifying product files:
 
-Run:
 `C:\Users\Administrator\Documents\主task\orchestration-control\multi-divination-v072\runs\multi-divination-liuyao-p1-successor-v076-checkpoint07`
 
-Source/thread:
-`liuyao-adversarial-source` /
-`019fb0df-5792-70f1-901b-3ce0a49dabe9`.
+The original 27-event run created revision
+`a19386b09506bb173ba3656524f09a3edc3beabbfd765c907c104903bfe75474`,
+then re-armed the original traditional and adversarial read-only sources. Both
+returned fresh formal PASS results with no new P0/P1/P2, and each produced
+source-specific schema 1.3 result/disposition evidence followed by
+`completed -> validated -> adopted`.
 
-The checkpoint08 cycle bound:
+One selection chose checkpoint10 SHA-256
+`22e0e6c86b90d273d3d7929c764eafdbc72c92f570f49ef22eed8dc474ae966c`:
 
-- checkpoint SHA-256:
-  `4a8024120b30febdf51d7b5c367c00d4ebfb861052c190ded87fcb85ee162d7d`
-- input manifest SHA-256:
-  `beb6eda4869448faa7afd509ca72971ade38cc3b092ccb31cb5fb8e3339bf880`
-- progress capture SHA-256:
-  `e0ed6ef18f0ec74b5da4e29ecddd17c0ff4da76761198c63335090b62ee3f597`
-- recovery cycle:
-  `7705aa4b9619e63a0fb0c3d98e2ef1bf14e3c20cf0c77f6315f9f69f3d05cc6b`
-- attempt: 1
-- recovery receipt internal hash:
-  `888f2e5acee78825bd4aca320b9a37fa0da83d33b26a80b750ede34cafdad563`
-- recovery receipt file SHA-256:
-  `ddd9ee1fe117132c43cb1b22c02c187e28fb2864a0701636a34d54b273d4e80f`
+- selection internal/event hash:
+  `e969fe49bd02588d9ca9d6abcd6882e0a3935d7a15309c3700161dd0f28e7ca9`
+- selection file SHA-256:
+  `ba8431b466715cb57b4d5e2065d05b653610d6731c1120f060959c0104f5c7be`
+- final event count: 37
+- final journal file SHA-256:
+  `412a0e68bc55697d232411ff766a5e4b5035c76f7e71cf8036cc06b28517bdf3`
 
-Receipt creation did not change the journal. The controller then appended
-`result_pending` sequence 14 and `running` sequence 15. Same-source recovery
-returned a formal final in turn
-`019fb2e9-5ad5-7ee0-ad3b-4c8b513f85c0`; the raw capture SHA-256 is
-`9a0d26df5c3eaedc1561bb4a308eeae0355d4777d58eec0b0d4d99056ad73a92`.
-
-The canonical schema 1.3 result receipt bound:
-
-- internal hash:
-  `0145511b4065d2f72987c2617a15f899fc6c2594aedddc89b80a9ca602a95f95`
-- file SHA-256:
-  `b1f7ac2030d83c878ccdc0d8079fa58b2638a9a1b3faaebae75939452a4859a6`
-
-The source-specific disposition bound:
-
-- internal hash:
-  `75a5cc3d73c54e885b5306b1ed26841b8702f7d4e3e6a8c8a897bdbce6cb2928`
-- file SHA-256:
-  `b8fad6401d909319947fb54c49aa77d81072d4c1080de9ce9c93fd43b5b42e9f`
-
-The journal appended `completed` sequence 16, `validated` sequence 17, and
-`adopted` sequence 18. It ended with 19 lines and head
-`22401c2403a1f45a53c9c70b72cc5a4b8a269addf9e2b2385c61334fc24a4211`.
-No replacement was created and no historical event was edited.
-
-Completion exited 1 and remained `BLOCKED` because traditional/main were
-unfinished, main evidence was absent, and one P1 remained open. That P1 is the
-multi-divination int/string-key `input_hash` collision; it is a business-product
-finding, not an Orchestrator defect. The recovery cycle and completion gate
-behaved as designed.
+Completion intentionally exited 1 because fresh main-owner acceptance was still
+absent and 11 later P1 source occurrences remained open. It reported zero P0,
+did not revive resolved older findings, and did not treat either source as a
+substitute for the other. Product development then advanced to the next group.
+No new Orchestrator P0/P1 was found.
 
 ## Release archive
 
 Archive:
-`adaptive-agent-orchestrator-v0.7.9.zip`
+`adaptive-agent-orchestrator-v0.7.10.zip`
 
 Archive SHA-256:
-`2fe97a587dc8b3d68f3339b182782724d3f2e7cd4a4c97bd4185b89cc9cdb0c7`
+`413888a0e5b628401fdfbb62dac9fb9817058d2521f1f2c40915fc8ca4f0d4dd`
 
-The archive was generated from fixed functional commit `38a5c8e` with
-`git archive` and contains 64 Skill files. After line-ending normalization,
-archive content matched the 64 Git blobs 64/64. From a fresh extraction:
+The archive was generated from fixed functional commit `cbf98d4` with
+`git archive` and contains 66 Skill files. After line-ending normalization,
+archive content matched the 66 Git blobs 66/66. From a fresh extraction:
 
-- PowerShell parse: 45/45
-- recovery-protocol assertions: 56
-- self-test assertions: 750
+- PowerShell parse: 47/47
+- recovery-protocol assertions: 66
+- durable-milestone/revision assertions: 79
+- self-test assertions: 787
 - invalid cases rejected: 59/59
 - strict reference JSON: 8/8
 - Skill Creator validation: passed
@@ -160,21 +128,28 @@ Installed path:
 `C:\Users\Administrator\.codex\skills\adaptive-agent-orchestrator`
 
 Backup:
-`C:\Users\Administrator\.codex\skill-backups\adaptive-agent-orchestrator-before-v0.7.9-20260730-202733`
+`C:\Users\Administrator\.codex\skill-backups\adaptive-agent-orchestrator-before-cbf98d4-20260730-232957`
 
-The source and installed Skill copies matched 64/64 files by exact SHA-256
-with zero missing or extra files. The installed copy passed 45-script parse,
-56 focused recovery assertions, 750 self-test assertions, 59 rejected invalid
-cases, strict parsing of 8 reference JSON files, and Skill Creator validation.
+The fixed ZIP and installed Skill copies matched 66/66 files by exact SHA-256
+with zero missing, extra, or different files. The Windows working tree differed
+in raw bytes for 36 text files because of CRLF checkout conversion; after
+stripping trailing CR, all 66 files matched the fixed ZIP. The installed copy
+passed 47-script parse, 66 focused recovery assertions, 79 milestone/revision
+assertions, 787 self-test assertions, 59 rejected invalid cases, strict parsing
+of 8 reference JSON files, and Skill Creator validation.
 
 ## Boundaries
 
 - The Skill does not repair platform `systemError` or missing-final behavior.
 - It does not claim measured production Token savings or business accuracy.
 - It does not migrate or modify multi-divination product files.
-- The open multi-divination hash-collision P1 is not an Orchestrator defect.
+- The 11 open multi-divination P1 source occurrences are product work, not
+  Orchestrator defects.
 - Recovery cycles do not permit replacement-of-replacement or relax P0/P1
   completion gates.
+- A first-milestone revision cannot advance or impersonate a later milestone,
+  replace one required source with another, or substitute selection for fresh
+  main-owner acceptance.
 - The local hash chain detects in-chain changes but does not resist an attacker
   who can coherently rewrite every retained anchor. That threat requires an
   external WORM, signature, or remote log anchor.

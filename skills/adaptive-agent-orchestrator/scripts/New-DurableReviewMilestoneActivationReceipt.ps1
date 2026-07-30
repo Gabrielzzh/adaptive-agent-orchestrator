@@ -46,6 +46,12 @@ if ([string]$chain.next_milestone_id -ne $MilestoneId) {
         "'$($chain.active_milestone_id)'."
     )
 }
+if (-not [string]::IsNullOrWhiteSpace(
+    [string]$chain.activation_receipt_hash
+)) {
+    $null = Read-DurableReviewMilestoneAcceptance `
+        -RunDirectory $runRoot -MilestoneChain $chain
+}
 $milestoneIds = @(
     $plan.durable_review_profile.milestone_ids | ForEach-Object { [string]$_ }
 )
