@@ -2725,6 +2725,17 @@ function Get-AbandonedSuccessorSnapshot {
     }).Count -gt 0) {
         throw 'An activated or accepted milestone cannot be abandoned.'
     }
+    $receiptRoot = Join-Path $runRoot 'receipts'
+    if (Test-Path -LiteralPath $receiptRoot -PathType Container) {
+        $milestoneReceipts = @(Get-ChildItem -LiteralPath $receiptRoot -File |
+            Where-Object {
+                $_.Name -match
+                    '^durable-review-milestone\..+\.(activation|acceptance)\.json$'
+            })
+        if ($milestoneReceipts.Count -gt 0) {
+            throw 'A milestone receipt prevents abandoned-successor recovery.'
+        }
+    }
     if (@($baseEvents | Where-Object {
         [string]$_.node_id -eq
             [string]$plan.durable_review_profile.main_owner_node_id -and
@@ -2912,6 +2923,8 @@ function Read-AbandonedSuccessorExportReceipt {
             [string]$snapshot.effective_policy_version),
         @([string]$receipt.original_adoption_receipt_hash,
             [string]$snapshot.adoption_receipt.receipt_hash),
+        @([string]$receipt.original_adoption_receipt_path,
+            [string]$snapshot.adoption_receipt_path),
         @([string]$receipt.original_adoption_receipt_file_hash,
             [string]$snapshot.adoption_receipt_file_hash),
         @([string]$receipt.source_bindings_hash,
@@ -2971,7 +2984,15 @@ function Read-AbandonedSuccessorExportReceipt {
     $additional = @(Get-Content -LiteralPath $additionalPath -Raw |
         ConvertFrom-Json -Depth 50 -DateKind String)
     $expected = [Collections.Generic.List[object]]::new()
+    $seenObligations = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
     foreach ($item in @($snapshot.adoption_receipt.inherited_obligations)) {
+        $key = [string]$item.source_node_id + "`n" +
+            [string]$item.source_finding_id
+        if (-not $seenObligations.Add($key)) {
+            throw 'Abandoned successor baseline obligations are duplicated.'
+        }
         $expected.Add($item)
     }
     foreach ($item in $additional) {
@@ -2982,7 +3003,10 @@ function Read-AbandonedSuccessorExportReceipt {
             [string]$item.resolution_status -eq 'resolved' -or
             [string]$item.finding_hash -ne (Get-TextSha256 (
                 [string]$item.finding
-            ))) {
+            )) -or -not $seenObligations.Add(
+                [string]$item.source_node_id + "`n" +
+                [string]$item.source_finding_id
+            )) {
             throw 'Abandoned successor additional finding changed.'
         }
         $expected.Add([ordered]@{
