@@ -1039,6 +1039,22 @@ function Read-ThreadResultRecoveryReceipt {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "Thread result recovery receipt does not exist: $Path"
     }
+    $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+    $canonicalReceiptDirectory = [IO.Path]::GetFullPath(
+        (Join-Path $runRoot 'receipts')
+    ).TrimEnd('\', '/')
+    $receiptFullPath = [IO.Path]::GetFullPath($Path)
+    $receiptParent = (Split-Path -Parent $receiptFullPath).TrimEnd('\', '/')
+    if (-not [string]::Equals(
+        $receiptParent,
+        $canonicalReceiptDirectory,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw (
+            'Thread result recovery receipt must remain in the canonical run ' +
+            'receipts directory.'
+        )
+    }
     $receipt = Get-Content -LiteralPath $Path -Raw |
         ConvertFrom-Json -Depth 50 -DateKind String
     $required = @(
@@ -1299,10 +1315,8 @@ function Read-ThreadResultRecoveryReceipt {
     }
     if ([string]$receipt.schema_version -eq '1.2' -and
         -not $SkipPeerCycleCollisionCheck) {
-        $receiptDirectory = Split-Path -Parent ([IO.Path]::GetFullPath($Path))
-        $receiptFullPath = [IO.Path]::GetFullPath($Path)
         $peerStarts = @(
-            Get-ChildItem -LiteralPath $receiptDirectory -File `
+            Get-ChildItem -LiteralPath $canonicalReceiptDirectory -File `
                 -Filter (
                     "$ExpectedSourceNodeId.cycle-*.attempt-1.result-recovery.json"
                 ) -ErrorAction SilentlyContinue | Where-Object {

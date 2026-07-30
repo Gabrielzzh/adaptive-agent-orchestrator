@@ -1110,6 +1110,35 @@ try {
     )
     $eventsPath = Join-Path $cycleRun 'events.jsonl'
     $adoptedJournal = Get-Content -LiteralPath $eventsPath -Raw
+    $nonCanonicalCyclePath = Join-Path $cycleMaterials (
+        [IO.Path]::GetFileName($cycleB1Path)
+    )
+    Copy-Item -LiteralPath $cycleB1Path -Destination $nonCanonicalCyclePath
+    Assert-ThrowsLike {
+        Read-ThreadResultRecoveryReceipt -Path $nonCanonicalCyclePath `
+            -RunDirectory $cycleRun -ExpectedSourceNodeId 'review' `
+            -ExpectedOriginalThreadId 'cycle-review-thread' `
+            -ExpectedRecoveryStage original | Out-Null
+    } 'canonical run receipts directory' (
+        'A recovery receipt reader must reject a canonical filename outside ' +
+        'the canonical run receipts directory.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $cycleRun -NodeId 'review' -Status 'result_pending' `
+            -Message 'attempt non-canonical recovery receipt' `
+            -ThreadId 'cycle-review-thread' `
+            -ErrorClass 'final_missing_with_progress_evidence' `
+            -RecoveryReceiptPath (
+                [IO.Path]::GetRelativePath($cycleRun, $nonCanonicalCyclePath)
+            ) -IdempotencyKey 'non-canonical-cycle-receipt' | Out-Null
+    } 'canonical run receipts directory' (
+        'The event entry point must reject a recovery receipt copied outside ' +
+        'the canonical namespace.'
+    )
+    Assert-True (
+        (Get-Content -LiteralPath $eventsPath -Raw) -eq $adoptedJournal
+    ) 'Rejected non-canonical recovery receipts must not change the journal.'
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
             -RunDirectory $cycleRun -NodeId 'review' -Status 'result_pending' `
