@@ -45,6 +45,33 @@ function Get-OrchestrationEventHash {
             $keys[$modelIndex..($keys.Count - 1)]
         )
     }
+    if ($null -ne $Event.PSObject.Properties['recovery_cycle_id'] -or
+        $null -ne $Event.PSObject.Properties['recovery_milestone_id'] -or
+        $null -ne $Event.PSObject.Properties[
+            'recovery_milestone_activation_receipt_hash'
+        ] -or $null -ne $Event.PSObject.Properties['recovery_checkpoint_hash'] -or
+        $null -ne $Event.PSObject.Properties[
+            'recovery_input_manifest_hash'
+        ] -or $null -ne $Event.PSObject.Properties[
+            'previous_adopted_event_sequence'
+        ] -or $null -ne $Event.PSObject.Properties[
+            'previous_adopted_event_hash'
+        ]) {
+        $recoveryIndex = [Array]::IndexOf(
+            $keys, 'recovery_receipt_hash'
+        ) + 1
+        $keys = @(
+            $keys[0..($recoveryIndex - 1)]
+            'recovery_cycle_id'
+            'recovery_milestone_id'
+            'recovery_milestone_activation_receipt_hash'
+            'recovery_checkpoint_hash'
+            'recovery_input_manifest_hash'
+            'previous_adopted_event_sequence'
+            'previous_adopted_event_hash'
+            $keys[$recoveryIndex..($keys.Count - 1)]
+        )
+    }
     if ($null -ne $Event.PSObject.Properties['runtime_policy_version'] -or
         $null -ne $Event.PSObject.Properties['policy_activation_receipt_path'] -or
         $null -ne $Event.PSObject.Properties['policy_activation_receipt_hash']) {

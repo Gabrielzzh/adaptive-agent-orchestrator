@@ -488,6 +488,101 @@ try {
 
     $history = @($events | Where-Object { $_.node_id -eq $NodeId })
     $priorState = if ($history.Count) { [string]$history[-1].status } else { 'planned' }
+    $isRecoveryCycleReentry = $false
+    $previousAdoptedEvent = $null
+    if ($priorState -eq 'adopted' -and $Status -eq 'result_pending') {
+        if ($null -eq $recoveryReceipt -or
+            [string]$recoveryReceipt.schema_version -ne '1.2' -or
+            [string]$recoveryReceipt.recovery_stage -ne 'original' -or
+            [int]$recoveryReceipt.attempt -ne 1) {
+            throw (
+                'An adopted source may re-enter result_pending only through ' +
+                'an unused original schema 1.2 recovery cycle at attempt one.'
+            )
+        }
+        if ($history.Count -lt 3) {
+            throw 'Recovery-cycle re-entry requires a prior adopted result chain.'
+        }
+        $previousAdoptedEvent = $history[-1]
+        $previousValidatedEvent = $history[-2]
+        $previousCompletedEvent = $history[-3]
+        if ([string]$previousAdoptedEvent.status -ne 'adopted' -or
+            [string]$previousValidatedEvent.status -ne 'validated' -or
+            [string]$previousCompletedEvent.status -ne 'completed' -or
+            [string]$previousAdoptedEvent.prior_state -ne 'validated' -or
+            [string]$previousValidatedEvent.prior_state -ne 'completed' -or
+            [string]$previousAdoptedEvent.prev_hash -ne
+                [string]$previousValidatedEvent.hash -or
+            [string]$previousValidatedEvent.prev_hash -ne
+                [string]$previousCompletedEvent.hash) {
+            throw (
+                'Recovery-cycle re-entry requires the immediately preceding ' +
+                'completed, validated, and adopted event chain.'
+            )
+        }
+        $resultPointers = @(
+            @($previousCompletedEvent.evidence) | Where-Object {
+                [string]$_ -like 'artifact:receipts/*.thread-result-receipt.json'
+            }
+        )
+        $dispositionPointers = @(
+            @($previousAdoptedEvent.evidence) | Where-Object {
+                [string]$_ -like 'artifact:receipts/*.disposition.json'
+            }
+        )
+        if ($resultPointers.Count -ne 1 -or $dispositionPointers.Count -ne 1) {
+            throw (
+                'Recovery-cycle re-entry requires exactly one prior result ' +
+                'receipt and one source-specific disposition receipt.'
+            )
+        }
+        $priorResultRelativePath = (
+            [string]$resultPointers[0]
+        ).Substring('artifact:'.Length).Replace('\', '/')
+        $priorDispositionRelativePath = (
+            [string]$dispositionPointers[0]
+        ).Substring('artifact:'.Length).Replace('\', '/')
+        $priorResultPath = Get-RunLocalReceiptPath `
+            -RunDirectory $RunDirectory -RelativePath $priorResultRelativePath `
+            -Label 'Prior review result receipt'
+        $priorDispositionPath = Get-RunLocalReceiptPath `
+            -RunDirectory $RunDirectory `
+            -RelativePath $priorDispositionRelativePath `
+            -Label 'Prior review disposition receipt'
+        $priorResult = Read-ThreadResultReceipt -Path $priorResultPath `
+            -ExpectedThreadId $ThreadId -ExpectedSourceNodeId $NodeId `
+            -RunDirectory $RunDirectory
+        $priorDisposition = Read-ReviewDispositionReceipt `
+            -Path $priorDispositionPath -RunDirectory $RunDirectory `
+            -ExpectedSourceNodeId $NodeId -ExpectedThreadId $ThreadId
+        if ([string]$priorResult.schema_version -ne '1.3' -or
+            [string]$priorResult.milestone_id -ne
+                [string]$recoveryReceipt.milestone_id -or
+            [string]$priorDisposition.milestone_id -ne
+                [string]$recoveryReceipt.milestone_id -or
+            [string]$priorDisposition.source_result_receipt_hash -ne
+                [string]$priorResult.receipt_hash) {
+            throw (
+                'Recovery-cycle re-entry does not match the prior verified ' +
+                'result, disposition, and active milestone.'
+            )
+        }
+        $priorCheckpointPath = Get-RunLocalReceiptPath `
+            -RunDirectory $RunDirectory `
+            -RelativePath ([string]$priorResult.checkpoint_material_path) `
+            -Label 'Prior review checkpoint material'
+        $priorCheckpointTextHash = Get-TextSha256 (
+            Get-Content -LiteralPath $priorCheckpointPath -Raw
+        )
+        if ($priorCheckpointTextHash -eq
+            [string]$recoveryReceipt.checkpoint_hash) {
+            throw (
+                'Recovery-cycle re-entry requires a new checkpoint; the prior ' +
+                'checkpoint cannot be replayed.'
+            )
+        }
+        $isRecoveryCycleReentry = $true
+    }
     $isActivatedLifecycleAdoption = (
         $AdoptActivatedLifecycle -and
         $priorState -eq 'planned' -and
@@ -584,7 +679,8 @@ try {
     }
 
     if ($Status -notin @($transitions[$priorState]) -and
-        -not $isActivatedLifecycleAdoption) {
+        -not $isActivatedLifecycleAdoption -and
+        -not $isRecoveryCycleReentry) {
         throw "Illegal state transition for '$NodeId': $priorState -> $Status."
     }
 
@@ -615,7 +711,8 @@ try {
     $kind = [string]$node.kind
     if ($kind -eq 'agent' -and $priorState -eq 'planned' -and
         $Status -ne 'launch_reserved' -and
-        -not $isActivatedLifecycleAdoption) {
+        -not $isActivatedLifecycleAdoption -and
+        -not $isRecoveryCycleReentry) {
         throw "Agent node '$NodeId' must reserve capacity before launch."
     }
     if ($kind -eq 'main' -and $priorState -eq 'planned' -and
@@ -1047,6 +1144,24 @@ try {
         if ([int]$recoveryReceipt.attempt -ne
             ($priorPendingForThread.Count + 1)) {
             throw 'Recovery attempts must be recorded once in sequential order.'
+        }
+        if ([string]$recoveryReceipt.schema_version -eq '1.2') {
+            $event['recovery_cycle_id'] =
+                [string]$recoveryReceipt.recovery_cycle_id
+            $event['recovery_milestone_id'] =
+                [string]$recoveryReceipt.milestone_id
+            $event['recovery_milestone_activation_receipt_hash'] =
+                [string]$recoveryReceipt.milestone_activation_receipt_hash
+            $event['recovery_checkpoint_hash'] =
+                [string]$recoveryReceipt.checkpoint_hash
+            $event['recovery_input_manifest_hash'] =
+                [string]$recoveryReceipt.input_manifest_hash
+            if ($isRecoveryCycleReentry) {
+                $event['previous_adopted_event_sequence'] =
+                    [int]$previousAdoptedEvent.sequence
+                $event['previous_adopted_event_hash'] =
+                    [string]$previousAdoptedEvent.hash
+            }
         }
     }
     if ($ModelVerificationState -eq 'unverified') {
