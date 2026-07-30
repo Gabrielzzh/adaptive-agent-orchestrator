@@ -3,12 +3,16 @@ param(
     [Parameter(Mandatory)]
     [string] $PlanPath,
 
-    [string] $WorkspaceRoot
+    [string] $WorkspaceRoot,
+
+    [string] $ExistingRunDirectory
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:Errors = [System.Collections.Generic.List[string]]::new()
+$scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $scriptRoot 'Orchestration.Common.ps1')
 
 function Add-PlanError {
     param([string] $Message)
@@ -100,12 +104,38 @@ function Get-NormalizedScope {
 
 $resolvedPlan = Resolve-Path -LiteralPath $PlanPath
 $plan = Get-Content -LiteralPath $resolvedPlan -Raw | ConvertFrom-Json -Depth 100
+$effectivePolicyVersion = [string](Get-PlanProperty $plan 'policy_version')
 
 if ((Get-PlanProperty $plan 'schema_version') -ne '1.0') {
     Add-PlanError "schema_version must be '1.0'."
 }
-if ((Get-PlanProperty $plan 'policy_version') -ne '0.7.3') {
-    Add-PlanError "policy_version must be '0.7.3'."
+if ((Get-PlanProperty $plan 'policy_version') -ne
+    $script:OrchestrationCurrentPolicyVersion) {
+    if ([string]::IsNullOrWhiteSpace($ExistingRunDirectory)) {
+        Add-PlanError (
+            "policy_version must be '$script:OrchestrationCurrentPolicyVersion' " +
+            'for a new plan; an older immutable run requires ' +
+            '-ExistingRunDirectory and a verified activation receipt.'
+        )
+    } else {
+        try {
+            $runPlan = [IO.Path]::GetFullPath(
+                (Join-Path $ExistingRunDirectory 'plan.json')
+            )
+            if (-not [string]::Equals(
+                $runPlan,
+                [IO.Path]::GetFullPath([string]$resolvedPlan.Path),
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+                throw 'ExistingRunDirectory does not own the supplied plan.'
+            }
+            $policy = Resolve-OrchestrationRunPolicy `
+                -RunDirectory $ExistingRunDirectory
+            $effectivePolicyVersion = [string]$policy.effective_policy_version
+        } catch {
+            Add-PlanError $_.Exception.Message
+        }
+    }
 }
 $null = Require-Text $plan 'run_id' 'Plan'
 $null = Require-Text $plan 'goal' 'Plan'
@@ -1100,6 +1130,7 @@ if ($script:Errors.Count -gt 0) {
     valid = $true
     run_id = Get-PlanProperty $plan 'run_id'
     policy_version = Get-PlanProperty $plan 'policy_version'
+    effective_policy_version = $effectivePolicyVersion
     node_count = $nodes.Count
     agent_node_count = $agentNodes.Count
     verification_nodes = $verificationNodes.Count

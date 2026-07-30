@@ -454,7 +454,7 @@ try {
     $calibrationAdd = & $calibrationScript -Action Add `
         -ProjectRoot $calibrationProject -RunDirectory $reconcileRun `
         -MinWindowUsed 20 -AppVersion '26.7.26' -HostKind 'desktop' `
-        -ExecutionMode local -PolicyVersion '0.7.3' |
+        -ExecutionMode local -PolicyVersion '0.7.4' |
         ConvertFrom-Json -Depth 30
     Assert-True (
         $verifiedReceiptCount -gt 0 -and
@@ -477,7 +477,7 @@ try {
     $calibrationRepeat = & $calibrationScript -Action Add `
         -ProjectRoot $calibrationProject -RunDirectory $reconcileRun `
         -MinWindowUsed 20 -AppVersion '26.7.26' -HostKind 'desktop' `
-        -ExecutionMode local -PolicyVersion '0.7.3' |
+        -ExecutionMode local -PolicyVersion '0.7.4' |
         ConvertFrom-Json -Depth 30
     Assert-True (
         $calibrationRepeat.added -eq 0 -and
@@ -496,7 +496,7 @@ try {
         & $calibrationScript -Action Add -ProjectRoot $calibrationProject `
             -RunDirectory $reconcileRun -AppVersion '26.7.26' `
             -HostKind 'desktop' -ExecutionMode local `
-            -PolicyVersion '0.7.3' | Out-Null
+            -PolicyVersion '0.7.4' | Out-Null
     } 'hash mismatch' 'Calibration must reject a tampered receipt.'
     Set-Content -LiteralPath $adoptedReceiptPath -Value $adoptedReceiptRaw
 
@@ -518,7 +518,7 @@ try {
             app_version = '26.7.26'
             host_kind = 'desktop'
             execution_mode = 'local'
-            policy_version = '0.7.3'
+            policy_version = '0.7.4'
         } | ConvertTo-Json -Compress))
     }
     $seedCalibrationLines.Add(([ordered]@{
@@ -1626,7 +1626,7 @@ try {
     ) -RunDirectory $runDirectory -SkillRoot $skillRoot |
         ConvertFrom-Json -Depth 100
     Assert-True (
-        [string]$measureReport.policy_version -eq '0.7.3' -and
+        [string]$measureReport.policy_version -eq '0.7.4' -and
         @($measureReport.result_receipts).Count -ge 1
     ) (
         'Measure-OrchestrationRun must report the run policy version and receipts.'
@@ -3739,6 +3739,13 @@ try {
         'Durable missing-final recovery protocol should pass its attack suite.'
     )
     $script:assertionCount += [int]$recoveryProtocol.assertions
+    $policyActivation = & (
+        Join-Path $scriptRoot 'Test-RunPolicyActivation.ps1'
+    ) | ConvertFrom-Json -Depth 20
+    Assert-True $policyActivation.pass (
+        'Immutable predecessor run policy activation should pass its attack suite.'
+    )
+    $script:assertionCount += [int]$policyActivation.assertions
 
     [pscustomobject]@{
         passed = $true
@@ -3773,6 +3780,7 @@ try {
         task_completion_receipt_verified = $true
         durable_review_profile_verified = $true
         durable_result_recovery_verified = $true
+        run_policy_activation_verified = $true
     } | ConvertTo-Json -Depth 5
 }
 finally {

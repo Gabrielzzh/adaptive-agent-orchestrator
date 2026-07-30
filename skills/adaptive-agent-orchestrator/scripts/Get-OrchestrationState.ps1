@@ -33,6 +33,8 @@ if ($runMetadata.run_id -ne $plan.run_id -or
     $events[0].workspace_root -ne $runMetadata.workspace_root) {
     throw 'run.json metadata is inconsistent with the immutable plan or journal.'
 }
+$runPolicy = Resolve-OrchestrationRunPolicy -RunDirectory $RunDirectory `
+    -Events $events
 $retryUsed = 0
 $nodeStates = foreach ($node in $plan.nodes) {
     $history = @($events | Where-Object { $_.node_id -eq $node.id })
@@ -40,26 +42,27 @@ $nodeStates = foreach ($node in $plan.nodes) {
     $lastThread = $history | Where-Object {
         -not [string]::IsNullOrWhiteSpace([string]$_.thread_id)
     } | Select-Object -Last 1
-    $lastMaterialization = $history | Where-Object {
-        [string]$_.status -eq 'materialized'
+    $lastModelObservation = $history | Where-Object {
+        [string]$_.status -eq 'materialized' -or
+        $null -ne $_.PSObject.Properties['model_verification_state']
     } | Select-Object -Last 1
-    $modelVerificationState = if ($lastMaterialization) {
-        $property = $lastMaterialization.PSObject.Properties[
+    $modelVerificationState = if ($lastModelObservation) {
+        $property = $lastModelObservation.PSObject.Properties[
             'model_verification_state'
         ]
         if ($null -ne $property -and
             -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
             [string]$property.Value
         } elseif (-not [string]::IsNullOrWhiteSpace(
-            [string]$lastMaterialization.model_id
+            [string]$lastModelObservation.model_id
         )) {
             'verified'
         } else {
             'unverified'
         }
     } else { $null }
-    $modelVerificationEvidence = if ($lastMaterialization) {
-        $property = $lastMaterialization.PSObject.Properties[
+    $modelVerificationEvidence = if ($lastModelObservation) {
+        $property = $lastModelObservation.PSObject.Properties[
             'model_verification_evidence'
         ]
         if ($null -ne $property) { $property.Value } else { $null }
@@ -87,9 +90,9 @@ $nodeStates = foreach ($node in $plan.nodes) {
         status = if ($latest) { $latest.status } else { 'planned' }
         thread_id = if ($lastThread) { $lastThread.thread_id } else { $null }
         planned_model = if ($node.kind -eq 'agent') { $node.model } else { $null }
-        actual_model = if ($lastMaterialization -and
+        actual_model = if ($lastModelObservation -and
             $modelVerificationState -eq 'verified') {
-            $lastMaterialization.model_id
+            $lastModelObservation.model_id
         } else { $null }
         actual_model_verification = $modelVerificationState
         actual_model_verification_evidence = $modelVerificationEvidence
@@ -131,6 +134,13 @@ $ready = @(
 $state = [ordered]@{
     schema_version = '1.0'
     policy_version = $plan.policy_version
+    effective_policy_version = $runPolicy.effective_policy_version
+    policy_activation_receipt = if ($runPolicy.activation_receipt_path) {
+        [ordered]@{
+            path = $runPolicy.activation_receipt_path
+            sha256 = $runPolicy.activation_receipt_hash
+        }
+    } else { $null }
     run_id = $plan.run_id
     plan_hash = $runMetadata.plan_hash
     workspace_root = $runMetadata.workspace_root
@@ -139,7 +149,12 @@ $state = [ordered]@{
     journal_head = if ($events.Count) { $events[-1].hash } else { $null }
     launch_attempts = @($events | Where-Object { $_.status -eq 'launch_reserved' }).Count
     materialized_workers = @(
-        $events | Where-Object { $_.status -eq 'materialized' }
+        $nodeStates | Where-Object {
+            $_.kind -eq 'agent' -and $_.status -in @(
+                'materialized', 'running', 'needs_input', 'result_pending',
+                'replacement_pending'
+            )
+        }
     ).Count
     retry_attempts = $retryUsed
     ready_nodes = $ready

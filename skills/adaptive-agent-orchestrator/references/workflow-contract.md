@@ -5,7 +5,7 @@
 A durable plan is a JSON object with:
 
 - `schema_version`: currently `"1.0"`;
-- `policy_version`: currently `"0.7.3"`, used to validate and replay the run;
+- `policy_version`: currently `"0.7.4"`, used to validate and replay the run;
 - `run_id`: unique, stable identifier;
 - `orchestrator`: the single controller identity and delegation authority;
 - `goal`: concrete outcome;
@@ -26,6 +26,31 @@ explicitly coordination-only or review-only. Read
 [context-efficiency.md](context-efficiency.md) before dispatch. A structurally
 valid graph is still rejected when it repeats context, front-loads multiple
 workers, or bypasses progressive dispatch.
+
+### Immutable predecessor policy activation
+
+Do not rewrite an older run's `plan.json`, `run.json`, or `events.jsonl`.
+Activate a supported immutable predecessor only with:
+
+```powershell
+pwsh -File scripts/New-RunPolicyActivationReceipt.ps1 `
+  -RunDirectory <existing-run> `
+  -AuthorizationMaterialPath <existing-run>/materials/policy-migration-authorization.md `
+  -ActivationKey "controller:<stable-authority-reference>"
+
+pwsh -File scripts/Test-OrchestrationPlan.ps1 `
+  -PlanPath <existing-run>/plan.json -WorkspaceRoot <project-root> `
+  -ExistingRunDirectory <existing-run>
+```
+
+The append-once receipt binds the predecessor plan hash, run identity,
+journal head and event count, controller authorization, every existing
+run-local evidence artifact, and the derived source-node/role/thread/checkpoint/
+input/recovery/replacement obligations. A changed or substituted binding fails
+closed. Post-activation events retain the predecessor `policy_version` and add
+the effective runtime policy plus the activation receipt path and hash.
+Activation never satisfies a source result, disposition, independent re-review,
+or completion gate.
 
 Each node contains:
 
