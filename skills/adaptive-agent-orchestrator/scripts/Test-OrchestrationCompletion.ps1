@@ -21,6 +21,12 @@ $state = & (Join-Path $scriptRoot 'Get-OrchestrationState.ps1') `
 $root = (Resolve-Path -LiteralPath $run.workspace_root).Path.TrimEnd('\', '/')
 $errors = [Collections.Generic.List[string]]::new()
 $successStates = @('validated', 'adopted', 'archived')
+$unverifiedActualModels = @(
+    $state.nodes | Where-Object {
+        $_.kind -eq 'agent' -and
+        $_.actual_model_verification -eq 'unverified'
+    } | Select-Object -ExpandProperty id
+)
 
 foreach ($nodeId in @($plan.completion.required_nodes)) {
     $planNode = @($plan.nodes | Where-Object { $_.id -eq $nodeId }) |
@@ -275,5 +281,9 @@ if ($errors.Count) {
     review_sources = $reviewSourceCount
     review_decisions = $reviewDecisionCount
     canonical_review_findings = $canonicalReviewFindings.Count
+    model_verification = [ordered]@{
+        all_actual_models_verified = ($unverifiedActualModels.Count -eq 0)
+        unverified_node_ids = $unverifiedActualModels
+    }
     journal_head = $state.journal_head
 } | ConvertTo-Json -Depth 10

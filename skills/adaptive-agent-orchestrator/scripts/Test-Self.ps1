@@ -1641,8 +1641,8 @@ try {
             -RunDirectory $waveBindingRun -NodeId 'draft' `
             -Status 'materialized' -Message 'missing actual model' `
             -IdempotencyKey 'missing-actual-model' | Out-Null
-    } 'requires the actual ModelId' (
-        'Materialization must report the actual model.'
+    } "requires ModelVerificationState 'unverified'" (
+        'A hidden platform model must use the explicit unverified path.'
     )
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
@@ -1657,10 +1657,96 @@ try {
         -RunDirectory $waveBindingRun -NodeId 'draft' `
         -Status 'launch_reserved' -Message 'attempt forged wave' -Wave 99 `
         -IdempotencyKey 'wave-binding-draft' | Out-Null
+    & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+        -RunDirectory $waveBindingRun -NodeId 'draft' `
+        -Status 'materializing' -Message 'creation accepted' `
+        -IdempotencyKey 'wave-binding-materializing' | Out-Null
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $waveBindingRun -NodeId 'draft' `
+            -Status 'materialized' -Message 'unverified with requested model' `
+            -ThreadId 'opaque-thread-unverified' -ModelId 'gpt-5.6-sol' `
+            -ModelVerificationState 'unverified' `
+            -ModelVerificationEvidence 'observation:platform-model-not-exposed' `
+            -IdempotencyKey 'unverified-with-model' | Out-Null
+    } 'must leave ModelId empty' (
+        'An unverified route must not relabel the requested model as actual.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $waveBindingRun -NodeId 'draft' `
+            -Status 'materialized' -Message 'unverified without evidence' `
+            -ThreadId 'opaque-thread-unverified' `
+            -ModelVerificationState 'unverified' `
+            -IdempotencyKey 'unverified-without-evidence' | Out-Null
+    } 'requires ModelVerificationEvidence' (
+        'An unverified route must bind evidence for the platform limitation.'
+    )
+    & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+        -RunDirectory $waveBindingRun -NodeId 'draft' `
+        -Status 'materialized' -Message 'platform omitted actual model' `
+        -ThreadId 'opaque-thread-unverified' `
+        -ModelVerificationState 'unverified' `
+        -ModelVerificationEvidence 'observation:platform-model-not-exposed' `
+        -IdempotencyKey 'unverified-materialization' | Out-Null
+    $unverifiedState = & (Join-Path $scriptRoot 'Get-OrchestrationState.ps1') `
+        -RunDirectory $waveBindingRun | ConvertFrom-Json -Depth 100
+    $unverifiedDraft = $unverifiedState.nodes |
+        Where-Object { $_.id -eq 'draft' }
+    Assert-True (
+        $null -eq $unverifiedDraft.actual_model -and
+        $unverifiedDraft.planned_model -eq 'gpt-5.6-sol' -and
+        $unverifiedDraft.actual_model_verification -eq 'unverified' -and
+        $unverifiedDraft.actual_model_verification_evidence -eq
+            'observation:platform-model-not-exposed'
+    ) (
+        'State must keep the requested model separate from an unverified actual model.'
+    )
+    $unverifiedEventsPath = Join-Path $waveBindingRun 'events.jsonl'
+    $originalUnverifiedEventLines = @(
+        Get-Content -LiteralPath $unverifiedEventsPath
+    )
+    $tamperedUnverifiedEventLines = @($originalUnverifiedEventLines)
+    $tamperedUnverifiedEvent = $tamperedUnverifiedEventLines[-1] |
+        ConvertFrom-Json -AsHashtable -Depth 30
+    $tamperedUnverifiedEvent.model_verification_evidence =
+        'observation:requested-model-treated-as-actual'
+    $tamperedUnverifiedEventLines[-1] = (
+        $tamperedUnverifiedEvent | ConvertTo-Json -Compress -Depth 30
+    )
+    Set-Content -LiteralPath $unverifiedEventsPath `
+        -Value $tamperedUnverifiedEventLines
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Get-OrchestrationState.ps1') `
+            -RunDirectory $waveBindingRun | Out-Null
+    } 'Journal event hash mismatch' (
+        'Unverified-model evidence must be protected by the journal hash.'
+    )
+    Set-Content -LiteralPath $unverifiedEventsPath `
+        -Value $originalUnverifiedEventLines
+    $unverifiedReceipt = & (
+        Join-Path $scriptRoot 'New-OrchestrationTaskReceipt.ps1'
+    ) -RunDirectory $waveBindingRun -Outcome 'fallback-main' `
+        -Summary 'Platform did not expose the replacement model.' `
+        -FailureClass 'other' -FallbackAction 'Main agent retains ownership.' `
+        -Evidence @('observation:platform-model-not-exposed') `
+        -OutputPath (Join-Path $waveBindingRun (
+            'receipts/unverified.task-completion-receipt.json'
+        )) | ConvertFrom-Json -Depth 20
+    Assert-True (
+        $unverifiedReceipt.schema_version -eq '1.1' -and
+        -not $unverifiedReceipt.model_verification.all_actual_models_verified -and
+        'draft' -in @($unverifiedReceipt.model_verification.unverified_node_ids)
+    ) (
+        'Task receipts must preserve unverified actual-model status.'
+    )
     $waveBindingEvent = Get-Content -LiteralPath (
         Join-Path $waveBindingRun 'events.jsonl'
     ) | Select-Object -Last 1 | ConvertFrom-Json
-    Assert-True ($waveBindingEvent.wave -eq 1) (
+    Assert-True (
+        $waveBindingEvent.wave -eq 1 -and
+        $waveBindingEvent.model_verification_state -eq 'unverified'
+    ) (
         'Runtime events must use the immutable plan wave, not caller input.'
     )
 
@@ -1735,7 +1821,8 @@ try {
     )
     Assert-True (
         $draftState.planned_model -eq 'gpt-5.6-sol' -and
-        $draftState.actual_model -eq 'gpt-5.6-sol'
+        $draftState.actual_model -eq 'gpt-5.6-sol' -and
+        $draftState.actual_model_verification -eq 'verified'
     ) 'Reducer should retain planned and actual model identity.'
     Assert-True ($draftState.artifact -eq 'artifacts/draft/output.md') (
         'Reducer should retain the last non-null artifact.'
@@ -3299,6 +3386,8 @@ try {
         -Path $taskReceiptPath -RunDirectory $runDirectory
     Assert-True (
         $taskReceipt.outcome -eq 'completed' -and
+        $taskReceipt.schema_version -eq '1.1' -and
+        $taskReceipt.model_verification.all_actual_models_verified -and
         $verifiedTaskReceipt.receipt_hash -eq $taskReceipt.receipt_hash
     ) 'A completed durable run must produce a verifiable task-level receipt.'
     Assert-ThrowsLike {

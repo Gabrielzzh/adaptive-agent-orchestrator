@@ -22,6 +22,9 @@ param(
 
     [string] $ThreadId,
     [string] $ModelId,
+    [ValidateSet('verified', 'unverified')]
+    [string] $ModelVerificationState,
+    [string] $ModelVerificationEvidence,
     [string] $Artifact,
     [string] $Decision,
     [string] $HumanActor,
@@ -106,15 +109,49 @@ if ($ModelId -and $ModelId -notin @(
     throw "Unsupported actual model '$ModelId'."
 }
 if ($node.kind -eq 'agent' -and $Status -eq 'materialized') {
-    if ([string]::IsNullOrWhiteSpace($ModelId)) {
-        throw 'Agent materialization requires the actual ModelId.'
+    if ([string]::IsNullOrWhiteSpace($ModelVerificationState)) {
+        if ([string]::IsNullOrWhiteSpace($ModelId)) {
+            throw (
+                'Agent materialization without an exposed actual model requires ' +
+                "ModelVerificationState 'unverified'."
+            )
+        }
+        $ModelVerificationState = 'verified'
     }
-    if ($ModelId -ne [string]$node.model) {
-        throw (
-            "Actual model '$ModelId' differs from planned model " +
-            "'$($node.model)'; obtain confirmation and create a revised plan."
-        )
+    if ($ModelVerificationState -eq 'verified') {
+        if ([string]::IsNullOrWhiteSpace($ModelId)) {
+            throw 'Verified agent materialization requires the actual ModelId.'
+        }
+        if ($ModelId -ne [string]$node.model) {
+            throw (
+                "Actual model '$ModelId' differs from planned model " +
+                "'$($node.model)'; obtain confirmation and create a revised plan."
+            )
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ModelVerificationEvidence)) {
+            throw 'Verified materialization does not accept unverified-model evidence.'
+        }
+    } else {
+        if (-not [string]::IsNullOrWhiteSpace($ModelId)) {
+            throw (
+                'Unverified materialization must leave ModelId empty; ' +
+                'the requested model is not actual-model evidence.'
+            )
+        }
+        if ([string]::IsNullOrWhiteSpace($ModelVerificationEvidence) -or
+            $ModelVerificationEvidence -notmatch '^(source|observation):\S.+$') {
+            throw (
+                'Unverified materialization requires ModelVerificationEvidence ' +
+                'using source:value or observation:value.'
+            )
+        }
     }
+} elseif (-not [string]::IsNullOrWhiteSpace($ModelVerificationState) -or
+    -not [string]::IsNullOrWhiteSpace($ModelVerificationEvidence)) {
+    throw (
+        'ModelVerificationState and ModelVerificationEvidence are only valid ' +
+        'for agent materialization.'
+    )
 }
 $usageDelta = $InputTokensDelta + $OutputTokensDelta
 if ($CoordinationTokensDelta -gt $usageDelta) {
@@ -348,8 +385,7 @@ if ($Status -eq 'failed' -and $ErrorClass -eq 'startup_unmaterialized' -and
         'ReconciliationReceiptPath.'
     )
 }
-$requestFingerprint = Get-TextSha256 (
-    [ordered]@{
+$requestPayload = [ordered]@{
         node_id = $NodeId
         status = $Status
         message = $Message
@@ -373,7 +409,13 @@ $requestFingerprint = Get-TextSha256 (
         replacement_receipt_hash = if ($replacementReceipt) {
             [string]$replacementReceipt.receipt_hash
         } else { $null }
-    } | ConvertTo-Json -Compress -Depth 10
+}
+if ($ModelVerificationState -eq 'unverified') {
+    $requestPayload['model_verification_state'] = $ModelVerificationState
+    $requestPayload['model_verification_evidence'] = $ModelVerificationEvidence
+}
+$requestFingerprint = Get-TextSha256 (
+    $requestPayload | ConvertTo-Json -Compress -Depth 10
 )
 $archiveReceiptHash = $null
 $archiveReceiptRelativePath = $null
@@ -813,6 +855,10 @@ try {
         result_receipt_hash = $archiveReceiptHash
         idempotency_key = $IdempotencyKey
         request_fingerprint = $requestFingerprint
+    }
+    if ($ModelVerificationState -eq 'unverified') {
+        $event['model_verification_state'] = $ModelVerificationState
+        $event['model_verification_evidence'] = $ModelVerificationEvidence
     }
     $event.hash = Get-OrchestrationEventHash ([pscustomobject]$event)
     Add-Content -LiteralPath $eventsPath -Value ($event | ConvertTo-Json -Compress)

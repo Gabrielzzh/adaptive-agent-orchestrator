@@ -31,6 +31,16 @@ function Get-OrchestrationEventHash {
         'result_receipt_path', 'result_receipt_hash', 'idempotency_key',
         'request_fingerprint'
     )
+    if ($null -ne $Event.PSObject.Properties['model_verification_state'] -or
+        $null -ne $Event.PSObject.Properties['model_verification_evidence']) {
+        $modelIndex = [Array]::IndexOf($keys, 'model_id') + 1
+        $keys = @(
+            $keys[0..($modelIndex - 1)]
+            'model_verification_state'
+            'model_verification_evidence'
+            $keys[$modelIndex..($keys.Count - 1)]
+        )
+    }
     $payload = [ordered]@{}
     foreach ($key in $keys) {
         $property = $Event.PSObject.Properties[$key]
@@ -52,11 +62,17 @@ function Read-OrchestrationTaskReceipt {
     $receipt = Get-Content -LiteralPath $Path -Raw |
         ConvertFrom-Json -Depth 30 -DateKind String
     $payload = [ordered]@{}
-    foreach ($name in @(
+    $receiptKeys = @(
         'schema_version', 'run_id', 'plan_hash', 'journal_head', 'outcome',
         'completed_at_utc', 'summary', 'failure_class', 'fallback_action',
         'evidence'
-    )) {
+    )
+    if ([string]$receipt.schema_version -eq '1.1') {
+        $receiptKeys += 'model_verification'
+    } elseif ([string]$receipt.schema_version -ne '1.0') {
+        throw "Unsupported task completion receipt schema '$($receipt.schema_version)'."
+    }
+    foreach ($name in $receiptKeys) {
         if ($null -eq $receipt.PSObject.Properties[$name]) {
             throw "Task completion receipt is missing '$name'."
         }
