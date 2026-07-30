@@ -389,7 +389,7 @@ foreach ($entry in $cleanEvidence) {
     if ($entry -notmatch '^(artifact|test|source|observation):\S.+$') {
         throw "Evidence must use kind:value format: artifact, test, source, or observation."
     }
-    if ($entry -match ',(artifact|test|source|observation):') {
+    if ($entry -match ',\s*(artifact|test|source|observation):') {
         throw (
             'Evidence contains multiple typed pointers joined into one value. ' +
             'Pass each pointer as a separate Evidence array item.'

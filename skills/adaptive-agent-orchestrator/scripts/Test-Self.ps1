@@ -3567,31 +3567,55 @@ try {
         'Completion evidence must use a typed evidence pointer.'
     )
     $joinedJournalPath = Join-Path $questionRun 'events.jsonl'
-    $joinedJournalHashBefore = (
-        Get-FileHash -LiteralPath $joinedJournalPath -Algorithm SHA256
-    ).Hash
-    $joinedEvidenceCaught = $false
-    try {
-        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
-            -RunDirectory $questionRun -NodeId 'draft' -Status 'completed' `
-            -Message 'joined evidence must fail before journal append' `
-            -Evidence @(
-                'artifact:artifacts/draft/output.md,' +
-                'observation:joined-by-cli'
-            ) -IdempotencyKey 'question-joined-evidence' | Out-Null
+    $joinedEvidenceVariants = [Collections.Generic.List[string]]::new()
+    foreach ($leftType in @('artifact', 'test', 'source', 'observation')) {
+        foreach ($rightType in @('artifact', 'test', 'source', 'observation')) {
+            $joinedEvidenceVariants.Add(
+                "${leftType}:primary, ${rightType}:secondary"
+            )
+        }
     }
-    catch {
-        $joinedEvidenceCaught = (
-            $_.Exception.Message -like '*multiple typed pointers*'
+    foreach ($variant in @(
+        'artifact:primary,observation:zero-space',
+        'artifact:primary,   observation:multi-space',
+        "artifact:primary,`ttest:tab",
+        'ArTiFaCt:primary, TeSt:mixed-case',
+        'source:first, observation:second, test:third, artifact:fourth'
+    )) {
+        $joinedEvidenceVariants.Add($variant)
+    }
+    $joinedVariantIndex = 0
+    foreach ($joinedEvidenceValue in $joinedEvidenceVariants) {
+        $joinedVariantIndex += 1
+        $joinedJournalHashBefore = (
+            Get-FileHash -LiteralPath $joinedJournalPath -Algorithm SHA256
+        ).Hash
+        $joinedEvidenceCaught = $false
+        try {
+            & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+                -RunDirectory $questionRun -NodeId 'draft' -Status 'completed' `
+                -Message 'joined evidence must fail before journal append' `
+                -Evidence @($joinedEvidenceValue) `
+                -IdempotencyKey "question-joined-evidence-$joinedVariantIndex" |
+                Out-Null
+        }
+        catch {
+            $joinedEvidenceCaught = (
+                $_.Exception.Message -like '*multiple typed pointers*'
+            )
+        }
+        Assert-True $joinedEvidenceCaught (
+            "Joined Evidence variant $joinedVariantIndex must be rejected."
+        )
+        Assert-True (
+            (
+                Get-FileHash -LiteralPath $joinedJournalPath -Algorithm SHA256
+            ).Hash -eq $joinedJournalHashBefore
+        ) (
+            "Rejected Evidence variant $joinedVariantIndex must not change " +
+            'the immutable journal.'
         )
     }
-    Assert-True $joinedEvidenceCaught (
-        'A comma-joined typed Evidence value must fail before journal append.'
-    )
-    Assert-True (
-        (Get-FileHash -LiteralPath $joinedJournalPath -Algorithm SHA256).Hash -eq
-            $joinedJournalHashBefore
-    ) 'Rejected joined Evidence must not change the immutable journal.'
     $commaObservationEvent = & (
         Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1'
     ) -RunDirectory $questionRun -NodeId 'draft' -Status 'completed' `
