@@ -263,16 +263,35 @@ try {
     foreach ($status in @(
         'launch_reserved', 'materializing', 'materialized', 'running'
     )) {
-        $model = if ($status -eq 'materialized') { 'gpt-5.6-sol' } else { $null }
+        $modelArguments = if ($status -eq 'materialized') {
+            @{
+                ModelVerificationState = 'unverified'
+                ModelVerificationEvidence = (
+                    'observation:platform-model-not-exposed'
+                )
+            }
+        } else { @{} }
         $thread = if ($status -in @('materialized', 'running')) {
             'legacy-review-thread'
         } else { $null }
         & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
             -RunDirectory $run -NodeId 'review' -Status $status `
             -Message "legacy review $status" -ThreadId $thread `
-            -ModelId $model -IdempotencyKey "legacy-review-$status" |
+            @modelArguments `
+            -IdempotencyKey "legacy-review-$status" |
             Out-Null
     }
+    $unverifiedMaterializationState = & (
+        Join-Path $scriptRoot 'Get-OrchestrationState.ps1'
+    ) -RunDirectory $run | ConvertFrom-Json -Depth 50
+    $unverifiedReview = @($unverifiedMaterializationState.nodes |
+        Where-Object { $_.id -eq 'review' }) | Select-Object -First 1
+    Assert-True (
+        $null -eq $unverifiedReview.actual_model -and
+        $unverifiedReview.actual_model_verification -eq 'unverified'
+    ) (
+        'Recovery lifecycle must accept an honest unverified actual model.'
+    )
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
             -RunDirectory $run -NodeId 'review' -Status 'result_pending' `
@@ -420,6 +439,108 @@ try {
         -ThreadId 'replacement-review-thread' `
         -IdempotencyKey 'replacement-running' | Out-Null
 
+    $replacementRecoveryPaths = [Collections.Generic.List[string]]::new()
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $replacementProgressPath = Join-Path $materials (
+            "replacement-progress-$attempt.json"
+        )
+        [ordered]@{
+            schemaVersion = 1
+            thread = [ordered]@{ threadId = 'replacement-review-thread' }
+            page = [ordered]@{ order = 'newest_first' }
+            latestAssistantMessageId = $null
+            turns = @(
+                [ordered]@{
+                    id = "replacement-progress-turn-$attempt"
+                    status = 'completed'
+                    items = @(
+                        [ordered]@{
+                            type = 'agentMessage'
+                            phase = 'commentary'
+                            text = "Replacement progress without final $attempt."
+                        }
+                    )
+                }
+            )
+        } | ConvertTo-Json -Depth 20 |
+            Set-Content -LiteralPath $replacementProgressPath
+        $replacementRecoveryPath = Join-Path $receipts (
+            "review.replacement.attempt-$attempt.result-recovery.json"
+        )
+        $replacementRecovery = & (
+            Join-Path $scriptRoot 'New-ThreadResultRecoveryReceipt.ps1'
+        ) -RunDirectory $run -SourceNodeId 'review' `
+            -OriginalThreadId 'replacement-review-thread' `
+            -CheckpointManifestPath $checkpointPath `
+            -InputManifestPath $inputPath `
+            -ThreadReadPath $replacementProgressPath `
+            -RecoveryStage 'replacement' `
+            -ReplacementContinuityReceiptPath $replacementPath `
+            -Attempt $attempt -OutputPath $replacementRecoveryPath |
+            ConvertFrom-Json -Depth 30
+        $replacementRecoveryPaths.Add($replacementRecoveryPath)
+        Assert-True (
+            $replacementRecovery.recovery_stage -eq 'replacement' -and
+            $replacementRecovery.replacement_continuity_receipt_hash -eq
+                $replacement.receipt_hash
+        ) (
+            'Replacement recovery must bind its stage and parent continuity.'
+        )
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $run -NodeId 'review' -Status 'result_pending' `
+            -Message "replacement final missing after recovery $attempt" `
+            -ThreadId 'replacement-review-thread' `
+            -ErrorClass 'final_missing_with_progress_evidence' `
+            -RecoveryReceiptPath (
+                [IO.Path]::GetRelativePath($run, $replacementRecoveryPath)
+            ) -IdempotencyKey "replacement-result-pending-$attempt" | Out-Null
+        if ($attempt -lt 3) {
+            & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+                -RunDirectory $run -NodeId 'review' -Status 'running' `
+                -Message "bounded replacement recovery $($attempt + 1)" `
+                -ThreadId 'replacement-review-thread' `
+                -IdempotencyKey "replacement-recovery-running-$attempt" |
+                Out-Null
+        }
+    }
+    Assert-True ($replacementRecovery.outcome -eq 'recovery-exhausted') (
+        'A replacement source receives its own bounded 3/3 recovery epoch.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $run | Out-Null
+    } 'not validated' (
+        'Exhausted replacement recovery must keep completion blocked.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ReplacementContinuityReceipt.ps1') `
+            -RunDirectory $run -SourceNodeId 'review' `
+            -OriginalThreadId 'replacement-review-thread' `
+            -ReplacementThreadId 'forbidden-second-replacement' `
+            -CheckpointManifestPath $checkpointPath `
+            -InputManifestPath $inputPath `
+            -RecoveryReceiptPaths @($replacementRecoveryPaths) `
+            -AuthorizationMaterialPath $authorizationPath `
+            -ActivationKey 'controller:replacement-of-replacement' `
+            -OutputPath (Join-Path $receipts (
+                'review.second-replacement-continuity.json'
+            )) | Out-Null
+    } 'recovery stage' (
+        'Replacement-stage recovery cannot authorize replacement-of-replacement.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $run -NodeId 'review' -Status 'replacement_pending' `
+            -Message 'forbidden replacement-of-replacement' `
+            -ThreadId 'replacement-review-thread' `
+            -ReplacementContinuityReceiptPath (
+                [IO.Path]::GetRelativePath($run, $replacementPath)
+            ) -IdempotencyKey 'forbidden-replacement-of-replacement' |
+            Out-Null
+    } 'cannot authorize a replacement-of-replacement' (
+        'The lifecycle must remain blocked after replacement recovery exhausts.'
+    )
+
     $finalCapturePath = Join-Path $materials 'replacement-final.json'
     [ordered]@{
         schemaVersion = 1
@@ -509,8 +630,8 @@ try {
         [string]$_.id -eq 'review'
     }) | Select-Object -First 1
     Assert-True (
-        $reviewState.status -eq 'running'
-    ) 'Replacement execution should remain incomplete until a final result event.'
+        $reviewState.status -eq 'result_pending'
+    ) 'Replacement execution should remain blocked until a final result event.'
 
     $fixturePath = Join-Path $skillRoot (
         'references/durable-recovery-adoption-fixtures.json'
@@ -532,6 +653,7 @@ try {
         legacy_adoption_verified = $true
         bounded_recovery_verified = $true
         replacement_continuity_verified = $true
+        replacement_recovery_epoch_verified = $true
         cross_source_rejected = $true
         consumer_result_only = $true
     } | ConvertTo-Json -Depth 10

@@ -86,7 +86,8 @@ for ($index = 0; $index -lt 3; $index++) {
     )
     $recovery = Read-ThreadResultRecoveryReceipt -Path $recoveryPath `
         -RunDirectory $runRoot -ExpectedSourceNodeId $SourceNodeId `
-        -ExpectedOriginalThreadId $OriginalThreadId
+        -ExpectedOriginalThreadId $OriginalThreadId `
+        -ExpectedRecoveryStage 'original'
     if ([int]$recovery.attempt -ne ($index + 1) -or
         [string]$recovery.checkpoint_hash -ne $checkpointHash -or
         [string]$recovery.input_manifest_hash -ne $inputHash) {

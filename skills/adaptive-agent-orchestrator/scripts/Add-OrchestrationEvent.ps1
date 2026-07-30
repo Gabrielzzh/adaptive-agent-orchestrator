@@ -599,6 +599,32 @@ try {
             throw 'Same-source recovery must keep the original thread.'
         }
     }
+    if ($priorState -eq 'result_pending' -and
+        $Status -eq 'replacement_pending') {
+        $lastPending = @($history | Where-Object {
+            [string]$_.status -eq 'result_pending'
+        }) | Select-Object -Last 1
+        if (-not [string]::IsNullOrWhiteSpace(
+            [string]$lastPending.recovery_receipt_path
+        )) {
+            $pendingRecovery = Read-ThreadResultRecoveryReceipt `
+                -Path (Join-Path $RunDirectory (
+                    [string]$lastPending.recovery_receipt_path
+                )) -RunDirectory $RunDirectory `
+                -ExpectedSourceNodeId $NodeId `
+                -ExpectedOriginalThreadId ([string]$lastPending.thread_id)
+            $stageProperty = $pendingRecovery.PSObject.Properties[
+                'recovery_stage'
+            ]
+            if ($null -ne $stageProperty -and
+                [string]$stageProperty.Value -eq 'replacement') {
+                throw (
+                    'A replacement source may use bounded same-thread recovery ' +
+                    'but cannot authorize a replacement-of-replacement.'
+                )
+            }
+        }
+    }
     if ($priorState -eq 'replacement_pending' -and $Status -eq 'running') {
         $lastReplacement = @($history | Where-Object {
             [string]$_.status -eq 'replacement_pending'

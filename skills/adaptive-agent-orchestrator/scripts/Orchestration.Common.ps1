@@ -513,7 +513,9 @@ function Read-ThreadResultRecoveryReceipt {
         [Parameter(Mandatory)][string] $Path,
         [Parameter(Mandatory)][string] $RunDirectory,
         [Parameter(Mandatory)][string] $ExpectedSourceNodeId,
-        [Parameter(Mandatory)][string] $ExpectedOriginalThreadId
+        [Parameter(Mandatory)][string] $ExpectedOriginalThreadId,
+        [ValidateSet('original', 'replacement')]
+        [string] $ExpectedRecoveryStage
     )
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "Thread result recovery receipt does not exist: $Path"
@@ -531,6 +533,19 @@ function Read-ThreadResultRecoveryReceipt {
         'attempt', 'outcome', 'previous_receipt_path',
         'previous_receipt_hash', 'created_at_utc', 'receipt_hash'
     )
+    $recoveryStage = if ([string]$receipt.schema_version -eq '1.1') {
+        'replacement'
+    } elseif ([string]$receipt.schema_version -eq '1.0') {
+        'original'
+    } else {
+        throw 'Thread result recovery receipt has an unsupported schema.'
+    }
+    if ($recoveryStage -eq 'replacement') {
+        $required += @(
+            'recovery_stage', 'replacement_continuity_receipt_path',
+            'replacement_continuity_receipt_hash'
+        )
+    }
     $payload = [ordered]@{}
     foreach ($name in $required) {
         if ($null -eq $receipt.PSObject.Properties[$name]) {
@@ -538,10 +553,34 @@ function Read-ThreadResultRecoveryReceipt {
         }
         $payload[$name] = $receipt.$name
     }
-    if ([string]$receipt.schema_version -ne '1.0' -or
-        [string]$receipt.source_node_id -ne $ExpectedSourceNodeId -or
+    if ([string]$receipt.source_node_id -ne $ExpectedSourceNodeId -or
         [string]$receipt.original_thread_id -ne $ExpectedOriginalThreadId) {
         throw 'Thread result recovery receipt does not match its source.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedRecoveryStage) -and
+        $recoveryStage -ne $ExpectedRecoveryStage) {
+        throw 'Thread result recovery receipt does not match its recovery stage.'
+    }
+    if ($recoveryStage -eq 'replacement') {
+        if ([string]$receipt.recovery_stage -ne 'replacement') {
+            throw 'Replacement recovery receipt has an invalid stage.'
+        }
+        $replacementPath = Get-RunLocalReceiptPath `
+            -RunDirectory $RunDirectory `
+            -RelativePath ([string]$receipt.replacement_continuity_receipt_path) `
+            -Label 'Replacement continuity receipt'
+        $replacement = Read-ReplacementContinuityReceipt -Path $replacementPath `
+            -RunDirectory $RunDirectory `
+            -ExpectedSourceNodeId $ExpectedSourceNodeId `
+            -ExpectedReplacementThreadId $ExpectedOriginalThreadId
+        if ([string]$replacement.receipt_hash -ne
+            [string]$receipt.replacement_continuity_receipt_hash -or
+            [string]$replacement.checkpoint_hash -ne
+                [string]$receipt.checkpoint_hash -or
+            [string]$replacement.input_manifest_hash -ne
+                [string]$receipt.input_manifest_hash) {
+            throw 'Replacement recovery changed its continuity receipt.'
+        }
     }
     $run = Get-Content -LiteralPath (Join-Path $RunDirectory 'run.json') -Raw |
         ConvertFrom-Json -Depth 20 -DateKind String
@@ -667,7 +706,8 @@ function Read-ThreadResultRecoveryReceipt {
         $previous = Read-ThreadResultRecoveryReceipt -Path $previousPath `
             -RunDirectory $RunDirectory `
             -ExpectedSourceNodeId $ExpectedSourceNodeId `
-            -ExpectedOriginalThreadId $ExpectedOriginalThreadId
+            -ExpectedOriginalThreadId $ExpectedOriginalThreadId `
+            -ExpectedRecoveryStage $recoveryStage
         if ([int]$previous.attempt -ne ($attempt - 1) -or
             [string]$previous.receipt_hash -ne
                 [string]$receipt.previous_receipt_hash -or

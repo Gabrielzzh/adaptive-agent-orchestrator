@@ -220,6 +220,10 @@ verified 3/3 recovery chain, `replacement_pending` followed by the bound
 replacement thread. Neither pending state satisfies a dependency or completion
 gate. A replacement result uses the same logical `source_node_id`, declares
 `source_kind=replacement`, and binds its replacement-continuity receipt.
+If the replacement has no final answer, its recovery receipts use a separate
+`replacement` stage and namespace, bind the parent replacement-continuity hash,
+and remain limited to three attempts on that replacement thread. Exhaustion
+stays blocked and cannot create a replacement-of-replacement.
 
 For legacy sources, `New-LegacySourceAdoptionReceipt.ps1` captures observable
 material and explicitly lists unavailable machine fields. This migration path
