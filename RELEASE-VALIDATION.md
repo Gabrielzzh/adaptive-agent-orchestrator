@@ -1,8 +1,8 @@
 # Release validation receipt
 
-Release: `0.7.1`
-Policy version: `0.7.1`
-Date: `2026-07-28`
+Release: `0.7.2`
+Policy version: `0.7.2`
+Date: `2026-07-30`
 
 ## Environment
 
@@ -28,6 +28,8 @@ Get-ChildItem "$skill\scripts" -Filter '*.ps1' | ForEach-Object {
 
 pwsh -NoProfile -File "$skill\scripts\Test-Self.ps1"
 
+pwsh -NoProfile -File "$skill\scripts\Test-RecoveryProtocol.ps1"
+
 python `
   "$HOME\.codex\skills\.system\skill-creator\scripts\quick_validate.py" `
   $skill
@@ -36,10 +38,11 @@ python `
 ## Results
 
 - Exit code: 0
-- PowerShell scripts parsed: 28
-- Self-test assertions: 538 passed
-- Intentional invalid-plan negative cases: 50 correctly rejected
-- Strict reference JSON files parsed: 7
+- PowerShell scripts parsed: 33
+- Recovery-protocol assertions: 30 passed
+- Self-test assertions: 601 passed
+- Intentional invalid negative cases: 57 correctly rejected
+- Strict reference JSON files parsed: 8
 - Skill Creator validation: `Skill is valid!`
 - Windows Junction fixture: created and correctly rejected as a reparse-point
   input boundary
@@ -54,16 +57,25 @@ reconciliation calibration, non-materializing dispatch preview,
 Worker-packet injection of the output-as-data policy and provenance labels,
 result-receipt verification before durable-task archive, durable-task surface
 selection, usable-HEAD worktree preflight, queued worktree setup, model
-availability fallback, and task-level completion receipts. The Worker-output
-policy is enforced by main-agent review, not by parsing free-form text as a
-security sandbox.
+availability fallback, task-level completion receipts, durable domain/dissent
+review, source-bound finding disposition, immutable P0/P1 blocking severity,
+bounded missing-final recovery, legacy source adoption, authorized replacement
+continuity, and cross-source isolation. The Worker-output policy is enforced by
+main-agent review, not by parsing free-form text as a security sandbox.
 
 The release also covers the successful-create/returned-task-ID retry guard,
-platform-independent write-scope overlap comparison, and read-only run
-measurement. Linux path behavior is source-guarded but not execution-verified
-because Linux PowerShell 7 is not installed in the available WSL environment.
+platform-bound model launch, platform-independent write-scope overlap
+comparison, and read-only run measurement. The reviewed Skill-only archive
+contained 52/52 files matching commit
+`5e2f2a9ce86493567083c0d1fe5ee3558854ff7b`. An independent dynamic re-attack
+ended GREEN with P0=0, P1=0, and P2=0.
 
 This receipt does not claim measured production Token savings. Synthetic and
 local validation prove contract and implementation behavior, not a universal
 end-to-end savings percentage. GitHub publication is verified separately after
 the release is created.
+
+The Skill does not repair platform `systemError` or missing-final behavior. It
+fails closed, preserves evidence, and constrains recovery or replacement. The
+symbolic-link fixture was skipped because this Windows session did not permit
+link creation. Linux and macOS were not dynamically validated.

@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[English](README.md) · [v0.7.1 正式版说明](docs/releases/v0.7.1.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+[English](README.md) · [v0.7.2 正式版说明](docs/releases/v0.7.2.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
 
 ![Adaptive Agent Orchestrator v0.7.0 发布图](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -40,6 +40,15 @@
   核对真实实体；未知状态不会触发盲目重试，重复实体会被识别并停止扩张。
 - **结果回收门：** 独立后台 Agent 的最终回答必须被显式读取并生成哈希回执，
   否则必需节点不能通过完成门。
+- **长期审核闭环：** 长期研究或 Skill 研发可在多个里程碑复用只读领域角色
+  与反方角色；主 Agent仍是唯一 Writer，并必须逐项回应每份审核发现。
+- **独立来源不可互替：** 每个审核来源保留自己的报告、证据、处置与复审义务；
+  一个来源不能替代另一个，未解决 P0/P1 始终阻断完成。
+- **final 缺失恢复：** 任务显示 completed 却没有 final 时进入
+  `result_pending`，绝不当作成功。同一来源最多进行三次有界回收；替代角色
+  必须经过主控授权，并保持来源、角色、checkpoint、input 和恢复链连续性。
+- **诚实接入旧任务：** 对旧任务只捕获真实存在的角色、checkpoint、input、
+  turn 与授权材料；平台从未提供的机器身份字段明确标为 unknown，不补造。
 - **不可信结果边界：** 主 Agent 的控制面政策把 Worker 输出视为不可信数据，
   而不是直接授权；已验证、推断和假设类发现采用不同的复核与采纳规则。
 - **回执绑定归档：** durable task 的结果回执消失或被修改后，不能进入归档。
@@ -185,16 +194,20 @@ $adaptive-agent-orchestrator。共享上下文留在主 Agent，Worker 只拿引
 
 ## 验证情况
 
-v0.7.1 正式版本通过：
+v0.7.2 正式版本通过：
 
-- 28 个 PowerShell 脚本语法解析；
-- 538 项自测断言；
-- 50 份故意构造的非法负面测试计划均被正确拦截；
+- 33 个 PowerShell 脚本语法解析；
+- 30 项恢复协议专项断言；
+- 601 项完整自测断言；
+- 57 份故意构造的非法负面案例均被正确拦截；
+- 8 个 reference JSON 文件严格解析；
 - 计划、元数据、日志、handoff、依赖、幂等、所有权、上下文重叠、渐进
-  派遣、短任务包、长期任务选择、排队创建、worktree 预检、任务收据和
-  完成门测试；
+  派遣、短任务包、长期任务选择、排队创建、worktree 预检、任务收据、
+  长期审核、结果恢复、替代连续性和完成门测试；
 - 严格 JSON 解析与真实 Windows Junction/reparse point 实体测试；
-- 一个合成的单案例 benchmark 测试。
+- Skill Creator 校验；
+- 同一独立审核角色对两项发布阻断绕过完成动态复攻，最终 GREEN，
+  P0/P1/P2 均为 0。
 
 ```powershell
 pwsh -NoProfile -File `
@@ -204,6 +217,8 @@ pwsh -NoProfile -File `
 ## 当前限制
 
 - 这是治理 Skill，不是独立 Agent 托管平台。
+- Skill 不修复平台自身的 `systemError` 或 final 丢失；它保证这些状态不会
+  被误报为成功，并使恢复与替代连续性可核验。
 - 自然语言排除项无法删除宿主已经注入的历史；应使用 fresh Worker 和明确
   输入引用。
 - 精确重叠检查无法发现“不同名称但语义相同”的材料，主 Agent 仍需拒绝。
@@ -213,7 +228,9 @@ pwsh -NoProfile -File `
 - 只有执行面提供 telemetry 时，Token 用量才可用于诊断。
 - 中位数节省 20% 是发布 benchmark 目标，不是已经证实的生产声明；合成
   测试不能证明真实 Token 节省。
-- 当前只在 Windows 10 + PowerShell 7.6.3 验证，macOS/Linux 尚未验证。
+- Windows 符号链接夹具因当前环境不允许创建链接而跳过。
+- 当前只在 Windows 10 + PowerShell 7.6.3 动态验证，macOS/Linux 尚未
+  动态验证。
 
 ## 安全模型
 

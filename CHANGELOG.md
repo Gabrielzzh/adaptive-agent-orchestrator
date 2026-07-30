@@ -1,8 +1,38 @@
 # Changelog
 
+## 0.7.2 - 2026-07-30
+
+Durable review and missing-result recovery release.
+
+- Add an optional durable domain-and-dissent review profile for long-running
+  research and Skill development. The main agent remains the only writer and
+  integrator; reviewers stay read-only and consumer output stays result-only.
+- Require the main owner to disposition every captured finding. Independent
+  sources retain separate evidence and cannot substitute for one another.
+- Make P0/P1 blocking severity immutable for durable review, bind disposition
+  to the source finding ID, severity, exact text, and text hash, and require
+  original-role re-review for resolved or partially adopted blocking findings.
+- Treat a completed platform turn without a final answer as `result_pending`.
+  Preserve visible progress as hashed evidence, never as a result, and allow at
+  most three bounded recovery attempts on the same source thread.
+- Permit a replacement source only after a verified 3/3 recovery chain and
+  controller authorization. Bind the replacement to the same source, role,
+  checkpoint, input, and continuity receipt; it cannot claim original PASS or
+  satisfy another source.
+- Add a fail-closed legacy adoption path for older durable tasks whose machine
+  source IDs or original hashes were never exposed. Capture real available
+  material, list unknown fields explicitly, and never fabricate missing
+  identity evidence.
+- Close two independently reproduced bypasses: replacement results cannot omit
+  continuity and masquerade as original, and legacy identities cannot be
+  adopted again through another run-local receipt directory.
+- Retain the v0.7.1 durable-task, worktree, task-receipt, and platform-bound
+  model-launch changes in this formal release.
+
 ## 0.7.1 - 2026-07-28
 
-Durable-task and worktree lifecycle correction.
+Unpublished engineering milestone folded into v0.7.2. Durable-task and
+worktree lifecycle correction.
 
 - Treat explicit user requests for visible Codex threads as user-owned durable
   tasks rather than silently substituting native subagents.
