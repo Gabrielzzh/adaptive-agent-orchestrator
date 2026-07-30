@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.7.13 - 2026-07-31
+
+Historical recovery and immutable review-selection patch release.
+
+- Fix a fail-closed block where creating a new recovery cycle under the current
+  milestone revalidated every older cycle against that current milestone. A
+  legitimate earlier cycle could therefore block a new checkpoint even though
+  both cycles were internally consistent.
+- Validate each historical recovery receipt against the milestone and activation
+  epoch recorded in that receipt. Keep canonical receipt paths, cycle identity,
+  source, role, thread, checkpoint, input, and attempt limits fail closed.
+- Fix old first-milestone revision selections being reinterpreted through the
+  latest same-source lifecycle. Read the exact pre-bound event sequence and hash
+  instead, so later valid milestone work cannot invalidate or replace the
+  immutable selection.
+- Validate the real long-lived review run end to end: the original source
+  exhausted its bounded 3/3 recovery, one authorized same-role replacement
+  recovered a formal result, all nine unresolved occurrences remained open, and
+  completion stayed correctly `BLOCKED`.
+- Preserve the boundary: this release does not repair platform `systemError`,
+  turn incomplete domain evidence into a business PASS, claim measured Token
+  savings or business accuracy, or modify multi-divination product files.
+
 ## 0.7.12 - 2026-07-31
 
 Active-milestone durable-source recovery patch release.

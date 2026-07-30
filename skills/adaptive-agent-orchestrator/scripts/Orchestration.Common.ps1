@@ -814,7 +814,9 @@ function Get-OriginalRecoveryCycleBinding {
         [Parameter(Mandatory)][string] $OriginalThreadId,
         [Parameter(Mandatory)][string] $CheckpointHash,
         [Parameter(Mandatory)][string] $InputManifestHash,
-        [string] $MilestoneId
+        [string] $MilestoneId,
+        [AllowEmptyString()][string] $BoundMilestoneActivationReceiptPath,
+        [AllowEmptyString()][string] $BoundMilestoneActivationReceiptHash
     )
     $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
     $run = Get-Content -LiteralPath (Join-Path $runRoot 'run.json') -Raw |
@@ -832,6 +834,16 @@ function Get-OriginalRecoveryCycleBinding {
     $activationPath = ''
     $activationHash = ''
     $activeMilestoneId = ''
+    $hasBoundActivationPath = $PSBoundParameters.ContainsKey(
+        'BoundMilestoneActivationReceiptPath'
+    )
+    $hasBoundActivationHash = $PSBoundParameters.ContainsKey(
+        'BoundMilestoneActivationReceiptHash'
+    )
+    if ($hasBoundActivationPath -ne $hasBoundActivationHash) {
+        throw 'Historical recovery activation binding is incomplete.'
+    }
+    $useBoundActivation = $hasBoundActivationPath
     if ($null -ne $plan.PSObject.Properties['durable_review_profile']) {
         $milestones = @(
             $plan.durable_review_profile.milestone_ids |
@@ -842,62 +854,139 @@ function Get-OriginalRecoveryCycleBinding {
             throw 'Durable recovery requires its active MilestoneId.'
         }
         $events = @(Read-OrchestrationJournal (Join-Path $runRoot 'events.jsonl'))
-        $activationEvents = @($events | Where-Object {
-            [string]$_.event -in @(
-                'milestone-activated', 'milestone-revision-authorized',
-                'milestone-revision-selected'
+        if ($useBoundActivation) {
+            $activeMilestoneId = $MilestoneId
+            $activationPath = $BoundMilestoneActivationReceiptPath.Replace(
+                '\', '/'
             )
-        })
-        if ($activationEvents.Count -eq 0) {
-            $activeMilestoneId = $milestones[0]
-            $activationHash = Get-TextSha256 (
-                "baseline|$([string]$run.run_id)|$([string]$run.plan_hash)|" +
-                $activeMilestoneId
-            )
+            $activationHash = $BoundMilestoneActivationReceiptHash
+            if ($activeMilestoneId -notin $milestones) {
+                throw 'Historical recovery milestone is not declared by the plan.'
+            }
+            if ([string]::IsNullOrWhiteSpace($activationPath)) {
+                $expectedBaselineHash = Get-TextSha256 (
+                    "baseline|$([string]$run.run_id)|$([string]$run.plan_hash)|" +
+                    $milestones[0]
+                )
+                if ($activeMilestoneId -ne $milestones[0] -or
+                    $activationHash -ne $expectedBaselineHash) {
+                    throw 'Historical baseline recovery activation is invalid.'
+                }
+            } else {
+                $activationEvents = @($events | Where-Object {
+                    [string]$_.event -in @(
+                        'milestone-activated', 'milestone-revision-authorized',
+                        'milestone-revision-selected'
+                    ) -and
+                    [string]$_.milestone_id -eq $activeMilestoneId -and
+                    [string]$_.milestone_activation_receipt_path -eq
+                        $activationPath -and
+                    [string]$_.milestone_activation_receipt_hash -eq
+                        $activationHash
+                })
+                if ($activationEvents.Count -ne 1) {
+                    throw (
+                        'Historical recovery activation is missing or ambiguous ' +
+                        'in the immutable journal.'
+                    )
+                }
+                $activeEvent = $activationEvents[0]
+                $activationFullPath = Get-RunLocalReceiptPath `
+                    -RunDirectory $runRoot -RelativePath $activationPath `
+                    -Label 'Historical milestone activation receipt'
+                if (-not (Test-Path -LiteralPath $activationFullPath -PathType Leaf)) {
+                    throw 'Historical milestone activation receipt is missing.'
+                }
+                $activation = switch ([string]$activeEvent.event) {
+                    'milestone-revision-authorized' {
+                        Read-DurableReviewMilestoneRevisionAuthorization `
+                            -Path $activationFullPath -RunDirectory $runRoot
+                    }
+                    'milestone-revision-selected' {
+                        Read-DurableReviewMilestoneRevisionSelection `
+                            -Path $activationFullPath -RunDirectory $runRoot
+                    }
+                    default {
+                        Get-Content -LiteralPath $activationFullPath -Raw |
+                            ConvertFrom-Json -Depth 100 -DateKind String
+                    }
+                }
+                $activationPayload = [ordered]@{}
+                foreach ($property in $activation.PSObject.Properties) {
+                    if ($property.Name -ne 'receipt_hash') {
+                        $activationPayload[$property.Name] = $property.Value
+                    }
+                }
+                if ([string]$activation.receipt_hash -ne $activationHash -or
+                    (Get-TextSha256 (
+                        $activationPayload | ConvertTo-Json -Compress -Depth 100
+                    )) -ne $activationHash -or
+                    [string]$activation.run_id -ne [string]$run.run_id -or
+                    [string]$activation.plan_hash -ne [string]$run.plan_hash -or
+                    [string]$activation.milestone_id -ne $activeMilestoneId) {
+                    throw 'Historical milestone activation receipt binding is invalid.'
+                }
+            }
         } else {
-            $activeEvent = $activationEvents[-1]
-            $activeMilestoneId = [string]$activeEvent.milestone_id
-            $activationPath =
-                [string]$activeEvent.milestone_activation_receipt_path
-            $activationHash =
-                [string]$activeEvent.milestone_activation_receipt_hash
-            $activationFullPath = Get-RunLocalReceiptPath `
-                -RunDirectory $runRoot -RelativePath $activationPath `
-                -Label 'Milestone activation receipt'
-            if (-not (Test-Path -LiteralPath $activationFullPath -PathType Leaf)) {
-                throw 'Milestone activation receipt is missing.'
-            }
-            $activation = switch ([string]$activeEvent.event) {
-                'milestone-revision-authorized' {
-                    Read-DurableReviewMilestoneRevisionAuthorization `
-                        -Path $activationFullPath -RunDirectory $runRoot
+            $activationEvents = @($events | Where-Object {
+                [string]$_.event -in @(
+                    'milestone-activated', 'milestone-revision-authorized',
+                    'milestone-revision-selected'
+                )
+            })
+            if ($activationEvents.Count -eq 0) {
+                $activeMilestoneId = $milestones[0]
+                $activationHash = Get-TextSha256 (
+                    "baseline|$([string]$run.run_id)|$([string]$run.plan_hash)|" +
+                    $activeMilestoneId
+                )
+            } else {
+                $activeEvent = $activationEvents[-1]
+                $activeMilestoneId = [string]$activeEvent.milestone_id
+                $activationPath =
+                    [string]$activeEvent.milestone_activation_receipt_path
+                $activationHash =
+                    [string]$activeEvent.milestone_activation_receipt_hash
+                $activationFullPath = Get-RunLocalReceiptPath `
+                    -RunDirectory $runRoot -RelativePath $activationPath `
+                    -Label 'Milestone activation receipt'
+                if (-not (
+                    Test-Path -LiteralPath $activationFullPath -PathType Leaf
+                )) {
+                    throw 'Milestone activation receipt is missing.'
                 }
-                'milestone-revision-selected' {
-                    Read-DurableReviewMilestoneRevisionSelection `
-                        -Path $activationFullPath -RunDirectory $runRoot
+                $activation = switch ([string]$activeEvent.event) {
+                    'milestone-revision-authorized' {
+                        Read-DurableReviewMilestoneRevisionAuthorization `
+                            -Path $activationFullPath -RunDirectory $runRoot
+                    }
+                    'milestone-revision-selected' {
+                        Read-DurableReviewMilestoneRevisionSelection `
+                            -Path $activationFullPath -RunDirectory $runRoot
+                    }
+                    default {
+                        Get-Content -LiteralPath $activationFullPath -Raw |
+                            ConvertFrom-Json -Depth 100 -DateKind String
+                    }
                 }
-                default {
-                    Get-Content -LiteralPath $activationFullPath -Raw |
-                        ConvertFrom-Json -Depth 100 -DateKind String
+                $activationPayload = [ordered]@{}
+                foreach ($property in $activation.PSObject.Properties) {
+                    if ($property.Name -ne 'receipt_hash') {
+                        $activationPayload[$property.Name] = $property.Value
+                    }
+                }
+                if ([string]$activation.receipt_hash -ne $activationHash -or
+                    (Get-TextSha256 (
+                        $activationPayload | ConvertTo-Json -Compress -Depth 100
+                    )) -ne $activationHash -or
+                    [string]$activation.milestone_id -ne $activeMilestoneId) {
+                    throw 'Milestone activation receipt binding is invalid.'
                 }
             }
-            $activationPayload = [ordered]@{}
-            foreach ($property in $activation.PSObject.Properties) {
-                if ($property.Name -ne 'receipt_hash') {
-                    $activationPayload[$property.Name] = $property.Value
-                }
+            if ($MilestoneId -ne $activeMilestoneId -or
+                $MilestoneId -notin $milestones) {
+                throw 'Recovery cycle does not match the active durable milestone.'
             }
-            if ([string]$activation.receipt_hash -ne $activationHash -or
-                (Get-TextSha256 (
-                    $activationPayload | ConvertTo-Json -Compress -Depth 100
-                )) -ne $activationHash -or
-                [string]$activation.milestone_id -ne $activeMilestoneId) {
-                throw 'Milestone activation receipt binding is invalid.'
-            }
-        }
-        if ($MilestoneId -ne $activeMilestoneId -or
-            $MilestoneId -notin $milestones) {
-            throw 'Recovery cycle does not match the active durable milestone.'
         }
     } elseif (-not [string]::IsNullOrWhiteSpace($MilestoneId)) {
         throw 'A non-durable-review run cannot declare a recovery milestone.'
@@ -905,6 +994,14 @@ function Get-OriginalRecoveryCycleBinding {
         $activationHash = Get-TextSha256 (
             "non-durable|$([string]$run.run_id)|$([string]$run.plan_hash)"
         )
+        if ($useBoundActivation -and (
+            -not [string]::IsNullOrWhiteSpace(
+                $BoundMilestoneActivationReceiptPath
+            ) -or
+            $BoundMilestoneActivationReceiptHash -ne $activationHash
+        )) {
+            throw 'Historical non-durable recovery activation is invalid.'
+        }
     }
 
     $cyclePayload = [ordered]@{
@@ -936,10 +1033,27 @@ function Read-ThreadResultRecoveryReceipt {
         [Parameter(Mandatory)][string] $ExpectedSourceNodeId,
         [Parameter(Mandatory)][string] $ExpectedOriginalThreadId,
         [ValidateSet('original', 'replacement')]
-        [string] $ExpectedRecoveryStage
+        [string] $ExpectedRecoveryStage,
+        [switch] $SkipPeerCycleCollisionCheck
     )
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "Thread result recovery receipt does not exist: $Path"
+    }
+    $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+    $canonicalReceiptDirectory = [IO.Path]::GetFullPath(
+        (Join-Path $runRoot 'receipts')
+    ).TrimEnd('\', '/')
+    $receiptFullPath = [IO.Path]::GetFullPath($Path)
+    $receiptParent = (Split-Path -Parent $receiptFullPath).TrimEnd('\', '/')
+    if (-not [string]::Equals(
+        $receiptParent,
+        $canonicalReceiptDirectory,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw (
+            'Thread result recovery receipt must remain in the canonical run ' +
+            'receipts directory.'
+        )
     }
     $receipt = Get-Content -LiteralPath $Path -Raw |
         ConvertFrom-Json -Depth 50 -DateKind String
@@ -1017,7 +1131,12 @@ function Read-ThreadResultRecoveryReceipt {
             -OriginalThreadId $ExpectedOriginalThreadId `
             -CheckpointHash ([string]$receipt.checkpoint_hash) `
             -InputManifestHash ([string]$receipt.input_manifest_hash) `
-            -MilestoneId ([string]$receipt.milestone_id)
+            -MilestoneId ([string]$receipt.milestone_id) `
+            -BoundMilestoneActivationReceiptPath (
+                [string]$receipt.milestone_activation_receipt_path
+            ) -BoundMilestoneActivationReceiptHash (
+                [string]$receipt.milestone_activation_receipt_hash
+            )
         if ([string]$receipt.recovery_cycle_id -ne
                 [string]$cycle.recovery_cycle_id -or
             [string]$receipt.milestone_activation_receipt_path -ne
@@ -1193,6 +1312,35 @@ function Read-ThreadResultRecoveryReceipt {
     )
     if ([string]$receipt.receipt_hash -ne $expectedHash) {
         throw 'Thread result recovery receipt hash mismatch.'
+    }
+    if ([string]$receipt.schema_version -eq '1.2' -and
+        -not $SkipPeerCycleCollisionCheck) {
+        $peerStarts = @(
+            Get-ChildItem -LiteralPath $canonicalReceiptDirectory -File `
+                -Filter (
+                    "$ExpectedSourceNodeId.cycle-*.attempt-1.result-recovery.json"
+                ) -ErrorAction SilentlyContinue | Where-Object {
+                    [IO.Path]::GetFullPath($_.FullName) -ne $receiptFullPath
+                }
+        )
+        foreach ($peerStart in $peerStarts) {
+            $peer = Read-ThreadResultRecoveryReceipt `
+                -Path $peerStart.FullName -RunDirectory $RunDirectory `
+                -ExpectedSourceNodeId $ExpectedSourceNodeId `
+                -ExpectedOriginalThreadId $ExpectedOriginalThreadId `
+                -ExpectedRecoveryStage original `
+                -SkipPeerCycleCollisionCheck
+            if ([string]$peer.checkpoint_hash -eq
+                    [string]$receipt.checkpoint_hash -and
+                [string]$peer.recovery_cycle_id -ne
+                    [string]$receipt.recovery_cycle_id) {
+                throw (
+                    'An original recovery cycle already binds this source, ' +
+                    'thread, and checkpoint with different input or milestone ' +
+                    'identity.'
+                )
+            }
+        }
     }
     return $receipt
 }
@@ -2702,11 +2850,9 @@ function Read-DurableReviewMilestoneRevisionSelection {
             [string]$binding.disposition_receipt_path -in $excludedPaths) {
             throw "Milestone revision source '$sourceNodeId' binding changed."
         }
-        $sourceEvents = @($events | Where-Object {
+        $rearmCandidates = @($events | Where-Object {
             [string]$_.node_id -eq $sourceNodeId -and
-            [int]$_.sequence -gt [int]$authorizationEvents[0].sequence
-        })
-        $rearm = @($sourceEvents | Where-Object {
+            [int]$_.sequence -gt [int]$authorizationEvents[0].sequence -and
             [string]$_.prior_state -eq 'adopted' -and
             [string]$_.status -eq 'running' -and
             [string]$_.thread_id -eq [string]$requiredSource.thread_id -and
@@ -2714,27 +2860,65 @@ function Read-DurableReviewMilestoneRevisionSelection {
             [string]$_.milestone_revision_authorization_receipt_hash -eq
                 [string]$authorization.receipt_hash
         })
-        if ($rearm.Count -ne 1) {
+        if ($rearmCandidates.Count -ne 1) {
             throw "Milestone revision source '$sourceNodeId' re-arm changed."
         }
-        $completed = @($sourceEvents | Where-Object {
-            [string]$_.status -eq 'completed' -and
-            [int]$_.sequence -gt [int]$rearm[0].sequence
-        }) | Select-Object -Last 1
-        $validated = @($sourceEvents | Where-Object {
-            [string]$_.status -eq 'validated' -and
-            [int]$_.sequence -gt [int]$rearm[0].sequence
-        }) | Select-Object -Last 1
-        $adopted = @($sourceEvents | Where-Object {
-            [string]$_.status -eq 'adopted' -and
-            [int]$_.sequence -gt [int]$rearm[0].sequence
-        }) | Select-Object -Last 1
-        if ($null -eq $completed -or
-            $null -eq $validated -or $null -eq $adopted -or
+        $boundEvents = [ordered]@{}
+        foreach ($eventBinding in @(
+            @{
+                name = 'rearm'
+                sequence = 'rearm_event_sequence'
+                hash = 'rearm_event_hash'
+            },
+            @{
+                name = 'completed'
+                sequence = 'completed_event_sequence'
+                hash = 'completed_event_hash'
+            },
+            @{
+                name = 'validated'
+                sequence = 'validated_event_sequence'
+                hash = 'validated_event_hash'
+            },
+            @{
+                name = 'adopted'
+                sequence = 'adopted_event_sequence'
+                hash = 'adopted_event_hash'
+            }
+        )) {
+            $bound = @($events | Where-Object {
+                [int]$_.sequence -eq
+                    [int]$declaredLifecycle[0].$($eventBinding.sequence) -and
+                [string]$_.hash -eq
+                    [string]$declaredLifecycle[0].$($eventBinding.hash)
+            })
+            if ($bound.Count -ne 1 -or
+                [string]$bound[0].node_id -ne $sourceNodeId) {
+                throw (
+                    "Milestone revision source '$sourceNodeId' lifecycle " +
+                    "binding changed."
+                )
+            }
+            $boundEvents[$eventBinding.name] = $bound[0]
+        }
+        $rearm = $boundEvents.rearm
+        $completed = $boundEvents.completed
+        $validated = $boundEvents.validated
+        $adopted = $boundEvents.adopted
+        if ([int]$rearm.sequence -ne
+                [int]$rearmCandidates[0].sequence -or
+            [string]$rearm.hash -ne [string]$rearmCandidates[0].hash -or
             [string]$completed.prior_state -ne 'running' -or
             [string]$validated.prior_state -ne 'completed' -or
             [string]$adopted.prior_state -ne 'validated' -or
-            @($rearm[0], $completed, $validated, $adopted |
+            [string]$completed.status -ne 'completed' -or
+            [string]$validated.status -ne 'validated' -or
+            [string]$adopted.status -ne 'adopted' -or
+            [int]$authorizationEvents[0].sequence -ge [int]$rearm.sequence -or
+            [int]$rearm.sequence -ge [int]$completed.sequence -or
+            [int]$completed.sequence -ge [int]$validated.sequence -or
+            [int]$validated.sequence -ge [int]$adopted.sequence -or
+            @($rearm, $completed, $validated, $adopted |
                 Where-Object {
                     [int]$_.sequence -in $excludedSequences
                 }).Count -gt 0) {
@@ -2752,8 +2936,8 @@ function Read-DurableReviewMilestoneRevisionSelection {
             source_node_id = $sourceNodeId
             role_id = [string]$requiredSource.role_id
             source_thread_id = [string]$requiredSource.thread_id
-            rearm_event_sequence = [int]$rearm[0].sequence
-            rearm_event_hash = [string]$rearm[0].hash
+            rearm_event_sequence = [int]$rearm.sequence
+            rearm_event_hash = [string]$rearm.hash
             completed_event_sequence = [int]$completed.sequence
             completed_event_hash = [string]$completed.hash
             validated_event_sequence = [int]$validated.sequence

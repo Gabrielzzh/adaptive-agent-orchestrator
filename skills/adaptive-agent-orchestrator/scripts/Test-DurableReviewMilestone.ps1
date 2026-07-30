@@ -985,6 +985,76 @@ try {
         [string]$revisionSelection.schema_version -eq '1.1' -and
         @($revisionSelection.source_bindings).Count -eq 2
     ) 'A revision selection must bind both fresh source lifecycles.'
+    $laterLifecycleRun = Join-Path $testRoot (
+        'revision-selection-with-later-source-lifecycle'
+    )
+    Copy-Item -LiteralPath $revisionRun -Destination $laterLifecycleRun -Recurse
+    $laterEventsPath = Join-Path $laterLifecycleRun 'events.jsonl'
+    $laterEvents = @(Read-OrchestrationJournal $laterEventsPath)
+    $declaredReviewLifecycle = @(
+        $revisionSelection.source_lifecycle_bindings | Where-Object {
+            [string]$_.source_node_id -eq 'review'
+        }
+    )[0]
+    foreach ($laterStatus in @('completed', 'validated', 'adopted')) {
+        $templateSequence = switch ($laterStatus) {
+            'completed' { [int]$declaredReviewLifecycle.completed_event_sequence }
+            'validated' { [int]$declaredReviewLifecycle.validated_event_sequence }
+            'adopted' { [int]$declaredReviewLifecycle.adopted_event_sequence }
+        }
+        $laterEvent = @(
+            $laterEvents | Where-Object {
+                [int]$_.sequence -eq $templateSequence
+            }
+        )[0] | ConvertTo-Json -Depth 30 |
+            ConvertFrom-Json -AsHashtable -Depth 30
+        $laterEvent.sequence = $laterEvents.Count
+        $laterEvent.prev_hash = [string]$laterEvents[-1].hash
+        $laterEvent.timestamp = [DateTimeOffset]::UtcNow.ToString('o')
+        $laterEvent.milestone_id = 'method-2'
+        $laterEvent.message = "Later milestone review $laterStatus."
+        $laterEvent.evidence = if ($laterStatus -eq 'completed') {
+            @('artifact:receipts/review.method-2-later-result.json')
+        } else {
+            @('artifact:receipts/review.method-2-later-disposition.json')
+        }
+        $laterEvent.idempotency_key = "later-review-$laterStatus"
+        $laterEvent.request_fingerprint = Get-TextSha256 (
+            "later-review-$laterStatus"
+        )
+        $laterEvent.hash = Get-OrchestrationEventHash (
+            [pscustomobject]$laterEvent
+        )
+        Add-Content -LiteralPath $laterEventsPath -Value (
+            [pscustomobject]$laterEvent | ConvertTo-Json -Compress -Depth 30
+        )
+        $laterEvents += [pscustomobject]$laterEvent
+    }
+    $laterSelectionPath = Join-Path $laterLifecycleRun (
+        "receipts/durable-review-milestone.method-1.revision-" +
+        "$($revisionAuthorization.revision_id).selection.json"
+    )
+    $laterSelectionReadback =
+        Read-DurableReviewMilestoneRevisionSelection `
+            -Path $laterSelectionPath -RunDirectory $laterLifecycleRun
+    $laterReviewLifecycle = @(
+        $laterSelectionReadback.source_lifecycle_bindings | Where-Object {
+            [string]$_.source_node_id -eq 'review'
+        }
+    )[0]
+    Assert-True (
+        [int]$laterReviewLifecycle.completed_event_sequence -eq
+            [int]$declaredReviewLifecycle.completed_event_sequence -and
+        [string]$laterReviewLifecycle.completed_event_hash -eq
+            [string]$declaredReviewLifecycle.completed_event_hash -and
+        [int]$laterReviewLifecycle.adopted_event_sequence -eq
+            [int]$declaredReviewLifecycle.adopted_event_sequence -and
+        [string]$laterReviewLifecycle.adopted_event_hash -eq
+            [string]$declaredReviewLifecycle.adopted_event_hash
+    ) (
+        'A revision selection must revalidate its bound lifecycle events ' +
+        'instead of later valid source events.'
+    )
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot (
             'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
@@ -1639,6 +1709,55 @@ try {
         'Coherently re-signed evidence cannot replace the activation anchor.'
     )
 
+    # Keep one valid recovery-cycle receipt from the baseline milestone. After
+    # method-2 becomes active, this immutable method-1 receipt must still
+    # validate against its own activation epoch without blocking a new
+    # method-2/checkpoint recovery cycle.
+    $historicalRecoveryCheckpoint = Join-Path $run (
+        'materials/checkpoint-method-1-historical-recovery.json'
+    )
+    $historicalRecoveryInput = Join-Path $run (
+        'materials/input-method-1-historical-recovery.json'
+    )
+    $historicalRecoveryCapture = Join-Path $run (
+        'thread-reads/review.method-1-historical-recovery-progress.json'
+    )
+    Set-Content -LiteralPath $historicalRecoveryCheckpoint -Value (
+        '{"milestone":"method-1","checkpoint":"historical-recovery"}'
+    )
+    Set-Content -LiteralPath $historicalRecoveryInput -Value (
+        '{"scope":"method-1-historical-recovery"}'
+    )
+    [ordered]@{
+        schemaVersion = 1
+        thread = [ordered]@{ id = 'review-thread' }
+        page = [ordered]@{ order = 'newest_first' }
+        latestAssistantMessageId = $null
+        turns = @(
+            [ordered]@{
+                id = 'method-1-historical-recovery-turn'
+                status = 'completed'
+                items = @(
+                    [ordered]@{
+                        type = 'agentMessage'
+                        phase = 'commentary'
+                        text = 'Method-1 recovery had progress but no final.'
+                    }
+                )
+            }
+        )
+    } | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $historicalRecoveryCapture -Encoding utf8
+    $historicalRecovery = & (
+        Join-Path $scriptRoot 'New-ThreadResultRecoveryReceipt.ps1'
+    ) -RunDirectory $run -SourceNodeId 'review' `
+        -OriginalThreadId 'review-thread' `
+        -CheckpointManifestPath $historicalRecoveryCheckpoint `
+        -InputManifestPath $historicalRecoveryInput `
+        -ThreadReadPath $historicalRecoveryCapture `
+        -MilestoneId 'method-1' -Attempt 1 |
+        ConvertFrom-Json -Depth 50
+
     $activation = & (
         Join-Path $scriptRoot (
             'New-DurableReviewMilestoneActivationReceipt.ps1'
@@ -1710,6 +1829,83 @@ try {
         -ThreadReadPath $activeRecoveryCapture `
         -MilestoneId 'method-2' -Attempt 1 |
         ConvertFrom-Json -Depth 50
+    $historicalRecoveryPath = Join-Path $run (
+        'receipts/review.cycle-' +
+        [string]$historicalRecovery.recovery_cycle_id +
+        '.attempt-1.result-recovery.json'
+    )
+    $historicalRecoveryReadback = Read-ThreadResultRecoveryReceipt `
+        -Path $historicalRecoveryPath -RunDirectory $run `
+        -ExpectedSourceNodeId 'review' `
+        -ExpectedOriginalThreadId 'review-thread' `
+        -ExpectedRecoveryStage 'original'
+    Assert-True (
+        [string]$historicalRecoveryReadback.milestone_id -eq 'method-1' -and
+        [string]$activeRecovery.milestone_id -eq 'method-2' -and
+        [string]$historicalRecoveryReadback.recovery_cycle_id -ne
+            [string]$activeRecovery.recovery_cycle_id
+    ) (
+        'A historical recovery cycle must retain its own milestone epoch while ' +
+        'a later active milestone starts a distinct attempt-one cycle.'
+    )
+    $historicalCycleTamperRun = Join-Path $testRoot (
+        'historical-recovery-cycle-tamper'
+    )
+    Copy-Item -LiteralPath $activeRecoveryRun `
+        -Destination $historicalCycleTamperRun -Recurse
+    $historicalCycleTamperPath = Join-Path $historicalCycleTamperRun (
+        'receipts/' + [IO.Path]::GetFileName($historicalRecoveryPath)
+    )
+    $historicalCycleTamper = Get-Content -LiteralPath (
+        $historicalCycleTamperPath
+    ) -Raw | ConvertFrom-Json -AsHashtable -Depth 50
+    $historicalCycleTamper.recovery_cycle_id = ('f' * 64)
+    $historicalCycleTamper.Remove('receipt_hash')
+    $historicalCycleTamper.receipt_hash = Get-TextSha256 (
+        $historicalCycleTamper | ConvertTo-Json -Compress -Depth 50
+    )
+    $historicalCycleTamper | ConvertTo-Json -Depth 50 |
+        Set-Content -LiteralPath $historicalCycleTamperPath -Encoding utf8
+    Assert-ThrowsLike {
+        Read-ThreadResultRecoveryReceipt `
+            -Path $historicalCycleTamperPath `
+            -RunDirectory $historicalCycleTamperRun `
+            -ExpectedSourceNodeId 'review' `
+            -ExpectedOriginalThreadId 'review-thread' `
+            -ExpectedRecoveryStage original | Out-Null
+    } 'cycle binding is invalid' (
+        'A self-rehashed historical receipt cannot replace its recovery cycle.'
+    )
+
+    $historicalEpochTamperRun = Join-Path $testRoot (
+        'historical-recovery-activation-epoch-tamper'
+    )
+    Copy-Item -LiteralPath $activeRecoveryRun `
+        -Destination $historicalEpochTamperRun -Recurse
+    $historicalEpochTamperPath = Join-Path $historicalEpochTamperRun (
+        'receipts/' + [IO.Path]::GetFileName($historicalRecoveryPath)
+    )
+    $historicalEpochTamper = Get-Content -LiteralPath (
+        $historicalEpochTamperPath
+    ) -Raw | ConvertFrom-Json -AsHashtable -Depth 50
+    $historicalEpochTamper.milestone_activation_receipt_hash =
+        [string]$activation.receipt_hash
+    $historicalEpochTamper.Remove('receipt_hash')
+    $historicalEpochTamper.receipt_hash = Get-TextSha256 (
+        $historicalEpochTamper | ConvertTo-Json -Compress -Depth 50
+    )
+    $historicalEpochTamper | ConvertTo-Json -Depth 50 |
+        Set-Content -LiteralPath $historicalEpochTamperPath -Encoding utf8
+    Assert-ThrowsLike {
+        Read-ThreadResultRecoveryReceipt `
+            -Path $historicalEpochTamperPath `
+            -RunDirectory $historicalEpochTamperRun `
+            -ExpectedSourceNodeId 'review' `
+            -ExpectedOriginalThreadId 'review-thread' `
+            -ExpectedRecoveryStage original | Out-Null
+    } 'Historical baseline recovery activation is invalid' (
+        'A historical receipt cannot claim the current milestone activation epoch.'
+    )
     $activeRecoveryRelativePath = (
         'receipts/review.cycle-' +
         [string]$activeRecovery.recovery_cycle_id +
