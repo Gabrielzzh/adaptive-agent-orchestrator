@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[English](README.md) · [v0.7.8 正式版说明](docs/releases/v0.7.8.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+[English](README.md) · [v0.7.9 正式版说明](docs/releases/v0.7.9.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
 
 ![Adaptive Agent Orchestrator v0.7.0 发布图](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -52,10 +52,12 @@
   P1。旧 run 保持不可变，来源/thread 连续性不丢失；同一来源完成处置和复审
   前，新 run 始终不能完成。
 - **final 缺失恢复：** 任务显示 completed 却没有 final 时进入
-  `result_pending`，绝不当作成功。同一来源最多进行三次有界回收；替代角色
-  必须经过主控授权，并保持来源、角色、checkpoint、input 和恢复链连续性。
-  如果 replacement 也丢失 final，只能使用自己独立的三次恢复阶段，不能再
-  创建 replacement-of-replacement。
+  `result_pending`，绝不当作成功。同一 original durable source 的每个新
+  checkpoint/input 都建立独立哈希绑定的恢复 cycle，每个 cycle 最多三次
+  同 thread 回收；旧 cycle 不能延长或重置新 cycle。替代角色必须经过主控
+  授权，并保持来源、角色、checkpoint、input 和恢复链连续性。如果
+  replacement 也丢失 final，只能使用自己独立的三次恢复阶段，不能再创建
+  replacement-of-replacement。
 - **诚实接入旧任务：** 对旧任务只捕获真实存在的角色、checkpoint、input、
   turn 与授权材料；平台从未提供的机器身份字段明确标为 unknown，不补造。
 - **旧 run 可审计激活：** 内部一致的旧 run 可通过追加式收据采用当前运行
@@ -207,14 +209,13 @@ $adaptive-agent-orchestrator。共享上下文留在主 Agent，Worker 只拿引
 
 ## 验证情况
 
-v0.7.8 正式版本通过：
+v0.7.9 正式版本通过：
 
 - 45 个 PowerShell 脚本语法解析；
-- 52 项 abandoned-successor 恢复专项断言；
+- 56 项恢复协议专项断言；
 - 37 项 durable milestone 与 successor-run 专项断言；
 - 15 项 run policy activation 专项断言；
-- 45 项恢复协议专项断言；
-- 739 项完整自测断言；
+- 750 项完整自测断言；
 - 59 份故意构造的非法负面案例均被正确拦截；
 - 8 个 reference JSON 文件严格解析；
 - 计划、元数据、日志、handoff、依赖、幂等、所有权、上下文重叠、渐进
@@ -235,6 +236,9 @@ v0.7.8 正式版本通过：
 - 真实 cancelled successor 依次完成 authorization、export 和 fresh
   adoption：两个来源的 18/18 条 P1 完整继承，已消耗 attempt 保留，P0
   没有回流，完成门继续正确保持 `BLOCKED`。
+- 同一长期 original source 在 checkpoint08 建立了与 checkpoint07 隔离的
+  recovery cycle，回收同源正式 final 并生成 schema 1.3 result/disposition；
+  开放业务 P1 和未完成节点继续让 completion 正确保持 `BLOCKED`。
 
 ```powershell
 pwsh -NoProfile -File `

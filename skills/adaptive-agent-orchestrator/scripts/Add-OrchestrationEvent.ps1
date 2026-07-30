@@ -1013,6 +1013,31 @@ try {
             [string]$_.status -eq 'result_pending' -and
             [string]$_.thread_id -eq $ThreadId
         })
+        if ([string]$recoveryReceipt.schema_version -eq '1.2') {
+            $sameCyclePending = [Collections.Generic.List[object]]::new()
+            foreach ($pendingEvent in $priorPendingForThread) {
+                if ([string]::IsNullOrWhiteSpace(
+                    [string]$pendingEvent.recovery_receipt_path
+                )) {
+                    continue
+                }
+                $pendingPath = Get-RunLocalReceiptPath `
+                    -RunDirectory $RunDirectory `
+                    -RelativePath ([string]$pendingEvent.recovery_receipt_path) `
+                    -Label 'Prior recovery receipt'
+                $pendingReceipt = Read-ThreadResultRecoveryReceipt `
+                    -Path $pendingPath -RunDirectory $RunDirectory `
+                    -ExpectedSourceNodeId $NodeId `
+                    -ExpectedOriginalThreadId $ThreadId `
+                    -ExpectedRecoveryStage original
+                if ([string]$pendingReceipt.schema_version -eq '1.2' -and
+                    [string]$pendingReceipt.recovery_cycle_id -eq
+                        [string]$recoveryReceipt.recovery_cycle_id) {
+                    $sameCyclePending.Add($pendingEvent)
+                }
+            }
+            $priorPendingForThread = @($sameCyclePending)
+        }
         if (@($priorPendingForThread | Where-Object {
             [string]$_.recovery_receipt_hash -eq
                 [string]$recoveryReceipt.receipt_hash

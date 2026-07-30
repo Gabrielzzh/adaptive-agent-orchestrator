@@ -348,9 +348,12 @@ or user decision must be disclosed.
 If a durable source turn completes without a final answer, record
 `result_pending` with
 `failure_class=final_missing_with_progress_evidence`; visible commentary or
-tool traffic is hash-bound progress evidence, never a result. Make at most
-three same-thread, same-role, same-checkpoint recovery attempts using
-`New-ThreadResultRecoveryReceipt.ps1`. Only a complete 3/3 chain may authorize
+tool traffic is hash-bound progress evidence, never a result. For an original
+durable source, every new checkpoint/input under the active milestone opens one
+hash-bound recovery cycle; pass `-MilestoneId` and start that cycle at attempt
+1. Make at most three same-thread, same-role attempts inside that cycle using
+`New-ThreadResultRecoveryReceipt.ps1`. A prior checkpoint's receipt cannot
+start, extend, or reset the new cycle. Only a complete 3/3 chain may authorize
 one same-role read-only replacement through
 `New-ReplacementContinuityReceipt.ps1`. A replacement result remains bound to
 the original logical source, is labeled `replacement`, and never claims the

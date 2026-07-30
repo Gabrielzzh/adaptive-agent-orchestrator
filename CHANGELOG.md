@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.7.9 - 2026-07-30
+
+Per-review-cycle durable-source recovery release.
+
+- Namespace original durable-source recovery by a deterministic cycle binding
+  the run, source, role, thread, active milestone/activation, checkpoint, and
+  input manifest.
+- Let the same long-lived source begin a fresh attempt-1 cycle for a later
+  checkpoint after an earlier checkpoint recovered successfully, without
+  overwriting or chaining through the earlier recovery receipt.
+- Keep each cycle limited to three same-thread, same-role attempts; reject
+  cross-cycle replay, mixed checkpoint/input/milestone chains, attempt resets,
+  and cross-source/thread reuse.
+- Preserve historical schema 1.0 original and schema 1.1 replacement recovery
+  receipts while emitting schema 1.2 for new original-source cycles.
+- Validate the real multi-divination control run: checkpoint08 created a cycle
+  isolated from checkpoint07, recovered a formal same-source final, generated
+  schema 1.3 result/disposition receipts, appended lifecycle events, and
+  remained correctly blocked by an open business P1 and unfinished nodes.
+- Preserve the boundary: this release does not repair platform `systemError`,
+  classify the multi-divination hash-collision P1 as an Orchestrator defect, or
+  claim measured Token savings or business accuracy.
+
 ## 0.7.8 - 2026-07-30
 
 Append-only abandoned-successor recovery release.

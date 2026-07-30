@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.7.8 release notes](docs/releases/v0.7.8.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.7.9 release notes](docs/releases/v0.7.9.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -58,10 +58,12 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   preserved, and completion remains blocked until the same sources resolve and
   re-review those obligations.
 - **Missing-final recovery:** a completed task without a final answer becomes
-  `result_pending`, never success. The same source gets at most three bounded
-  recovery attempts; an authorized replacement must preserve source, role,
-  checkpoint, input, and recovery-chain continuity. If the replacement also
-  loses its final, it receives one separate bounded recovery epoch—not another
+  `result_pending`, never success. Each new checkpoint/input for the same
+  original durable source opens a separate hash-bound recovery cycle with at
+  most three same-thread attempts; an earlier cycle cannot extend or reset a
+  later one. An authorized replacement must preserve source, role, checkpoint,
+  input, and recovery-chain continuity. If the replacement also loses its
+  final, it receives one separate bounded recovery epoch—not another
   replacement.
 - **Honest legacy adoption:** older tasks can capture the role, checkpoint,
   input, observed turns, and authorization that actually exist while listing
@@ -234,14 +236,13 @@ state, integrates results, and performs authorized external actions.
 
 ## Validation
 
-The v0.7.8 release passes:
+The v0.7.9 release passes:
 
 - PowerShell parser validation for all 45 scripts;
-- 52 abandoned-successor recovery assertions;
+- 56 recovery-protocol assertions;
 - 37 durable-milestone and successor-run assertions;
 - 15 run-policy activation assertions;
-- 45 recovery-protocol assertions;
-- 739 self-test assertions;
+- 750 self-test assertions;
 - 59 intentionally invalid negative-test cases correctly rejected;
 - strict parsing for all 8 bundled reference JSON files;
 - plan, metadata, journal, handoff, dependency, idempotency, ownership,
@@ -266,6 +267,10 @@ The v0.7.8 release passes:
   fresh adoption: all 18 P1 source occurrences were preserved, consumed
   attempts carried forward, zero P0 reappeared, and completion remained
   correctly `BLOCKED`.
+- a real long-lived original source opened a checkpoint08 recovery cycle
+  isolated from its completed checkpoint07 cycle, recovered a same-source final,
+  generated schema 1.3 result/disposition receipts, and remained correctly
+  `BLOCKED` by an open business P1 and unfinished nodes.
 
 Run:
 

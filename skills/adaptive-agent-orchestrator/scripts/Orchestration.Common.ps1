@@ -646,6 +646,113 @@ function Get-RunLocalReceiptPath {
     return $fullPath
 }
 
+function Get-OriginalRecoveryCycleBinding {
+    param(
+        [Parameter(Mandatory)][string] $RunDirectory,
+        [Parameter(Mandatory)][string] $SourceNodeId,
+        [Parameter(Mandatory)][string] $OriginalThreadId,
+        [Parameter(Mandatory)][string] $CheckpointHash,
+        [Parameter(Mandatory)][string] $InputManifestHash,
+        [string] $MilestoneId
+    )
+    $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+    $run = Get-Content -LiteralPath (Join-Path $runRoot 'run.json') -Raw |
+        ConvertFrom-Json -Depth 30 -DateKind String
+    $plan = Get-Content -LiteralPath (Join-Path $runRoot 'plan.json') -Raw |
+        ConvertFrom-Json -Depth 100 -DateKind String
+    $node = @($plan.nodes | Where-Object {
+        [string]$_.id -eq $SourceNodeId
+    }) | Select-Object -First 1
+    if ($null -eq $node -or [string]$node.kind -ne 'agent' -or
+        [string]$node.topology -ne 'background-thread') {
+        throw 'Recovery cycle source must be a durable background-thread node.'
+    }
+
+    $activationPath = ''
+    $activationHash = ''
+    $activeMilestoneId = ''
+    if ($null -ne $plan.PSObject.Properties['durable_review_profile']) {
+        $milestones = @(
+            $plan.durable_review_profile.milestone_ids |
+                ForEach-Object { [string]$_ }
+        )
+        if ($milestones.Count -lt 1 -or
+            [string]::IsNullOrWhiteSpace($MilestoneId)) {
+            throw 'Durable recovery requires its active MilestoneId.'
+        }
+        $events = @(Read-OrchestrationJournal (Join-Path $runRoot 'events.jsonl'))
+        $activationEvents = @($events | Where-Object {
+            [string]$_.event -eq 'milestone-activated'
+        })
+        if ($activationEvents.Count -eq 0) {
+            $activeMilestoneId = $milestones[0]
+            $activationHash = Get-TextSha256 (
+                "baseline|$([string]$run.run_id)|$([string]$run.plan_hash)|" +
+                $activeMilestoneId
+            )
+        } else {
+            $activeEvent = $activationEvents[-1]
+            $activeMilestoneId = [string]$activeEvent.milestone_id
+            $activationPath =
+                [string]$activeEvent.milestone_activation_receipt_path
+            $activationHash =
+                [string]$activeEvent.milestone_activation_receipt_hash
+            $activationFullPath = Get-RunLocalReceiptPath `
+                -RunDirectory $runRoot -RelativePath $activationPath `
+                -Label 'Milestone activation receipt'
+            if (-not (Test-Path -LiteralPath $activationFullPath -PathType Leaf)) {
+                throw 'Milestone activation receipt is missing.'
+            }
+            $activation = Get-Content -LiteralPath $activationFullPath -Raw |
+                ConvertFrom-Json -Depth 100 -DateKind String
+            $activationPayload = [ordered]@{}
+            foreach ($property in $activation.PSObject.Properties) {
+                if ($property.Name -ne 'receipt_hash') {
+                    $activationPayload[$property.Name] = $property.Value
+                }
+            }
+            if ([string]$activation.receipt_hash -ne $activationHash -or
+                (Get-TextSha256 (
+                    $activationPayload | ConvertTo-Json -Compress -Depth 100
+                )) -ne $activationHash -or
+                [string]$activation.milestone_id -ne $activeMilestoneId) {
+                throw 'Milestone activation receipt binding is invalid.'
+            }
+        }
+        if ($MilestoneId -ne $activeMilestoneId -or
+            $MilestoneId -notin $milestones) {
+            throw 'Recovery cycle does not match the active durable milestone.'
+        }
+    } elseif (-not [string]::IsNullOrWhiteSpace($MilestoneId)) {
+        throw 'A non-durable-review run cannot declare a recovery milestone.'
+    } else {
+        $activationHash = Get-TextSha256 (
+            "non-durable|$([string]$run.run_id)|$([string]$run.plan_hash)"
+        )
+    }
+
+    $cyclePayload = [ordered]@{
+        run_id = [string]$run.run_id
+        source_node_id = $SourceNodeId
+        role_id = [string]$node.role_id
+        original_thread_id = $OriginalThreadId
+        continuity_key = [string]$node.context.continuity_key
+        recovery_stage = 'original'
+        milestone_id = $activeMilestoneId
+        milestone_activation_receipt_hash = $activationHash
+        checkpoint_hash = $CheckpointHash
+        input_manifest_hash = $InputManifestHash
+    }
+    [pscustomobject]@{
+        recovery_cycle_id = Get-TextSha256 (
+            $cyclePayload | ConvertTo-Json -Compress -Depth 20
+        )
+        milestone_id = $activeMilestoneId
+        milestone_activation_receipt_path = $activationPath
+        milestone_activation_receipt_hash = $activationHash
+    }
+}
+
 function Read-ThreadResultRecoveryReceipt {
     param(
         [Parameter(Mandatory)][string] $Path,
@@ -673,7 +780,7 @@ function Read-ThreadResultRecoveryReceipt {
     )
     $recoveryStage = if ([string]$receipt.schema_version -eq '1.1') {
         'replacement'
-    } elseif ([string]$receipt.schema_version -eq '1.0') {
+    } elseif ([string]$receipt.schema_version -in @('1.0', '1.2')) {
         'original'
     } else {
         throw 'Thread result recovery receipt has an unsupported schema.'
@@ -682,6 +789,12 @@ function Read-ThreadResultRecoveryReceipt {
         $required += @(
             'recovery_stage', 'replacement_continuity_receipt_path',
             'replacement_continuity_receipt_hash'
+        )
+    } elseif ([string]$receipt.schema_version -eq '1.2') {
+        $required += @(
+            'recovery_stage', 'recovery_cycle_id', 'milestone_id',
+            'milestone_activation_receipt_path',
+            'milestone_activation_receipt_hash'
         )
     }
     $payload = [ordered]@{}
@@ -718,6 +831,32 @@ function Read-ThreadResultRecoveryReceipt {
             [string]$replacement.input_manifest_hash -ne
                 [string]$receipt.input_manifest_hash) {
             throw 'Replacement recovery changed its continuity receipt.'
+        }
+    } elseif ([string]$receipt.schema_version -eq '1.2') {
+        if ([string]$receipt.recovery_stage -ne 'original') {
+            throw 'Original recovery cycle receipt has an invalid stage.'
+        }
+        $cycle = Get-OriginalRecoveryCycleBinding `
+            -RunDirectory $RunDirectory -SourceNodeId $ExpectedSourceNodeId `
+            -OriginalThreadId $ExpectedOriginalThreadId `
+            -CheckpointHash ([string]$receipt.checkpoint_hash) `
+            -InputManifestHash ([string]$receipt.input_manifest_hash) `
+            -MilestoneId ([string]$receipt.milestone_id)
+        if ([string]$receipt.recovery_cycle_id -ne
+                [string]$cycle.recovery_cycle_id -or
+            [string]$receipt.milestone_activation_receipt_path -ne
+                [string]$cycle.milestone_activation_receipt_path -or
+            [string]$receipt.milestone_activation_receipt_hash -ne
+                [string]$cycle.milestone_activation_receipt_hash) {
+            throw 'Original recovery cycle binding is invalid.'
+        }
+        $expectedCycleName = (
+            "$ExpectedSourceNodeId.cycle-$([string]$receipt.recovery_cycle_id)." +
+            "attempt-$([int]$receipt.attempt).result-recovery.json"
+        )
+        if ([IO.Path]::GetFileName([IO.Path]::GetFullPath($Path)) -ne
+            $expectedCycleName) {
+            throw 'Original recovery cycle receipt has a non-canonical filename.'
         }
     }
     $run = Get-Content -LiteralPath (Join-Path $RunDirectory 'run.json') -Raw |
@@ -854,6 +993,17 @@ function Read-ThreadResultRecoveryReceipt {
             [string]$previous.input_manifest_hash -ne
                 [string]$receipt.input_manifest_hash) {
             throw 'Thread result recovery receipt chain is invalid.'
+        }
+        if ([string]$receipt.schema_version -eq '1.2' -and (
+            [string]$previous.schema_version -ne '1.2' -or
+            [string]$previous.recovery_cycle_id -ne
+                [string]$receipt.recovery_cycle_id -or
+            [string]$previous.milestone_id -ne
+                [string]$receipt.milestone_id -or
+            [string]$previous.milestone_activation_receipt_hash -ne
+                [string]$receipt.milestone_activation_receipt_hash
+        )) {
+            throw 'Thread result recovery receipt crossed recovery cycles.'
         }
     }
     $hashPayload = [ordered]@{}

@@ -7,6 +7,7 @@ release records.
 
 | Version | Channel | Focus | Details |
 | --- | --- | --- | --- |
+| `v0.7.9` | Stable | Per-review-cycle durable-source recovery | [Notes](v0.7.9.md) |
 | `v0.7.8` | Stable | Append-only abandoned-successor recovery | [Notes](v0.7.8.md) |
 | `v0.7.7` | Stable | Raw Codex `thread.id` capture compatibility | [Notes](v0.7.7.md) |
 | `v0.7.6` | Stable | Auditable durable-review successor runs | [Notes](v0.7.6.md) |

@@ -312,9 +312,13 @@ path/hash; coherently re-signing only the acceptance receipt and chain-tail
 event cannot replace the earlier activation authorization anchor.
 
 When a durable source has no final answer, its node enters `result_pending`.
+An original source recovery is namespaced by a deterministic cycle binding the
+run, source, role, thread, active milestone and activation epoch, checkpoint,
+and input manifest. A new checkpoint/input starts at attempt 1 and has its own
+three-attempt ceiling; receipts cannot chain, replay, or reset across cycles.
 The only legal continuations are a bounded same-source recovery or, after a
-verified 3/3 recovery chain, `replacement_pending` followed by the bound
-replacement thread. Neither pending state satisfies a dependency or completion
+verified 3/3 same-cycle recovery chain, `replacement_pending` followed by the
+bound replacement thread. Neither pending state satisfies a dependency or completion
 gate. A replacement result uses the same logical `source_node_id`, declares
 `source_kind=replacement`, and binds its replacement-continuity receipt.
 If the replacement has no final answer, its recovery receipts use a separate

@@ -37,6 +37,99 @@ function Assert-ThrowsLike {
     Assert-True $caught $Message
 }
 
+function New-RecoveryCyclePlan {
+    param([string] $Path)
+    $cyclePlan = Get-Content -LiteralPath (
+        Join-Path $skillRoot 'references/example-plan.json'
+    ) -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+    $cyclePlan.run_id = 'recovery-cycle-test'
+    $cyclePlan.roles[1].lifetime = 'project'
+    $domainRole = @{}
+    foreach ($entry in $cyclePlan.roles[1].GetEnumerator()) {
+        $domainRole[$entry.Key] = $entry.Value
+    }
+    $domainRole.id = 'domain-role'
+    $domainRole.display_name = 'Domain Role'
+    $domainRole.mission = 'Maintain reusable read-only domain checks.'
+    $domainRole.identity_statement = 'I return read-only domain findings.'
+    $cyclePlan.roles += $domainRole
+
+    $review = $cyclePlan.nodes[1]
+    $review.wave = 1
+    $review.topology = 'background-thread'
+    $review.workflow = 'parallel'
+    $review.depends_on = @()
+    $review.context.continuity_key = 'cycle-dissent'
+    $review.context.inputs = @('source:dissent-input')
+    $domain = @{}
+    foreach ($entry in $review.GetEnumerator()) {
+        $domain[$entry.Key] = $entry.Value
+    }
+    $domain.id = 'domain'
+    $domain.role_id = 'domain-role'
+    $domain.context = @{}
+    foreach ($entry in $review.context.GetEnumerator()) {
+        $domain.context[$entry.Key] = $entry.Value
+    }
+    $domain.context.continuity_key = 'cycle-domain'
+    $domain.context.inputs = @('source:domain-input')
+    $main = $cyclePlan.nodes[2]
+    $main.depends_on = @('review', 'domain')
+    $cyclePlan.nodes = @($review, $domain, $main)
+    $cyclePlan.completion.required_nodes = @('review', 'domain', 'integrate')
+    $cyclePlan.completion.evidence_checks = @(
+        @{ node_id = 'review'; minimum_entries = 1 },
+        @{ node_id = 'domain'; minimum_entries = 1 },
+        @{ node_id = 'integrate'; minimum_entries = 1 }
+    )
+    $cyclePlan.completion.review_disposition_checks = @(
+        @{
+            source_node_id = 'review'
+            path = 'receipts/review.disposition.json'
+            blocking_severities = @('P0', 'P1')
+        },
+        @{
+            source_node_id = 'domain'
+            path = 'receipts/domain.disposition.json'
+            blocking_severities = @('P0', 'P1')
+        }
+    )
+    $cyclePlan.durable_review_profile = @{
+        mode = 'domain-dissent'
+        main_owner_node_id = 'integrate'
+        domain_node_ids = @('domain')
+        dissent_node_ids = @('review')
+        milestone_ids = @('group-1', 'final-gate')
+        consumer_output = 'result-only'
+    }
+    $cyclePlan | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $Path -Encoding utf8
+}
+
+function New-ProgressCapture {
+    param([string] $Path, [string] $ThreadId, [string] $TurnId)
+    [ordered]@{
+        schemaVersion = 1
+        thread = [ordered]@{ id = $ThreadId }
+        page = [ordered]@{ order = 'newest_first' }
+        latestAssistantMessageId = $null
+        turns = @(
+            [ordered]@{
+                id = $TurnId
+                status = 'completed'
+                items = @(
+                    [ordered]@{
+                        type = 'agentMessage'
+                        phase = 'commentary'
+                        text = "Progress for $TurnId without a final answer."
+                    }
+                )
+            }
+        )
+    } | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $Path -Encoding utf8
+}
+
 try {
     $null = New-Item -ItemType Directory -Path $testRoot
     $plan = Get-Content -LiteralPath (
@@ -787,6 +880,238 @@ try {
         $reviewState.status -eq 'result_pending'
     ) 'Replacement execution should remain blocked until a final result event.'
 
+    # A durable original source can open a fresh bounded recovery cycle for a
+    # new checkpoint without consuming or replaying the preceding checkpoint.
+    $cyclePlanPath = Join-Path $testRoot 'recovery-cycle-plan.json'
+    New-RecoveryCyclePlan -Path $cyclePlanPath
+    $cycleRun = Join-Path $testRoot 'recovery-cycle-run'
+    & (Join-Path $scriptRoot 'New-OrchestrationRun.ps1') `
+        -PlanPath $cyclePlanPath -RunDirectory $cycleRun `
+        -WorkspaceRoot $testRoot | Out-Null
+    foreach ($status in @(
+        'launch_reserved', 'materializing', 'materialized', 'running'
+    )) {
+        $modelArguments = if ($status -eq 'materialized') {
+            @{
+                ModelVerificationState = 'unverified'
+                ModelVerificationEvidence = 'observation:model-not-exposed'
+            }
+        } else { @{} }
+        $thread = if ($status -in @('materialized', 'running')) {
+            'cycle-review-thread'
+        } else { $null }
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $cycleRun -NodeId 'review' -Status $status `
+            -Message "cycle review $status" -ThreadId $thread `
+            @modelArguments -IdempotencyKey "cycle-review-$status" |
+            Out-Null
+    }
+    $cycleMaterials = Join-Path $cycleRun 'materials'
+    $cycleReceipts = Join-Path $cycleRun 'receipts'
+    $null = New-Item -ItemType Directory -Path $cycleMaterials, $cycleReceipts
+    $checkpointA = Join-Path $cycleMaterials 'checkpoint-a.json'
+    $inputA = Join-Path $cycleMaterials 'input-a.json'
+    $captureA = Join-Path $cycleMaterials 'capture-a.json'
+    Set-Content -LiteralPath $checkpointA -Value '{"checkpoint":"a"}'
+    Set-Content -LiteralPath $inputA -Value '{"input":"a"}'
+    New-ProgressCapture -Path $captureA -ThreadId 'cycle-review-thread' `
+        -TurnId 'checkpoint-a-turn'
+    $cycleA = & (
+        Join-Path $scriptRoot 'New-ThreadResultRecoveryReceipt.ps1'
+    ) -RunDirectory $cycleRun -SourceNodeId 'review' `
+        -OriginalThreadId 'cycle-review-thread' `
+        -CheckpointManifestPath $checkpointA `
+        -InputManifestPath $inputA -ThreadReadPath $captureA `
+        -MilestoneId 'group-1' -Attempt 1 |
+        ConvertFrom-Json -Depth 30
+    $cycleAPath = Join-Path $cycleReceipts (
+        "review.cycle-$($cycleA.recovery_cycle_id)." +
+        'attempt-1.result-recovery.json'
+    )
+    Assert-True (
+        $cycleA.schema_version -eq '1.2' -and
+        $cycleA.milestone_id -eq 'group-1' -and
+        (Test-Path -LiteralPath $cycleAPath -PathType Leaf)
+    ) 'Original recovery should create a milestone-bound cycle receipt.'
+    & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+        -RunDirectory $cycleRun -NodeId 'review' -Status 'result_pending' `
+        -Message 'checkpoint A final missing' `
+        -ThreadId 'cycle-review-thread' `
+        -ErrorClass 'final_missing_with_progress_evidence' `
+        -RecoveryReceiptPath (
+            [IO.Path]::GetRelativePath($cycleRun, $cycleAPath)
+        ) -IdempotencyKey 'checkpoint-a-result-pending' | Out-Null
+    & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+        -RunDirectory $cycleRun -NodeId 'review' -Status 'running' `
+        -Message 'checkpoint A recovery returned a final' `
+        -ThreadId 'cycle-review-thread' `
+        -IdempotencyKey 'checkpoint-a-recovered-running' | Out-Null
+
+    $checkpointB = Join-Path $cycleMaterials 'checkpoint-b.json'
+    $inputB = Join-Path $cycleMaterials 'input-b.json'
+    $captureB1 = Join-Path $cycleMaterials 'capture-b-1.json'
+    Set-Content -LiteralPath $checkpointB -Value '{"checkpoint":"b"}'
+    Set-Content -LiteralPath $inputB -Value '{"input":"b"}'
+    New-ProgressCapture -Path $captureB1 -ThreadId 'cycle-review-thread' `
+        -TurnId 'checkpoint-b-turn-1'
+    $cycleB1 = & (
+        Join-Path $scriptRoot 'New-ThreadResultRecoveryReceipt.ps1'
+    ) -RunDirectory $cycleRun -SourceNodeId 'review' `
+        -OriginalThreadId 'cycle-review-thread' `
+        -CheckpointManifestPath $checkpointB `
+        -InputManifestPath $inputB -ThreadReadPath $captureB1 `
+        -MilestoneId 'group-1' -Attempt 1 |
+        ConvertFrom-Json -Depth 30
+    Assert-True (
+        $cycleB1.recovery_cycle_id -ne $cycleA.recovery_cycle_id -and
+        $cycleB1.attempt -eq 1
+    ) 'A new checkpoint must start a distinct bounded cycle at attempt one.'
+
+    $changedInputB = Join-Path $cycleMaterials 'input-b-changed.json'
+    Set-Content -LiteralPath $changedInputB -Value '{"input":"changed"}'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ThreadResultRecoveryReceipt.ps1') `
+            -RunDirectory $cycleRun -SourceNodeId 'review' `
+            -OriginalThreadId 'cycle-review-thread' `
+            -CheckpointManifestPath $checkpointB `
+            -InputManifestPath $changedInputB -ThreadReadPath $captureB1 `
+            -MilestoneId 'group-1' -Attempt 1 | Out-Null
+    } 'different input or milestone identity' (
+        'The same checkpoint cannot reset attempts by changing its input.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ThreadResultRecoveryReceipt.ps1') `
+            -RunDirectory $cycleRun -SourceNodeId 'review' `
+            -OriginalThreadId 'cycle-review-thread' `
+            -CheckpointManifestPath $checkpointB `
+            -InputManifestPath $inputB -ThreadReadPath $captureB1 `
+            -MilestoneId 'final-gate' -Attempt 1 | Out-Null
+    } 'active durable milestone' (
+        'A recovery cycle cannot relabel the active milestone.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ThreadResultRecoveryReceipt.ps1') `
+            -RunDirectory $cycleRun -SourceNodeId 'review' `
+            -OriginalThreadId 'cycle-review-thread' `
+            -CheckpointManifestPath $checkpointB `
+            -InputManifestPath $inputB -ThreadReadPath $captureB1 `
+            -MilestoneId 'group-1' -Attempt 1 | Out-Null
+    } 'already exists' (
+        'Attempt one cannot reset an existing checkpoint recovery cycle.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ThreadResultRecoveryReceipt.ps1') `
+            -RunDirectory $cycleRun -SourceNodeId 'domain' `
+            -OriginalThreadId 'cycle-review-thread' `
+            -CheckpointManifestPath $checkpointB `
+            -InputManifestPath $inputB -ThreadReadPath $captureB1 `
+            -MilestoneId 'group-1' -Attempt 1 | Out-Null
+    } 'lifecycle binding' (
+        'A recovery cycle cannot cross logical source ownership.'
+    )
+    Assert-ThrowsLike {
+        Read-ThreadResultRecoveryReceipt -Path $cycleAPath `
+            -RunDirectory $cycleRun -ExpectedSourceNodeId 'review' `
+            -ExpectedOriginalThreadId 'other-thread' `
+            -ExpectedRecoveryStage original | Out-Null
+    } 'does not match its source' (
+        'A recovery cycle cannot replay across durable thread identity.'
+    )
+
+    $cycleB1Path = Join-Path $cycleReceipts (
+        "review.cycle-$($cycleB1.recovery_cycle_id)." +
+        'attempt-1.result-recovery.json'
+    )
+    & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+        -RunDirectory $cycleRun -NodeId 'review' -Status 'result_pending' `
+        -Message 'checkpoint B final missing' `
+        -ThreadId 'cycle-review-thread' `
+        -ErrorClass 'final_missing_with_progress_evidence' `
+        -RecoveryReceiptPath (
+            [IO.Path]::GetRelativePath($cycleRun, $cycleB1Path)
+        ) -IdempotencyKey 'checkpoint-b-result-pending-1' | Out-Null
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $cycleRun | Out-Null
+    } 'not validated' (
+        'A new recovery cycle must preserve result_pending completion blocking.'
+    )
+    & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+        -RunDirectory $cycleRun -NodeId 'review' -Status 'running' `
+        -Message 'checkpoint B bounded recovery attempt two' `
+        -ThreadId 'cycle-review-thread' `
+        -IdempotencyKey 'checkpoint-b-running-2' | Out-Null
+    $captureB2 = Join-Path $cycleMaterials 'capture-b-2.json'
+    New-ProgressCapture -Path $captureB2 -ThreadId 'cycle-review-thread' `
+        -TurnId 'checkpoint-b-turn-2'
+    $cycleB2 = & (
+        Join-Path $scriptRoot 'New-ThreadResultRecoveryReceipt.ps1'
+    ) -RunDirectory $cycleRun -SourceNodeId 'review' `
+        -OriginalThreadId 'cycle-review-thread' `
+        -CheckpointManifestPath $checkpointB `
+        -InputManifestPath $inputB -ThreadReadPath $captureB2 `
+        -MilestoneId 'group-1' -Attempt 2 |
+        ConvertFrom-Json -Depth 30
+    Assert-True (
+        $cycleB2.recovery_cycle_id -eq $cycleB1.recovery_cycle_id -and
+        $cycleB2.previous_receipt_hash -eq $cycleB1.receipt_hash
+    ) 'Attempts inside one cycle must chain to the prior cycle receipt.'
+    $cycleB2Path = Join-Path $cycleReceipts (
+        "review.cycle-$($cycleB2.recovery_cycle_id)." +
+        'attempt-2.result-recovery.json'
+    )
+    $cycleB2Original = Get-Content -LiteralPath $cycleB2Path -Raw
+    $crossCheckpoint = $cycleB2Original |
+        ConvertFrom-Json -AsHashtable -Depth 30
+    $crossCheckpoint.previous_receipt_path = [IO.Path]::GetRelativePath(
+        $cycleRun, $cycleAPath
+    ).Replace('\', '/')
+    $crossCheckpoint.previous_receipt_hash = $cycleA.receipt_hash
+    $crossCheckpointPayload = [ordered]@{}
+    foreach ($entry in $crossCheckpoint.GetEnumerator()) {
+        if ($entry.Key -ne 'receipt_hash') {
+            $crossCheckpointPayload[$entry.Key] = $entry.Value
+        }
+    }
+    $crossCheckpoint.receipt_hash = Get-TextSha256 (
+        $crossCheckpointPayload | ConvertTo-Json -Compress -Depth 30
+    )
+    $crossCheckpoint | ConvertTo-Json -Depth 30 |
+        Set-Content -LiteralPath $cycleB2Path
+    Assert-ThrowsLike {
+        Read-ThreadResultRecoveryReceipt -Path $cycleB2Path `
+            -RunDirectory $cycleRun -ExpectedSourceNodeId 'review' `
+            -ExpectedOriginalThreadId 'cycle-review-thread' `
+            -ExpectedRecoveryStage original | Out-Null
+    } 'chain is invalid' (
+        'A later attempt cannot chain to a prior checkpoint recovery receipt.'
+    )
+    Set-Content -LiteralPath $cycleB2Path -Value $cycleB2Original -NoNewline
+
+    $replayedCycle = $cycleB2Original |
+        ConvertFrom-Json -AsHashtable -Depth 30
+    $replayedCycle.recovery_cycle_id = $cycleA.recovery_cycle_id
+    $replayedPayload = [ordered]@{}
+    foreach ($entry in $replayedCycle.GetEnumerator()) {
+        if ($entry.Key -ne 'receipt_hash') {
+            $replayedPayload[$entry.Key] = $entry.Value
+        }
+    }
+    $replayedCycle.receipt_hash = Get-TextSha256 (
+        $replayedPayload | ConvertTo-Json -Compress -Depth 30
+    )
+    $replayedCycle | ConvertTo-Json -Depth 30 |
+        Set-Content -LiteralPath $cycleB2Path
+    Assert-ThrowsLike {
+        Read-ThreadResultRecoveryReceipt -Path $cycleB2Path `
+            -RunDirectory $cycleRun -ExpectedSourceNodeId 'review' `
+            -ExpectedOriginalThreadId 'cycle-review-thread' `
+            -ExpectedRecoveryStage original | Out-Null
+    } 'cycle binding is invalid' (
+        'An old recovery cycle identity cannot be replayed at a new checkpoint.'
+    )
+    Set-Content -LiteralPath $cycleB2Path -Value $cycleB2Original -NoNewline
+
     $fixturePath = Join-Path $skillRoot (
         'references/durable-recovery-adoption-fixtures.json'
     )
@@ -808,6 +1133,7 @@ try {
         bounded_recovery_verified = $true
         replacement_continuity_verified = $true
         replacement_recovery_epoch_verified = $true
+        original_recovery_cycles_verified = $true
         cross_source_rejected = $true
         consumer_result_only = $true
     } | ConvertTo-Json -Depth 10
