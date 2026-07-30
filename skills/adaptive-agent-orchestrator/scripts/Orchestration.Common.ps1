@@ -2753,6 +2753,24 @@ function Read-DurableReviewSuccessorAdoptionReceipt {
             ConvertTo-Json -Compress -Depth 100)) {
         throw 'Successor adoption changed inherited identities or P1 obligations.'
     }
+    $declaredMilestones = @(
+        $plan.durable_review_profile.milestone_ids |
+            ForEach-Object { [string]$_ }
+    )
+    if ([string]$receipt.predecessor_run_id -ne
+            [string]$export.predecessor_run_id -or
+        [string]$receipt.predecessor_active_milestone_id -ne
+            [string]$export.active_milestone_id -or
+        [string]$receipt.checkpoint_material_hash -ne
+            [string]$export.checkpoint_material_hash -or
+        [string]$receipt.source_bindings_hash -ne
+            [string]$export.source_bindings_hash -or
+        [string]$receipt.inherited_obligations_hash -ne
+            [string]$export.open_obligations_hash -or
+        (@($receipt.successor_milestone_ids) -join "`n") -ne
+            ($declaredMilestones -join "`n")) {
+        throw 'Successor adoption lineage declaration changed.'
+    }
     foreach ($binding in @($receipt.source_bindings)) {
         $nodeMatches = @($plan.nodes | Where-Object {
             [string]$_.id -eq [string]$binding.source_node_id

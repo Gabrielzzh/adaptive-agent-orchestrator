@@ -318,6 +318,57 @@ function Resign-SuccessorExportTail {
     $lines | Set-Content -LiteralPath $eventsPath -Encoding utf8
 }
 
+function Assert-AdoptionMutationRejected {
+    param(
+        [string] $Run,
+        [scriptblock] $ReceiptMutation,
+        [string] $Message
+    )
+    $receiptPath = Join-Path $Run (
+        'receipts/durable-review-successor.adoption.json'
+    )
+    $eventsPath = Join-Path $Run 'events.jsonl'
+    $receiptRaw = Get-Content -LiteralPath $receiptPath -Raw
+    $eventLines = @(Get-Content -LiteralPath $eventsPath)
+    try {
+        $receipt = $receiptRaw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        & $ReceiptMutation $receipt
+        $receipt.Remove('receipt_hash')
+        $receipt.receipt_hash = Get-TextSha256 (
+            $receipt | ConvertTo-Json -Compress -Depth 100
+        )
+        $receipt | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $receiptPath -Encoding utf8
+        $mutatedLines = @($eventLines)
+        $previous = $eventLines[0] |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        for ($index = 1; $index -lt $eventLines.Count; $index++) {
+            $event = $eventLines[$index] |
+                ConvertFrom-Json -AsHashtable -Depth 100
+            $event.prev_hash = $previous.hash
+            if ($index -eq 1) {
+                $event.result_receipt_hash = $receipt.receipt_hash
+                $event.request_fingerprint = $receipt.receipt_hash
+            }
+            $event.Remove('hash')
+            $event.hash = Get-OrchestrationEventHash ([pscustomobject]$event)
+            $mutatedLines[$index] =
+                $event | ConvertTo-Json -Compress -Depth 100
+            $previous = $event
+        }
+        $mutatedLines | Set-Content -LiteralPath $eventsPath -Encoding utf8
+        Assert-ThrowsLike {
+            Read-DurableReviewSuccessorAdoptionReceipt `
+                -RunDirectory $Run | Out-Null
+        } 'lineage declaration changed' $Message
+    }
+    finally {
+        Set-Content -LiteralPath $receiptPath -Value $receiptRaw -Encoding utf8
+        $eventLines | Set-Content -LiteralPath $eventsPath -Encoding utf8
+    }
+}
+
 function Complete-SourceLifecycle {
     param(
         [string] $Run,
@@ -1064,6 +1115,22 @@ try {
     Assert-True $successorCompletion.complete (
         'Same-source resolved and re-reviewed inherited P1 may complete.'
     )
+    Assert-AdoptionMutationRejected -Run $successorRun -ReceiptMutation {
+        param($receipt)
+        $receipt.predecessor_run_id = 'other-predecessor'
+    } -Message 'Adoption cannot relabel its predecessor run.'
+    Assert-AdoptionMutationRejected -Run $successorRun -ReceiptMutation {
+        param($receipt)
+        $receipt.predecessor_active_milestone_id = 'other-milestone'
+    } -Message 'Adoption cannot relabel the predecessor terminal milestone.'
+    Assert-AdoptionMutationRejected -Run $successorRun -ReceiptMutation {
+        param($receipt)
+        $receipt.checkpoint_material_hash = ('c' * 64)
+    } -Message 'Adoption cannot relabel the inherited checkpoint.'
+    Assert-AdoptionMutationRejected -Run $successorRun -ReceiptMutation {
+        param($receipt)
+        $receipt.successor_milestone_ids = @('other-1', 'other-2')
+    } -Message 'Adoption cannot relabel the successor milestone declaration.'
     $copiedSuccessor = Join-Path $testRoot 'copied-successor-run'
     Copy-Item -LiteralPath $successorRun -Destination $copiedSuccessor -Recurse
     Assert-ThrowsLike {
