@@ -454,7 +454,7 @@ try {
     $calibrationAdd = & $calibrationScript -Action Add `
         -ProjectRoot $calibrationProject -RunDirectory $reconcileRun `
         -MinWindowUsed 20 -AppVersion '26.7.26' -HostKind 'desktop' `
-        -ExecutionMode local -PolicyVersion '0.7.2' |
+        -ExecutionMode local -PolicyVersion '0.7.3' |
         ConvertFrom-Json -Depth 30
     Assert-True (
         $verifiedReceiptCount -gt 0 -and
@@ -477,7 +477,7 @@ try {
     $calibrationRepeat = & $calibrationScript -Action Add `
         -ProjectRoot $calibrationProject -RunDirectory $reconcileRun `
         -MinWindowUsed 20 -AppVersion '26.7.26' -HostKind 'desktop' `
-        -ExecutionMode local -PolicyVersion '0.7.2' |
+        -ExecutionMode local -PolicyVersion '0.7.3' |
         ConvertFrom-Json -Depth 30
     Assert-True (
         $calibrationRepeat.added -eq 0 -and
@@ -496,7 +496,7 @@ try {
         & $calibrationScript -Action Add -ProjectRoot $calibrationProject `
             -RunDirectory $reconcileRun -AppVersion '26.7.26' `
             -HostKind 'desktop' -ExecutionMode local `
-            -PolicyVersion '0.7.2' | Out-Null
+            -PolicyVersion '0.7.3' | Out-Null
     } 'hash mismatch' 'Calibration must reject a tampered receipt.'
     Set-Content -LiteralPath $adoptedReceiptPath -Value $adoptedReceiptRaw
 
@@ -518,7 +518,7 @@ try {
             app_version = '26.7.26'
             host_kind = 'desktop'
             execution_mode = 'local'
-            policy_version = '0.7.2'
+            policy_version = '0.7.3'
         } | ConvertTo-Json -Compress))
     }
     $seedCalibrationLines.Add(([ordered]@{
@@ -1626,7 +1626,7 @@ try {
     ) -RunDirectory $runDirectory -SkillRoot $skillRoot |
         ConvertFrom-Json -Depth 100
     Assert-True (
-        [string]$measureReport.policy_version -eq '0.7.2' -and
+        [string]$measureReport.policy_version -eq '0.7.3' -and
         @($measureReport.result_receipts).Count -ge 1
     ) (
         'Measure-OrchestrationRun must report the run policy version and receipts.'

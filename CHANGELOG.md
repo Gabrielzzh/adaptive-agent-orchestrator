@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.7.3 - 2026-07-30
+
+Honest model materialization and replacement-recovery patch release.
+
+- Allow a materialized Worker to record `actual model: unverified` when the
+  platform returns a task identity but does not expose the runtime model.
+  The requested route remains separate and cannot be relabeled as observed.
+- Hash-bind model verification state and evidence in the event journal, and
+  preserve unverified status in reduced state, completion output, and
+  task-level receipts.
+- Add a distinct three-attempt recovery epoch when an authorized replacement
+  itself completes without a final answer. Bind it to the replacement
+  continuity receipt, replacement thread, source, role, checkpoint, and input.
+- Derive recovery stage from the immutable lifecycle instead of trusting a
+  caller-supplied `original` or `replacement` label.
+- Require canonical run-local recovery receipt paths, sequential single-use
+  attempts, and a hard stop after attempt 3.
+- Reject replacement-of-replacement, alternate-directory attempt resets, and
+  requested-model-as-actual claims.
+- Preserve the fail-closed boundary: the Skill does not repair platform
+  `systemError` or reveal an actual model the platform never reported.
+
 ## 0.7.2 - 2026-07-30
 
 Durable review and missing-result recovery release.

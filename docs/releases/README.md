@@ -7,6 +7,7 @@ release records.
 
 | Version | Channel | Focus | Details |
 | --- | --- | --- | --- |
+| `v0.7.3` | Stable | Honest unverified model materialization and bounded replacement recovery epochs | [Notes](v0.7.3.md) |
 | `v0.7.2` | Stable | Durable domain/dissent review, finding disposition, bounded missing-final recovery, authorized replacement continuity | [Notes](v0.7.2.md) |
 | `v0.7.1` | Engineering milestone included in v0.7.2 | Durable-task intent, worktree preflight, queued setup, model availability, task-level receipts | [Notes](v0.7.1.md) |
 | `v0.7.0` | Stable | Context-efficient delegation, reliable task materialization, static model routing, release diagnostics | [Notes](v0.7.0.md) |

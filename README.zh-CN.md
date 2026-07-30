@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[English](README.md) · [v0.7.2 正式版说明](docs/releases/v0.7.2.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+[English](README.md) · [v0.7.3 正式版说明](docs/releases/v0.7.3.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
 
 ![Adaptive Agent Orchestrator v0.7.0 发布图](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -47,6 +47,8 @@
 - **final 缺失恢复：** 任务显示 completed 却没有 final 时进入
   `result_pending`，绝不当作成功。同一来源最多进行三次有界回收；替代角色
   必须经过主控授权，并保持来源、角色、checkpoint、input 和恢复链连续性。
+  如果 replacement 也丢失 final，只能使用自己独立的三次恢复阶段，不能再
+  创建 replacement-of-replacement。
 - **诚实接入旧任务：** 对旧任务只捕获真实存在的角色、checkpoint、input、
   turn 与授权材料；平台从未提供的机器身份字段明确标为 unknown，不补造。
 - **不可信结果边界：** 主 Agent 的控制面政策把 Worker 输出视为不可信数据，
@@ -60,7 +62,8 @@
   Worker 使用，另外两个保留给临时 subagent；实际数量服从运行时容量。
 - **静态模型路由：** Luna 处理边界明确的机械任务，Sol 负责判断、写作、
   实现和审查；Terra 只在用户明确指定时使用，正式任务前不会额外启动模型
-  测试 Agent。
+  测试 Agent。平台不公开实际模型时，请求模型与实际模型保持分离，实际模型
+  明确记为 unverified。
 - **确定性模式：** `auto` 在轻量快速路径、独立团队和可恢复工作流之间
   选择，不创建额外调度 Agent。
 - **可复用研究证据：** 只有多条下游工作流需要复用同一来源集时，才按需
@@ -194,11 +197,11 @@ $adaptive-agent-orchestrator。共享上下文留在主 Agent，Worker 只拿引
 
 ## 验证情况
 
-v0.7.2 正式版本通过：
+v0.7.3 正式版本通过：
 
 - 33 个 PowerShell 脚本语法解析；
-- 30 项恢复协议专项断言；
-- 601 项完整自测断言；
+- 41 项恢复协议专项断言；
+- 617 项完整自测断言；
 - 57 份故意构造的非法负面案例均被正确拦截；
 - 8 个 reference JSON 文件严格解析；
 - 计划、元数据、日志、handoff、依赖、幂等、所有权、上下文重叠、渐进

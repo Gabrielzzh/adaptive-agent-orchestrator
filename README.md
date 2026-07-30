@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.7.2 release notes](docs/releases/v0.7.2.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.7.3 release notes](docs/releases/v0.7.3.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -51,7 +51,9 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
 - **Missing-final recovery:** a completed task without a final answer becomes
   `result_pending`, never success. The same source gets at most three bounded
   recovery attempts; an authorized replacement must preserve source, role,
-  checkpoint, input, and recovery-chain continuity.
+  checkpoint, input, and recovery-chain continuity. If the replacement also
+  loses its final, it receives one separate bounded recovery epoch—not another
+  replacement.
 - **Honest legacy adoption:** older tasks can capture the role, checkpoint,
   input, observed turns, and authorization that actually exist while listing
   unavailable machine identity fields as unknown instead of inventing them.
@@ -72,6 +74,8 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
 - **Static model routing:** Luna handles bounded mechanical work; Sol handles
   judgment, writing, implementation, and review. Terra remains
   explicit-request-only, and no benchmark Agent is launched before work.
+  Requested and actual models remain separate when the platform does not expose
+  the runtime model.
 - **Deterministic modes:** `auto` resolves to a lightweight quick path,
   independent team, or recoverable workflow without another routing Agent.
 - **Reusable research evidence:** an on-demand curator builds a source
@@ -217,11 +221,11 @@ state, integrates results, and performs authorized external actions.
 
 ## Validation
 
-The v0.7.2 release passes:
+The v0.7.3 release passes:
 
 - PowerShell parser validation for all 33 scripts;
-- 30 recovery-protocol assertions;
-- 601 self-test assertions;
+- 41 recovery-protocol assertions;
+- 617 self-test assertions;
 - 57 intentionally invalid negative-test cases correctly rejected;
 - strict parsing for all 8 bundled reference JSON files;
 - plan, metadata, journal, handoff, dependency, idempotency, ownership,
