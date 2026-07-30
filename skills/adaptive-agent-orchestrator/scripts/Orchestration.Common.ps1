@@ -228,6 +228,14 @@ function Read-ThreadResultReceipt {
             [string]$receipt.source_kind -notin @('original', 'replacement')) {
             throw 'Thread result receipt has an invalid logical source.'
         }
+        $events = @(Read-OrchestrationJournal (
+            Join-Path $RunDirectory 'events.jsonl'
+        ))
+        $replacementLifecycleEvent = @($events | Where-Object {
+            [string]$_.node_id -eq [string]$receipt.source_node_id -and
+            [string]$_.status -eq 'replacement_pending' -and
+            [string]$_.thread_id -eq $ExpectedThreadId
+        }) | Select-Object -Last 1
         if ([string]$receipt.source_kind -eq 'original') {
             if (-not [string]::IsNullOrWhiteSpace(
                 [string]$receipt.replacement_continuity_receipt_path
@@ -235,6 +243,12 @@ function Read-ThreadResultReceipt {
                 [string]$receipt.replacement_continuity_receipt_hash
             )) {
                 throw 'Original result cannot claim replacement continuity.'
+            }
+            if ($null -ne $replacementLifecycleEvent) {
+                throw (
+                    'Replacement thread result cannot be accepted as an ' +
+                    'original source result.'
+                )
             }
         } else {
             $replacementPath = Get-RunLocalReceiptPath `
@@ -247,7 +261,10 @@ function Read-ThreadResultReceipt {
                 -ExpectedSourceNodeId ([string]$receipt.source_node_id) `
                 -ExpectedReplacementThreadId $ExpectedThreadId
             if ([string]$replacement.receipt_hash -ne
-                [string]$receipt.replacement_continuity_receipt_hash) {
+                [string]$receipt.replacement_continuity_receipt_hash -or
+                $null -eq $replacementLifecycleEvent -or
+                [string]$replacementLifecycleEvent.replacement_receipt_hash -ne
+                    [string]$replacement.receipt_hash) {
                 throw (
                     'Replacement result is not bound to its continuity receipt.'
                 )
@@ -670,6 +687,18 @@ function Read-LegacySourceAdoptionReceipt {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "Legacy source adoption receipt does not exist: $Path"
     }
+    $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+    $canonicalReceiptDirectory = [IO.Path]::GetFullPath(
+        (Join-Path $runRoot 'receipts')
+    ).TrimEnd('\', '/')
+    $receiptFullPath = [IO.Path]::GetFullPath($Path)
+    if (-not [string]::Equals(
+        (Split-Path -Parent $receiptFullPath).TrimEnd('\', '/'),
+        $canonicalReceiptDirectory,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'Legacy adoption receipt must use the canonical run receipts directory.'
+    }
     $receipt = Get-Content -LiteralPath $Path -Raw |
         ConvertFrom-Json -Depth 50 -DateKind String
     $required = @(
@@ -779,9 +808,8 @@ function Read-LegacySourceAdoptionReceipt {
         (@($turnEvidence.turn_id) -join "`n")) {
         throw 'Legacy source adoption turn IDs do not match captured evidence.'
     }
-    $receiptDirectory = Split-Path -Parent ([IO.Path]::GetFullPath($Path))
     $duplicates = @(
-        Get-ChildItem -LiteralPath $receiptDirectory `
+        Get-ChildItem -LiteralPath $canonicalReceiptDirectory `
             -Filter '*.legacy-source-adoption.json' -File |
             ForEach-Object {
                 Get-Content -LiteralPath $_.FullName -Raw |

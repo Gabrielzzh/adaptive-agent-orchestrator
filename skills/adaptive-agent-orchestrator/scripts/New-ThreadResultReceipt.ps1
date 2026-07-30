@@ -44,6 +44,12 @@ $sourceNode = @($plan.nodes | Where-Object {
 if ($null -eq $sourceNode) {
     throw 'Thread result source node does not exist in the run plan.'
 }
+$events = @(Read-OrchestrationJournal (Join-Path $runRoot 'events.jsonl'))
+$replacementLifecycleEvent = @($events | Where-Object {
+    [string]$_.node_id -eq $SourceNodeId -and
+    [string]$_.status -eq 'replacement_pending' -and
+    [string]$_.thread_id -eq $ThreadId
+}) | Select-Object -Last 1
 $captureFullPath = [IO.Path]::GetFullPath($ThreadReadPath)
 $outputFullPath = [IO.Path]::GetFullPath($OutputPath)
 foreach ($candidate in @($captureFullPath, $outputFullPath)) {
@@ -80,11 +86,24 @@ if (-not [string]::IsNullOrWhiteSpace($ReplacementContinuityReceiptPath)) {
         -Path $replacementFullPath -RunDirectory $runRoot `
         -ExpectedSourceNodeId $SourceNodeId `
         -ExpectedReplacementThreadId $ThreadId
+    if ($null -eq $replacementLifecycleEvent -or
+        [string]$replacementLifecycleEvent.replacement_receipt_hash -ne
+            [string]$replacement.receipt_hash) {
+        throw (
+            'Replacement result lacks its immutable replacement_pending ' +
+            'lifecycle binding.'
+        )
+    }
     $sourceKind = 'replacement'
     $replacementRelativePath = [IO.Path]::GetRelativePath(
         $runRoot, $replacementFullPath
     ).Replace('\', '/')
     $replacementHash = [string]$replacement.receipt_hash
+} elseif ($null -ne $replacementLifecycleEvent) {
+    throw (
+        'Replacement thread result requires its continuity receipt; it cannot ' +
+        'be recorded as original.'
+    )
 }
 $structuredPending = @()
 if (-not [string]::IsNullOrWhiteSpace($PendingFindingRecordsPath)) {

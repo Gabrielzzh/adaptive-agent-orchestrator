@@ -94,12 +94,23 @@ foreach ($turn in $turnEvidence) {
 }
 
 $outputFullPath = [IO.Path]::GetFullPath($OutputPath)
+$canonicalReceiptDirectory = [IO.Path]::GetFullPath(
+    (Join-Path $runRoot 'receipts')
+).TrimEnd('\', '/')
 if (-not $outputFullPath.StartsWith(
     $runRoot + [IO.Path]::DirectorySeparatorChar,
     [StringComparison]::OrdinalIgnoreCase
 ) -or [IO.Path]::GetFileName($outputFullPath) -ne
     "$SourceNodeId.legacy-source-adoption.json") {
     throw 'Legacy adoption receipt path or filename is invalid.'
+}
+$outputDirectory = (Split-Path -Parent $outputFullPath).TrimEnd('\', '/')
+if (-not [string]::Equals(
+    $outputDirectory,
+    $canonicalReceiptDirectory,
+    [StringComparison]::OrdinalIgnoreCase
+)) {
+    throw 'Legacy adoption receipt must use the canonical run receipts directory.'
 }
 if (Test-Path -LiteralPath $outputFullPath) {
     throw "Legacy adoption receipt already exists: $outputFullPath"
@@ -108,10 +119,9 @@ $roleHash = Get-TextSha256 (Get-Content -LiteralPath $rolePath -Raw)
 $checkpointHash = Get-TextSha256 (
     Get-Content -LiteralPath $checkpointPath -Raw
 )
-$existingDirectory = Split-Path -Parent $outputFullPath
-if (Test-Path -LiteralPath $existingDirectory -PathType Container) {
+if (Test-Path -LiteralPath $canonicalReceiptDirectory -PathType Container) {
     $duplicate = @(
-        Get-ChildItem -LiteralPath $existingDirectory `
+        Get-ChildItem -LiteralPath $canonicalReceiptDirectory `
             -Filter '*.legacy-source-adoption.json' -File |
             ForEach-Object {
                 Get-Content -LiteralPath $_.FullName -Raw |
@@ -173,8 +183,8 @@ foreach ($key in $payload.Keys) { $receipt[$key] = $payload[$key] }
 $receipt.receipt_hash = Get-TextSha256 (
     $payload | ConvertTo-Json -Compress -Depth 30
 )
-if (-not (Test-Path -LiteralPath $existingDirectory)) {
-    $null = New-Item -ItemType Directory -Path $existingDirectory
+if (-not (Test-Path -LiteralPath $canonicalReceiptDirectory)) {
+    $null = New-Item -ItemType Directory -Path $canonicalReceiptDirectory
 }
 $receipt | ConvertTo-Json -Depth 30 |
     Set-Content -LiteralPath $outputFullPath -Encoding utf8

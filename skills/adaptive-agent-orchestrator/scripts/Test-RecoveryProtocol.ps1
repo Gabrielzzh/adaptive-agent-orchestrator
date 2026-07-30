@@ -225,6 +225,22 @@ try {
             -ActivationKey 'controller:duplicate' -OutputPath $legacyPath |
             Out-Null
     } 'already exists' 'The same legacy source may only be adopted once.'
+    $alternateReceiptDirectory = Join-Path $run 'alternate-receipts'
+    $null = New-Item -ItemType Directory -Path $alternateReceiptDirectory
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-LegacySourceAdoptionReceipt.ps1') `
+            -RunDirectory $run -SourceNodeId 'review' `
+            -OriginalThreadId 'legacy-review-thread' `
+            -RoleMaterialPath $rolePath -CheckpointMaterialPath $checkpointPath `
+            -InputMaterialPath $inputPath -TurnEvidencePath $turnEvidencePath `
+            -AuthorizationMaterialPath $authorizationPath `
+            -ActivationKey 'controller:cross-directory-duplicate' `
+            -OutputPath (Join-Path $alternateReceiptDirectory (
+                'review.legacy-source-adoption.json'
+            )) | Out-Null
+    } 'canonical run receipts directory' (
+        'Legacy adoption cannot bypass uniqueness through another receipt directory.'
+    )
 
     $missingTurnPath = Join-Path $materials 'missing-turn.json'
     @(
@@ -431,6 +447,17 @@ try {
             text = 'The replacement found a bounded unresolved issue.'
         }
     ) | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $findingsPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ThreadResultReceipt.ps1') `
+            -RunDirectory $run -SourceNodeId 'review' `
+            -ThreadId 'replacement-review-thread' -HostId 'test-host' `
+            -ThreadReadPath $finalCapturePath `
+            -OutputPath (Join-Path $receipts (
+                'omitted-continuity.thread-result-receipt.json'
+            )) -PendingFindingRecordsPath $findingsPath | Out-Null
+    } 'requires its continuity receipt' (
+        'A replacement result cannot omit continuity and masquerade as original.'
+    )
     $resultPath = Join-Path $receipts (
         'review.thread-result-receipt.json'
     )
