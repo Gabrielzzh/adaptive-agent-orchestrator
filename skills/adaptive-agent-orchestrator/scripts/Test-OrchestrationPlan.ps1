@@ -965,6 +965,75 @@ if ($null -ne $durableReview) {
         }
     }
 }
+$successorReview = Get-PlanProperty $plan 'successor_review_profile'
+if ($null -ne $successorReview) {
+    if ($null -eq $durableReview) {
+        Add-PlanError (
+            'successor_review_profile requires durable_review_profile.'
+        )
+    }
+    $predecessorRunId = Require-Text $successorReview (
+        'predecessor_run_id'
+    ) 'successor_review_profile'
+    $predecessorMilestoneId = Require-Text $successorReview (
+        'predecessor_active_milestone_id'
+    ) 'successor_review_profile'
+    $predecessorCheckpointHash = Require-Text $successorReview (
+        'predecessor_checkpoint_material_hash'
+    ) 'successor_review_profile'
+    if ($predecessorRunId -notmatch
+        '^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$' -or
+        $predecessorRunId -eq [string](Get-PlanProperty $plan 'run_id')) {
+        Add-PlanError (
+            'successor_review_profile.predecessor_run_id must be a distinct ' +
+            'safe run ID.'
+        )
+    }
+    if ($predecessorMilestoneId -notmatch
+        '^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$') {
+        Add-PlanError (
+            'successor_review_profile predecessor milestone ID is invalid.'
+        )
+    }
+    if ($predecessorCheckpointHash -notmatch '^[0-9a-f]{64}$') {
+        Add-PlanError (
+            'successor_review_profile predecessor checkpoint requires a ' +
+            'lowercase SHA-256 digest.'
+        )
+    }
+    $successorSourceIds = @(
+        Get-PlanProperty $successorReview 'source_node_ids' |
+            ForEach-Object { [string]$_ }
+    )
+    $durableSourceIds = if ($null -eq $durableReview) { @() } else {
+        @(
+            @(Get-PlanProperty $durableReview 'domain_node_ids') +
+            @(Get-PlanProperty $durableReview 'dissent_node_ids') |
+                ForEach-Object { [string]$_ }
+        )
+    }
+    if (($successorSourceIds -join "`n") -ne
+        ($durableSourceIds -join "`n")) {
+        Add-PlanError (
+            'successor_review_profile.source_node_ids must exactly preserve ' +
+            'the ordered durable source set.'
+        )
+    }
+    foreach ($sourceNodeId in $successorSourceIds) {
+        if (-not $ids.ContainsKey($sourceNodeId)) { continue }
+        $sourceNode = $ids[$sourceNodeId]
+        $sourceContext = Get-PlanProperty $sourceNode 'context'
+        if ((Get-PlanProperty $sourceContext 'session_policy') -ne 'reuse' -or
+            [string]::IsNullOrWhiteSpace(
+                [string](Get-PlanProperty $sourceContext 'prior_thread_id')
+            )) {
+            Add-PlanError (
+                "Successor durable source '$sourceNodeId' must explicitly " +
+                'reuse its predecessor thread.'
+            )
+        }
+    }
+}
 
 $writerIds = @($normalizedWriterScopes.Keys)
 $directorySeparator = [string][IO.Path]::DirectorySeparatorChar

@@ -1,6 +1,8 @@
 Set-StrictMode -Version Latest
-$script:OrchestrationCurrentPolicyVersion = '0.7.5'
-$script:OrchestrationMigratablePolicyVersions = @('0.7.2', '0.7.3', '0.7.4')
+$script:OrchestrationCurrentPolicyVersion = '0.7.6'
+$script:OrchestrationMigratablePolicyVersions = @(
+    '0.7.2', '0.7.3', '0.7.4', '0.7.5'
+)
 
 function Get-TextSha256 {
     param([Parameter(Mandatory)][string] $Text)
@@ -2373,4 +2375,424 @@ function Resolve-OrchestrationRunPolicy {
         )
         activation_receipt_hash = [string]$receipt.receipt_hash
     }
+}
+
+function Get-DurableReviewSuccessorSnapshot {
+    param([Parameter(Mandatory)][string] $RunDirectory)
+
+    $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+    $planPath = Join-Path $runRoot 'plan.json'
+    $runPath = Join-Path $runRoot 'run.json'
+    $eventsPath = Join-Path $runRoot 'events.jsonl'
+    foreach ($path in @($planPath, $runPath, $eventsPath)) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw 'Successor export requires a complete predecessor run.'
+        }
+    }
+    $planRaw = Get-Content -LiteralPath $planPath -Raw
+    $plan = $planRaw | ConvertFrom-Json -Depth 100 -DateKind String
+    $runRaw = Get-Content -LiteralPath $runPath -Raw
+    $run = $runRaw | ConvertFrom-Json -Depth 50 -DateKind String
+    $events = @(Read-OrchestrationJournal $eventsPath)
+    if ($events.Count -lt 1 -or
+        [string]$run.run_id -ne [string]$plan.run_id -or
+        [string]$run.plan_hash -ne (Get-TextSha256 $planRaw)) {
+        throw 'Predecessor run identity is inconsistent.'
+    }
+    if ($null -eq $plan.PSObject.Properties['durable_review_profile']) {
+        throw 'Successor export requires durable_review_profile.'
+    }
+    $chain = Read-DurableReviewMilestoneActivationChain -RunDirectory $runRoot
+    if (-not [string]::IsNullOrWhiteSpace([string]$chain.next_milestone_id)) {
+        throw 'Successor export requires the final declared predecessor milestone.'
+    }
+    $policy = Resolve-OrchestrationRunPolicy -RunDirectory $runRoot -Events $events
+    $requiredSourceIds = @(
+        @($plan.durable_review_profile.domain_node_ids) +
+        @($plan.durable_review_profile.dissent_node_ids) |
+            ForEach-Object { [string]$_ }
+    )
+    $sourceBindings = [Collections.Generic.List[object]]::new()
+    $openObligations = [Collections.Generic.List[object]]::new()
+    foreach ($sourceNodeId in $requiredSourceIds) {
+        $bindingMatches = @($chain.active_source_bindings | Where-Object {
+            [string]$_.source_node_id -eq $sourceNodeId
+        })
+        if ($bindingMatches.Count -ne 1) {
+            throw "Active milestone source '$sourceNodeId' is missing or repeated."
+        }
+        $binding = $bindingMatches[0]
+        $nodeMatches = @($plan.nodes | Where-Object {
+            [string]$_.id -eq $sourceNodeId
+        })
+        if ($nodeMatches.Count -ne 1) {
+            throw "Predecessor source node '$sourceNodeId' is missing or repeated."
+        }
+        $roleId = [string]$nodeMatches[0].role_id
+        $roleMatches = @($plan.roles | Where-Object {
+            [string]$_.id -eq $roleId
+        })
+        if ($roleMatches.Count -ne 1) {
+            throw "Predecessor role '$roleId' is missing or repeated."
+        }
+        $roleHash = Get-TextSha256 (
+            $roleMatches[0] | ConvertTo-Json -Compress -Depth 100
+        )
+        $dispositionPath = Join-Path $runRoot (
+            [string]$binding.disposition_receipt_path
+        )
+        $disposition = Read-ReviewDispositionReceipt -Path $dispositionPath `
+            -RunDirectory $runRoot -ExpectedSourceNodeId $sourceNodeId `
+            -ExpectedThreadId ([string]$binding.source_thread_id)
+        $sourceBindings.Add([ordered]@{
+            source_node_id = $sourceNodeId
+            role_id = $roleId
+            role_contract_hash = $roleHash
+            source_thread_id = [string]$binding.source_thread_id
+            milestone_id = [string]$chain.active_milestone_id
+            checkpoint_material_path =
+                [string]$binding.checkpoint_material_path
+            checkpoint_material_hash =
+                [string]$binding.checkpoint_material_hash
+            result_receipt_path = [string]$binding.result_receipt_path
+            result_receipt_hash = [string]$binding.result_receipt_hash
+            result_file_hash = [string]$binding.result_file_hash
+            disposition_receipt_path =
+                [string]$binding.disposition_receipt_path
+            disposition_receipt_hash =
+                [string]$binding.disposition_receipt_hash
+            disposition_file_hash = [string]$binding.disposition_file_hash
+        })
+        foreach ($decision in @($disposition.decisions)) {
+            if ([string]$decision.severity -eq 'P0' -and
+                [string]$decision.resolution_status -ne 'resolved') {
+                throw (
+                    "Successor export cannot carry unresolved P0 from " +
+                    "'$sourceNodeId'."
+                )
+            }
+            if ([string]$decision.severity -eq 'P1' -and
+                [string]$decision.resolution_status -ne 'resolved') {
+                $openObligations.Add([ordered]@{
+                    source_node_id = $sourceNodeId
+                    role_id = $roleId
+                    source_thread_id = [string]$binding.source_thread_id
+                    source_finding_id = [string]$decision.source_finding_id
+                    canonical_finding_id =
+                        [string]$decision.canonical_finding_id
+                    severity = 'P1'
+                    finding = [string]$decision.finding
+                    finding_hash = [string]$decision.finding_hash
+                    resolution_status = [string]$decision.resolution_status
+                })
+            }
+        }
+    }
+    if ($openObligations.Count -lt 1) {
+        throw 'Successor export requires at least one unresolved P1 obligation.'
+    }
+    $checkpointPaths = @(
+        $sourceBindings |
+            ForEach-Object { [string]$_['checkpoint_material_path'] } |
+            Select-Object -Unique
+    )
+    $checkpointHashes = @(
+        $sourceBindings |
+            ForEach-Object { [string]$_['checkpoint_material_hash'] } |
+            Select-Object -Unique
+    )
+    if ($checkpointPaths.Count -ne 1 -or $checkpointHashes.Count -ne 1) {
+        throw 'Successor export sources must bind one checkpoint.'
+    }
+    return [pscustomobject]@{
+        run_root = $runRoot
+        plan = $plan
+        plan_raw = $planRaw
+        plan_hash = [string]$run.plan_hash
+        run = $run
+        run_raw = $runRaw
+        run_file_hash = (
+            Get-FileHash -LiteralPath $runPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        events = $events
+        genesis_hash = [string]$events[0].hash
+        effective_policy_version = [string]$policy.effective_policy_version
+        active_milestone_id = [string]$chain.active_milestone_id
+        active_milestone_receipt_path =
+            [string]$chain.activation_receipt_path
+        active_milestone_receipt_hash =
+            [string]$chain.activation_receipt_hash
+        checkpoint_material_path = [string]$checkpointPaths[0]
+        checkpoint_material_hash = [string]$checkpointHashes[0]
+        source_bindings = @($sourceBindings)
+        source_bindings_hash = Get-TextSha256 (
+            @($sourceBindings) | ConvertTo-Json -Compress -Depth 100
+        )
+        open_obligations = @($openObligations)
+        open_obligations_hash = Get-TextSha256 (
+            @($openObligations) | ConvertTo-Json -Compress -Depth 100
+        )
+    }
+}
+
+function Read-DurableReviewSuccessorExportReceipt {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $PredecessorRunDirectory,
+        [Parameter(Mandatory)][string] $SuccessorPlanPath,
+        [string] $ExpectedSuccessorRunDirectory = ''
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Successor export receipt does not exist: $Path"
+    }
+    $receipt = Get-Content -LiteralPath $Path -Raw |
+        ConvertFrom-Json -Depth 100 -DateKind String
+    $keys = @(
+        'schema_version', 'predecessor_run_path', 'predecessor_run_id',
+        'predecessor_plan_hash',
+        'predecessor_run_file_hash', 'predecessor_genesis_hash',
+        'predecessor_journal_head', 'predecessor_journal_event_count',
+        'effective_policy_version', 'active_milestone_id',
+        'active_milestone_receipt_path', 'active_milestone_receipt_hash',
+        'checkpoint_material_path', 'checkpoint_material_hash',
+        'source_bindings', 'source_bindings_hash', 'open_obligations',
+        'open_obligations_hash', 'successor_run_id', 'successor_plan_hash',
+        'successor_run_path',
+        'successor_milestone_ids', 'authorization_material_path',
+        'authorization_material_hash', 'activation_key', 'created_at_utc'
+    )
+    $payload = [ordered]@{}
+    foreach ($name in $keys) {
+        if ($null -eq $receipt.PSObject.Properties[$name]) {
+            throw "Successor export receipt is missing '$name'."
+        }
+        $payload[$name] = $receipt.$name
+    }
+    if ([string]$receipt.schema_version -ne '1.0' -or
+        [string]$receipt.receipt_hash -ne (Get-TextSha256 (
+            $payload | ConvertTo-Json -Compress -Depth 100
+        ))) {
+        throw 'Successor export receipt hash or schema is invalid.'
+    }
+    $snapshot = Get-DurableReviewSuccessorSnapshot `
+        -RunDirectory $PredecessorRunDirectory
+    $events = @($snapshot.events)
+    if ($events.Count -ne ([int]$receipt.predecessor_journal_event_count + 1) -or
+        [string]$events[-2].hash -ne [string]$receipt.predecessor_journal_head) {
+        throw 'Predecessor journal changed outside the successor export event.'
+    }
+    $exportEvent = $events[-1]
+    if ([string]$exportEvent.event -ne 'durable-review-successor-exported' -or
+        [string]$exportEvent.result_receipt_hash -ne
+            [string]$receipt.receipt_hash -or
+        [string]$exportEvent.prev_hash -ne
+            [string]$receipt.predecessor_journal_head) {
+        throw 'Successor export event does not bind the receipt.'
+    }
+    $successorPlanRaw = Get-Content -LiteralPath $SuccessorPlanPath -Raw
+    $successorPlan = $successorPlanRaw |
+        ConvertFrom-Json -Depth 100 -DateKind String
+    $comparisons = @(
+        @([string]$receipt.predecessor_run_path,
+            [string]$snapshot.run_root),
+        @([string]$receipt.predecessor_run_id, [string]$snapshot.run.run_id),
+        @([string]$receipt.predecessor_plan_hash, [string]$snapshot.plan_hash),
+        @([string]$receipt.predecessor_run_file_hash,
+            [string]$snapshot.run_file_hash),
+        @([string]$receipt.predecessor_genesis_hash,
+            [string]$snapshot.genesis_hash),
+        @([string]$receipt.effective_policy_version,
+            [string]$snapshot.effective_policy_version),
+        @([string]$receipt.active_milestone_id,
+            [string]$snapshot.active_milestone_id),
+        @([string]$receipt.active_milestone_receipt_hash,
+            [string]$snapshot.active_milestone_receipt_hash),
+        @([string]$receipt.checkpoint_material_hash,
+            [string]$snapshot.checkpoint_material_hash),
+        @([string]$receipt.source_bindings_hash,
+            [string]$snapshot.source_bindings_hash),
+        @([string]$receipt.open_obligations_hash,
+            [string]$snapshot.open_obligations_hash),
+        @([string]$receipt.successor_run_id, [string]$successorPlan.run_id),
+        @([string]$receipt.successor_plan_hash,
+            (Get-TextSha256 $successorPlanRaw))
+    )
+    if (@($comparisons | Where-Object { $_[0] -ne $_[1] }).Count -gt 0) {
+        throw 'Successor export receipt no longer matches its bound runs.'
+    }
+    if ((@($receipt.source_bindings) | ConvertTo-Json -Compress -Depth 100) -ne
+        (@($snapshot.source_bindings) | ConvertTo-Json -Compress -Depth 100) -or
+        (@($receipt.open_obligations) |
+            ConvertTo-Json -Compress -Depth 100) -ne
+        (@($snapshot.open_obligations) |
+            ConvertTo-Json -Compress -Depth 100)) {
+        throw 'Successor export source identities or P1 obligations changed.'
+    }
+    $successorMilestones = @(
+        $successorPlan.durable_review_profile.milestone_ids |
+            ForEach-Object { [string]$_ }
+    )
+    if ((@($receipt.successor_milestone_ids) -join "`n") -ne
+        ($successorMilestones -join "`n")) {
+        throw 'Successor export milestone declaration changed.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSuccessorRunDirectory) -and
+        [string]$receipt.successor_run_path -ne [IO.Path]::GetFullPath(
+            $ExpectedSuccessorRunDirectory
+        ).TrimEnd('\', '/')) {
+        throw 'Successor export cannot be replayed into another run directory.'
+    }
+    $authorizationPath = Join-Path $snapshot.run_root (
+        [string]$receipt.authorization_material_path
+    )
+    if (-not (Test-Path -LiteralPath $authorizationPath -PathType Leaf) -or
+        [string]$receipt.authorization_material_hash -ne (
+            Get-FileHash -LiteralPath $authorizationPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()) {
+        throw 'Successor export authorization material changed.'
+    }
+    return $receipt
+}
+
+function Read-DurableReviewSuccessorAdoptionReceipt {
+    param([Parameter(Mandatory)][string] $RunDirectory)
+
+    $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+    $planPath = Join-Path $runRoot 'plan.json'
+    $runPath = Join-Path $runRoot 'run.json'
+    $eventsPath = Join-Path $runRoot 'events.jsonl'
+    $receiptPath = Join-Path $runRoot (
+        'receipts/durable-review-successor.adoption.json'
+    )
+    foreach ($path in @($planPath, $runPath, $eventsPath, $receiptPath)) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw 'Successor run lacks its immutable adoption chain.'
+        }
+    }
+    $planRaw = Get-Content -LiteralPath $planPath -Raw
+    $plan = $planRaw | ConvertFrom-Json -Depth 100 -DateKind String
+    if ($null -eq $plan.PSObject.Properties['successor_review_profile']) {
+        throw 'Successor adoption requires successor_review_profile.'
+    }
+    $run = Get-Content -LiteralPath $runPath -Raw |
+        ConvertFrom-Json -Depth 50 -DateKind String
+    $events = @(Read-OrchestrationJournal $eventsPath)
+    if ($events.Count -lt 2) {
+        throw 'Successor adoption event is missing.'
+    }
+    $receipt = Get-Content -LiteralPath $receiptPath -Raw |
+        ConvertFrom-Json -Depth 100 -DateKind String
+    $keys = @(
+        'schema_version', 'run_path', 'run_id', 'plan_hash', 'genesis_hash',
+        'predecessor_run_path', 'predecessor_run_id',
+        'predecessor_final_journal_head',
+        'predecessor_final_journal_event_count', 'export_receipt_path',
+        'export_receipt_hash', 'export_receipt_file_hash',
+        'predecessor_active_milestone_id', 'checkpoint_material_hash',
+        'source_bindings', 'source_bindings_hash', 'inherited_obligations',
+        'inherited_obligations_hash', 'successor_milestone_ids',
+        'created_at_utc'
+    )
+    $payload = [ordered]@{}
+    foreach ($name in $keys) {
+        if ($null -eq $receipt.PSObject.Properties[$name]) {
+            throw "Successor adoption receipt is missing '$name'."
+        }
+        $payload[$name] = $receipt.$name
+    }
+    if ([string]$receipt.schema_version -ne '1.0' -or
+        [string]$receipt.receipt_hash -ne (Get-TextSha256 (
+            $payload | ConvertTo-Json -Compress -Depth 100
+        ))) {
+        throw 'Successor adoption receipt hash or schema is invalid.'
+    }
+    $adoptionEvent = $events[1]
+    if ([string]$adoptionEvent.event -ne 'durable-review-successor-adopted' -or
+        [string]$adoptionEvent.prev_hash -ne [string]$events[0].hash -or
+        [string]$adoptionEvent.result_receipt_hash -ne
+            [string]$receipt.receipt_hash) {
+        throw 'Successor adoption event does not bind the receipt.'
+    }
+    if ([string]$receipt.run_path -ne $runRoot -or
+        [string]$receipt.run_id -ne [string]$run.run_id -or
+        [string]$receipt.plan_hash -ne [string]$run.plan_hash -or
+        [string]$receipt.plan_hash -ne (Get-TextSha256 $planRaw) -or
+        [string]$receipt.genesis_hash -ne [string]$events[0].hash) {
+        throw 'Successor adoption run identity changed.'
+    }
+    $predecessorRoot = [IO.Path]::GetFullPath(
+        [string]$receipt.predecessor_run_path
+    ).TrimEnd('\', '/')
+    $exportPath = Join-Path $predecessorRoot (
+        [string]$receipt.export_receipt_path
+    )
+    $export = Read-DurableReviewSuccessorExportReceipt -Path $exportPath `
+        -PredecessorRunDirectory $predecessorRoot `
+        -SuccessorPlanPath $planPath `
+        -ExpectedSuccessorRunDirectory $runRoot
+    $predecessorEvents = @(Read-OrchestrationJournal (
+        Join-Path $predecessorRoot 'events.jsonl'
+    ))
+    if ([string]$receipt.predecessor_final_journal_head -ne
+            [string]$predecessorEvents[-1].hash -or
+        [int]$receipt.predecessor_final_journal_event_count -ne
+            $predecessorEvents.Count -or
+        [string]$receipt.export_receipt_hash -ne
+            [string]$export.receipt_hash -or
+        [string]$receipt.export_receipt_file_hash -ne (
+            Get-FileHash -LiteralPath $exportPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()) {
+        throw 'Successor adoption predecessor chain changed.'
+    }
+    if ((@($receipt.source_bindings) | ConvertTo-Json -Compress -Depth 100) -ne
+        (@($export.source_bindings) | ConvertTo-Json -Compress -Depth 100) -or
+        (@($receipt.inherited_obligations) |
+            ConvertTo-Json -Compress -Depth 100) -ne
+        (@($export.open_obligations) |
+            ConvertTo-Json -Compress -Depth 100)) {
+        throw 'Successor adoption changed inherited identities or P1 obligations.'
+    }
+    $declaredMilestones = @(
+        $plan.durable_review_profile.milestone_ids |
+            ForEach-Object { [string]$_ }
+    )
+    if ([string]$receipt.predecessor_run_id -ne
+            [string]$export.predecessor_run_id -or
+        [string]$receipt.predecessor_active_milestone_id -ne
+            [string]$export.active_milestone_id -or
+        [string]$receipt.checkpoint_material_hash -ne
+            [string]$export.checkpoint_material_hash -or
+        [string]$receipt.source_bindings_hash -ne
+            [string]$export.source_bindings_hash -or
+        [string]$receipt.inherited_obligations_hash -ne
+            [string]$export.open_obligations_hash -or
+        (@($receipt.successor_milestone_ids) -join "`n") -ne
+            ($declaredMilestones -join "`n")) {
+        throw 'Successor adoption lineage declaration changed.'
+    }
+    foreach ($binding in @($receipt.source_bindings)) {
+        $nodeMatches = @($plan.nodes | Where-Object {
+            [string]$_.id -eq [string]$binding.source_node_id
+        })
+        if ($nodeMatches.Count -ne 1 -or
+            [string]$nodeMatches[0].role_id -ne [string]$binding.role_id -or
+            [string]$nodeMatches[0].context.session_policy -ne 'reuse' -or
+            [string]$nodeMatches[0].context.prior_thread_id -ne
+                [string]$binding.source_thread_id -or
+            [bool]$nodeMatches[0].read_only -ne $true -or
+            [bool]$nodeMatches[0].allow_delegation -ne $false) {
+            throw 'Successor plan does not preserve durable source continuity.'
+        }
+        $roleMatches = @($plan.roles | Where-Object {
+            [string]$_.id -eq [string]$binding.role_id
+        })
+        if ($roleMatches.Count -ne 1 -or
+            (Get-TextSha256 (
+                $roleMatches[0] | ConvertTo-Json -Compress -Depth 100
+            )) -ne [string]$binding.role_contract_hash) {
+            throw 'Successor plan changed a durable role contract.'
+        }
+    }
+    return $receipt
 }

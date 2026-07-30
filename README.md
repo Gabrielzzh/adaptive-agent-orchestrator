@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.7.5 release notes](docs/releases/v0.7.5.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.7.6 release notes](docs/releases/v0.7.6.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -52,6 +52,11 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   activate its next declared milestone through an append-only receipt. Exact
   source chains and fresh main-owner acceptance replace stale fixed paths
   without rewriting the plan or guessing from file timestamps.
+- **Auditable successor runs:** after the final declared milestone, a new run
+  can inherit every unresolved P1 through a hash-bound predecessor export and
+  successor adoption. The old run stays immutable, source/thread continuity is
+  preserved, and completion remains blocked until the same sources resolve and
+  re-review those obligations.
 - **Missing-final recovery:** a completed task without a final answer becomes
   `result_pending`, never success. The same source gets at most three bounded
   recovery attempts; an authorized replacement must preserve source, role,
@@ -229,13 +234,13 @@ state, integrates results, and performs authorized external actions.
 
 ## Validation
 
-The v0.7.5 release passes:
+The v0.7.6 release passes:
 
-- PowerShell parser validation for all 38 scripts;
-- 19 durable-milestone assertions;
+- PowerShell parser validation for all 41 scripts;
+- 37 durable-milestone and successor-run assertions;
 - 15 run-policy activation assertions;
 - 45 recovery-protocol assertions;
-- 704 self-test assertions;
+- 722 self-test assertions;
 - 59 intentionally invalid negative-test cases correctly rejected;
 - strict parsing for all 8 bundled reference JSON files;
 - plan, metadata, journal, handoff, dependency, idempotency, ownership,
@@ -245,9 +250,11 @@ The v0.7.5 release passes:
   completion tests;
 - strict JSON parsing and a real Windows Junction/reparse-point fixture;
 - Skill Creator validation;
-- independent dynamic re-attack of milestone selection, main-owner acceptance,
-  and coherent chain-tail re-signing, ending GREEN with P0=0, P1=0, and P2=0;
-  an additional 30/30 attack set passed.
+- independent dynamic re-attack of predecessor export, successor adoption,
+  lineage fields, source continuity, and coherent receipt re-signing, ending
+  GREEN with P0=0, P1=0, and P2=0; an additional 28/28 attack set passed;
+- a temporary-copy adoption test of the real durable-review run inherited
+  17/17 P1 findings across two sources and remained correctly `BLOCKED`.
 
 Run:
 
@@ -264,6 +271,9 @@ pwsh -NoProfile -File `
   and replacement continuity.
 - It does not migrate business artifacts. Policy activation only authorizes the
   existing immutable run to use the newer orchestration contract.
+- Successor adoption carries orchestration obligations and identities, not
+  project files or business state. The successor plan must declare its own
+  future milestones.
 - The local hash chain detects in-chain changes, but an attacker able to
   rewrite the earliest activation and every later journal entry still requires
   an externally retained head/hash anchor for full-history resistance.

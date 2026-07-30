@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[English](README.md) · [v0.7.5 正式版说明](docs/releases/v0.7.5.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+[English](README.md) · [v0.7.6 正式版说明](docs/releases/v0.7.6.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
 
 ![Adaptive Agent Orchestrator v0.7.0 发布图](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -47,6 +47,10 @@
 - **跨里程碑审核推进：** 同一个长期审核 run 可通过追加式收据激活下一条已
   声明里程碑，精确绑定来源链并要求主 Agent重新验收；无需改写 plan，也不
   会按文件时间猜测“最新结果”。
+- **可审计 successor run：** 最后一条预声明里程碑用完后，新 run 可通过
+  哈希绑定的 predecessor export 与 successor adoption 精确继承全部未解决
+  P1。旧 run 保持不可变，来源/thread 连续性不丢失；同一来源完成处置和复审
+  前，新 run 始终不能完成。
 - **final 缺失恢复：** 任务显示 completed 却没有 final 时进入
   `result_pending`，绝不当作成功。同一来源最多进行三次有界回收；替代角色
   必须经过主控授权，并保持来源、角色、checkpoint、input 和恢复链连续性。
@@ -203,13 +207,13 @@ $adaptive-agent-orchestrator。共享上下文留在主 Agent，Worker 只拿引
 
 ## 验证情况
 
-v0.7.5 正式版本通过：
+v0.7.6 正式版本通过：
 
-- 38 个 PowerShell 脚本语法解析；
-- 19 项 durable milestone 专项断言；
+- 41 个 PowerShell 脚本语法解析；
+- 37 项 durable milestone 与 successor-run 专项断言；
 - 15 项 run policy activation 专项断言；
 - 45 项恢复协议专项断言；
-- 704 项完整自测断言；
+- 722 项完整自测断言；
 - 59 份故意构造的非法负面案例均被正确拦截；
 - 8 个 reference JSON 文件严格解析；
 - 计划、元数据、日志、handoff、依赖、幂等、所有权、上下文重叠、渐进
@@ -217,8 +221,11 @@ v0.7.5 正式版本通过：
   长期审核、结果恢复、替代连续性和完成门测试；
 - 严格 JSON 解析与真实 Windows Junction/reparse point 实体测试；
 - Skill Creator 校验；
-- 同一独立审核角色对里程碑选择、主 Agent验收与链尾一致性重签完成动态
-  复攻，最终 GREEN，P0/P1/P2 均为 0；额外攻击集 30/30 通过。
+- 同一独立审核角色对 predecessor export、successor adoption、谱系字段、
+  来源连续性与一致性重签完成动态复攻，最终 GREEN，P0/P1/P2 均为 0；
+  额外攻击集 28/28 通过；
+- 使用真实长期审核 run 的临时副本完成采用测试：两个来源的 17/17 条 P1
+  全部继承，完成门继续正确保持 `BLOCKED`。
 
 ```powershell
 pwsh -NoProfile -File `
@@ -232,6 +239,8 @@ pwsh -NoProfile -File `
   被误报为成功，并使恢复与替代连续性可核验。
 - Skill 不迁移业务产物；policy activation 只允许既有不可变 run 采用新的
   编排合同。
+- successor adoption 只继承编排义务和身份，不复制项目文件或业务状态；
+  successor plan 必须自行声明后续里程碑。
 - 自然语言排除项无法删除宿主已经注入的历史；应使用 fresh Worker 和明确
   输入引用。
 - 精确重叠检查无法发现“不同名称但语义相同”的材料，主 Agent 仍需拒绝。

@@ -7,6 +7,7 @@ release records.
 
 | Version | Channel | Focus | Details |
 | --- | --- | --- | --- |
+| `v0.7.6` | Stable | Auditable durable-review successor runs | [Notes](v0.7.6.md) |
 | `v0.7.5` | Stable | Append-only cross-milestone durable review | [Notes](v0.7.5.md) |
 | `v0.7.4` | Stable | Auditable activation of immutable older runs | [Notes](v0.7.4.md) |
 | `v0.7.3` | Stable | Honest unverified model materialization and bounded replacement recovery epochs | [Notes](v0.7.3.md) |

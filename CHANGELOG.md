@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.7.6 - 2026-07-30
+
+Auditable durable-review successor-run patch release.
+
+- Add a predecessor export receipt that freezes the old plan, run metadata,
+  genesis, final journal boundary, effective policy, active milestone,
+  checkpoint, exact durable-source identities, and every unresolved P1.
+- Create a new `0.7.6` run only through a successor-adoption command that binds
+  the export, target plan, declared milestones, source continuity, and control
+  authorization. The predecessor remains immutable.
+- Carry each P1 by stable source finding ID, canonical ID, original severity,
+  exact text hash, and status. Missing, changed, downgraded, or cross-source
+  obligations fail closed.
+- Require the same durable source and role continuity to disposition and
+  re-review inherited P1 findings before the successor can complete.
+- Reject P0 carry-forward, directory-copy adoption, bare genesis, replay across
+  runs or checkpoints, duplicate or forked successors, and unbound thread
+  reuse.
+- Preserve one main writer, result-only consumer output, no Worker nesting,
+  model-binding rules, and all existing recovery and milestone gates.
+- Preserve the boundary: this release does not repair platform `systemError`,
+  migrate business artifacts, modify multi-divination, or claim measured
+  production Token savings.
+
 ## 0.7.5 - 2026-07-30
 
 Cross-milestone durable-review roll-forward patch release.

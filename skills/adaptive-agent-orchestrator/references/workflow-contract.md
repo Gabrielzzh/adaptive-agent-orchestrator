@@ -5,7 +5,7 @@
 A durable plan is a JSON object with:
 
 - `schema_version`: currently `"1.0"`;
-- `policy_version`: currently `"0.7.5"`, used to validate and replay the run;
+- `policy_version`: currently `"0.7.6"`, used to validate and replay the run;
 - `run_id`: unique, stable identifier;
 - `orchestrator`: the single controller identity and delegation authority;
 - `goal`: concrete outcome;
@@ -327,6 +327,62 @@ material and explicitly lists unavailable machine fields. This migration path
 does not backfill or infer old hashes. The adoption receipt is single-use and
 only permits a replacement at the captured checkpoint; a checkpoint change
 requires new authorization and a new source contract.
+
+When the final declared milestone still has open P1 obligations and more
+review milestones are required, create a successor run. Never edit the old
+plan, repeat its last milestone, copy its directory, or start an unrelated run.
+The successor plan declares:
+
+```json
+{
+  "successor_review_profile": {
+    "predecessor_run_id": "old-run-id",
+    "predecessor_active_milestone_id": "old-final-milestone",
+    "predecessor_checkpoint_material_hash": "<sha256>",
+    "source_node_ids": ["domain-research", "adversarial-review"]
+  }
+}
+```
+
+Its ordered source set must exactly match the predecessor durable profile.
+Every source remains read-only, keeps the same role contract, and explicitly
+reuses the same durable thread. First export the immutable predecessor state:
+
+```powershell
+pwsh -File scripts/New-DurableReviewSuccessorExportReceipt.ps1 `
+  -PredecessorRunDirectory <old-run> `
+  -SuccessorPlanPath <new-plan> `
+  -SuccessorRunDirectory <new-run> `
+  -AuthorizationMaterialPath <old-run>/materials/successor-authorization.md `
+  -ActivationKey "controller:<stable-authority-reference>"
+```
+
+The append-only export binds the old plan/run/genesis, effective policy, final
+journal head and count, terminal milestone activation, shared checkpoint,
+every source/role/thread/result/disposition identity, every unresolved P1's
+source and canonical IDs, exact text/hash, original severity and status, the
+new run path/ID/plan hash/milestones, and controller authorization. One
+predecessor has one export; a changed plan, journal, source, checkpoint,
+obligation, target plan, or target directory fails closed.
+
+Then create the successor:
+
+```powershell
+pwsh -File scripts/New-OrchestrationSuccessorRun.ps1 `
+  -PlanPath <new-plan> -RunDirectory <new-run> `
+  -WorkspaceRoot <workspace> `
+  -PredecessorRunDirectory <old-run> `
+  -PredecessorExportReceiptPath `
+    <old-run>/receipts/durable-review-successor.export.json
+```
+
+This creates a new run/genesis and one append-only adoption receipt/event. A
+bare genesis or copied directory cannot complete. Completion re-derives the
+export from the predecessor, validates both run identities, and treats every
+inherited P1 as a baseline obligation. Each must reappear under the same source
+with unchanged ID, canonical ID, severity and exact text/hash, then be resolved
+and re-reviewed by that source. The successor may add findings, but it cannot
+omit, downgrade, merge across sources, or claim completion from adoption alone.
 
 - `session_policy`: `fresh` by default, or explicitly justified `reuse`;
 - `continuity_key`: stable workstream identity;
