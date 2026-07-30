@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.7.7 release notes](docs/releases/v0.7.7.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.7.8 release notes](docs/releases/v0.7.8.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -234,13 +234,14 @@ state, integrates results, and performs authorized external actions.
 
 ## Validation
 
-The v0.7.7 release passes:
+The v0.7.8 release passes:
 
-- PowerShell parser validation for all 42 scripts;
+- PowerShell parser validation for all 45 scripts;
+- 52 abandoned-successor recovery assertions;
 - 37 durable-milestone and successor-run assertions;
 - 15 run-policy activation assertions;
 - 45 recovery-protocol assertions;
-- 724 self-test assertions;
+- 739 self-test assertions;
 - 59 intentionally invalid negative-test cases correctly rejected;
 - strict parsing for all 8 bundled reference JSON files;
 - plan, metadata, journal, handoff, dependency, idempotency, ownership,
@@ -261,6 +262,10 @@ The v0.7.7 release passes:
   17/17 P1 findings across two sources and remained correctly `BLOCKED`;
 - two real raw Codex captures generated separate schema 1.3 result and
   disposition receipts without caller-side conversion.
+- a real abandoned successor rolled forward through authorization, export, and
+  fresh adoption: all 18 P1 source occurrences were preserved, consumed
+  attempts carried forward, zero P0 reappeared, and completion remained
+  correctly `BLOCKED`.
 
 Run:
 
@@ -280,6 +285,9 @@ pwsh -NoProfile -File `
 - Successor adoption carries orchestration obligations and identities, not
   project files or business state. The successor plan must declare its own
   future milestones.
+- Abandoned-successor recovery applies only before the first durable milestone
+  and before any review message or result lifecycle. It creates a fresh run; it
+  never revives the cancelled source in the old run.
 - The local hash chain detects in-chain changes, but an attacker able to
   rewrite the earliest activation and every later journal entry still requires
   an externally retained head/hash anchor for full-history resistance.

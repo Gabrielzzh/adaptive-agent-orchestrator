@@ -2677,6 +2677,630 @@ function Read-DurableReviewSuccessorExportReceipt {
     return $receipt
 }
 
+function Get-AbandonedSuccessorSnapshot {
+    param([Parameter(Mandatory)][string] $RunDirectory)
+
+    $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+    $planPath = Join-Path $runRoot 'plan.json'
+    $runPath = Join-Path $runRoot 'run.json'
+    $eventsPath = Join-Path $runRoot 'events.jsonl'
+    foreach ($path in @($planPath, $runPath, $eventsPath)) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw 'Abandoned successor export requires a complete run.'
+        }
+    }
+    $planRaw = Get-Content -LiteralPath $planPath -Raw
+    $plan = $planRaw | ConvertFrom-Json -Depth 100 -DateKind String
+    $runRaw = Get-Content -LiteralPath $runPath -Raw
+    $run = $runRaw | ConvertFrom-Json -Depth 50 -DateKind String
+    $events = @(Read-OrchestrationJournal $eventsPath)
+    if ($events.Count -lt 2 -or
+        [string]$run.run_id -ne [string]$plan.run_id -or
+        [string]$run.plan_hash -ne (Get-TextSha256 $planRaw)) {
+        throw 'Abandoned successor run identity is inconsistent.'
+    }
+    if ($null -eq $plan.PSObject.Properties['successor_review_profile']) {
+        throw 'Abandoned successor export requires a successor run.'
+    }
+    $adoption = Read-DurableReviewSuccessorAdoptionReceipt -RunDirectory $runRoot
+    if ([string]$adoption.schema_version -ne '1.0') {
+        throw 'Only a first-generation successor may be abandoned.'
+    }
+    $exportEvents = @($events | Where-Object {
+        [string]$_.event -eq 'durable-review-abandoned-successor-exported'
+    })
+    if ($exportEvents.Count -gt 1) {
+        throw 'The abandoned successor has more than one export event.'
+    }
+    $baseEvents = if ($exportEvents.Count -eq 1) {
+        if ([string]$events[-1].event -ne
+            'durable-review-abandoned-successor-exported') {
+            throw 'The abandoned successor export must be the journal tail.'
+        }
+        @($events | Select-Object -First ($events.Count - 1))
+    } else { @($events) }
+    if (@($baseEvents | Where-Object {
+        [string]$_.event -eq 'durable-review-milestone-activated' -or
+        [string]$_.event -eq 'durable-review-milestone-accepted'
+    }).Count -gt 0) {
+        throw 'An activated or accepted milestone cannot be abandoned.'
+    }
+    $receiptRoot = Join-Path $runRoot 'receipts'
+    if (Test-Path -LiteralPath $receiptRoot -PathType Container) {
+        $milestoneReceipts = @(Get-ChildItem -LiteralPath $receiptRoot -File |
+            Where-Object {
+                $_.Name -match
+                    '^durable-review-milestone\..+\.(activation|acceptance)\.json$'
+            })
+        if ($milestoneReceipts.Count -gt 0) {
+            throw 'A milestone receipt prevents abandoned-successor recovery.'
+        }
+    }
+    if (@($baseEvents | Where-Object {
+        [string]$_.node_id -eq
+            [string]$plan.durable_review_profile.main_owner_node_id -and
+        [string]$_.status -in @('completed', 'validated', 'adopted', 'archived')
+    }).Count -gt 0) {
+        throw 'A successor with main acceptance cannot be abandoned.'
+    }
+
+    $sourceIds = @($plan.successor_review_profile.source_node_ids |
+        ForEach-Object { [string]$_ })
+    $bindings = [Collections.Generic.List[object]]::new()
+    $cancelledCount = 0
+    foreach ($sourceId in $sourceIds) {
+        $adoptionBindings = @($adoption.source_bindings | Where-Object {
+            [string]$_.source_node_id -eq $sourceId
+        })
+        $nodeMatches = @($plan.nodes | Where-Object {
+            [string]$_.id -eq $sourceId
+        })
+        if ($adoptionBindings.Count -ne 1 -or $nodeMatches.Count -ne 1) {
+            throw "Abandoned successor source '$sourceId' is not uniquely bound."
+        }
+        $history = @($baseEvents | Where-Object {
+            [string]$_.node_id -eq $sourceId
+        })
+        $state = if ($history.Count) {
+            [string]$history[-1].status
+        } else { 'planned' }
+        if ($state -notin @('planned', 'cancelled')) {
+            throw "Abandoned successor source '$sourceId' is not terminal-safe."
+        }
+        if (@($history | Where-Object {
+            [string]$_.status -in @(
+                'completed', 'result_pending', 'replacement_pending',
+                'validated', 'adopted', 'archived'
+            )
+        }).Count -gt 0) {
+            throw "Abandoned successor source '$sourceId' has a result lifecycle."
+        }
+        if ($state -eq 'cancelled') {
+            $cancelledCount++
+            $cancelled = $history[-1]
+            $evidence = @($cancelled.evidence | ForEach-Object { [string]$_ })
+            if ('observation:no-review-message-dispatched' -notin $evidence) {
+                throw "Cancelled source '$sourceId' lacks no-dispatch evidence."
+            }
+            $dispatched = @($history | ForEach-Object { @($_.evidence) } |
+                ForEach-Object { [string]$_ } | Where-Object {
+                    $_ -match '(^|:)review-message-dispatched' -and
+                    $_ -ne 'observation:no-review-message-dispatched'
+                })
+            if ($dispatched.Count -gt 0) {
+                throw "Cancelled source '$sourceId' has dispatched-review evidence."
+            }
+        }
+        $roleId = [string]$nodeMatches[0].role_id
+        $roleMatches = @($plan.roles | Where-Object {
+            [string]$_.id -eq $roleId
+        })
+        if ($roleMatches.Count -ne 1) {
+            throw "Abandoned successor role '$roleId' is not uniquely bound."
+        }
+        $binding = $adoptionBindings[0]
+        $attempts = @($history | Where-Object {
+            [string]$_.status -eq 'launch_reserved'
+        }).Count
+        $bindings.Add([ordered]@{
+            source_node_id = $sourceId
+            role_id = $roleId
+            role_contract_hash = Get-TextSha256 (
+                $roleMatches[0] | ConvertTo-Json -Compress -Depth 100
+            )
+            source_thread_id = [string]$binding.source_thread_id
+            abandoned_state = $state
+            inherited_attempt_count = $attempts
+            cancelled_event_hash = if ($state -eq 'cancelled') {
+                [string]$history[-1].hash
+            } else { '' }
+        })
+    }
+    if ($cancelledCount -lt 1) {
+        throw 'Abandoned successor export requires a cancelled durable source.'
+    }
+    $policy = Resolve-OrchestrationRunPolicy -RunDirectory $runRoot `
+        -Events $baseEvents
+    return [pscustomobject]@{
+        run_root = $runRoot
+        plan = $plan
+        plan_raw = $planRaw
+        plan_hash = [string]$run.plan_hash
+        run = $run
+        run_raw = $runRaw
+        run_file_hash = (
+            Get-FileHash -LiteralPath $runPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        events = @($events)
+        base_events = @($baseEvents)
+        genesis_hash = [string]$baseEvents[0].hash
+        journal_head = [string]$baseEvents[-1].hash
+        journal_event_count = $baseEvents.Count
+        effective_policy_version = [string]$policy.effective_policy_version
+        adoption_receipt = $adoption
+        adoption_receipt_path =
+            'receipts/durable-review-successor.adoption.json'
+        adoption_receipt_file_hash = (
+            Get-FileHash -LiteralPath (Join-Path $runRoot (
+                'receipts/durable-review-successor.adoption.json'
+            )) -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        source_bindings = @($bindings)
+        source_bindings_hash = Get-TextSha256 (
+            @($bindings) | ConvertTo-Json -Compress -Depth 100
+        )
+    }
+}
+
+function Read-AbandonedSuccessorAuthorizationReceipt {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $AbandonedRunDirectory,
+        [Parameter(Mandatory)][string] $SuccessorPlanPath,
+        [Parameter(Mandatory)][string] $ExpectedSuccessorRunDirectory
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Abandoned successor authorization does not exist: $Path"
+    }
+    $receipt = Get-Content -LiteralPath $Path -Raw |
+        ConvertFrom-Json -Depth 100 -DateKind String
+    $keys = @(
+        'schema_version', 'lineage_kind', 'abandoned_run_path',
+        'abandoned_run_id', 'abandoned_plan_hash', 'authorization_journal_head',
+        'authorization_journal_event_count', 'source_bindings_hash',
+        'checkpoint_material_path', 'checkpoint_material_hash',
+        'additional_findings_path', 'additional_findings_hash',
+        'unactivated_evidence_manifest_path',
+        'unactivated_evidence_manifest_hash', 'successor_run_id',
+        'successor_plan_hash', 'successor_run_path', 'successor_milestone_ids',
+        'authorization_material_path', 'authorization_material_hash',
+        'activation_key', 'created_at_utc'
+    )
+    $payload = [ordered]@{}
+    foreach ($name in $keys) {
+        if ($null -eq $receipt.PSObject.Properties[$name]) {
+            throw "Abandoned successor authorization is missing '$name'."
+        }
+        $payload[$name] = $receipt.$name
+    }
+    if ([string]$receipt.schema_version -ne '1.0' -or
+        [string]$receipt.lineage_kind -ne 'abandoned-successor-authorization' -or
+        [string]$receipt.receipt_hash -ne (Get-TextSha256 (
+            $payload | ConvertTo-Json -Compress -Depth 100
+        ))) {
+        throw 'Abandoned successor authorization hash or schema is invalid.'
+    }
+    $snapshot = Get-AbandonedSuccessorSnapshot `
+        -RunDirectory $AbandonedRunDirectory
+    $events = @($snapshot.events)
+    $authorizationEvents = @($events | Where-Object {
+        [string]$_.event -eq 'durable-review-abandoned-successor-authorized'
+    })
+    if ($authorizationEvents.Count -ne 1) {
+        throw 'Abandoned successor authorization event is missing or repeated.'
+    }
+    $authorizationIndex = [Array]::IndexOf($events, $authorizationEvents[0])
+    if ($authorizationIndex -ne [int]$receipt.authorization_journal_event_count) {
+        throw 'Abandoned successor authorization event position changed.'
+    }
+    $event = $authorizationEvents[0]
+    if ([string]$event.prev_hash -ne
+            [string]$receipt.authorization_journal_head -or
+        [string]$event.result_receipt_hash -ne [string]$receipt.receipt_hash -or
+        [string]$event.idempotency_key -ne [string]$receipt.activation_key -or
+        [string]$event.request_fingerprint -ne [string]$receipt.receipt_hash) {
+        throw 'Abandoned successor authorization event binding changed.'
+    }
+    $planRaw = Get-Content -LiteralPath $SuccessorPlanPath -Raw
+    $plan = $planRaw | ConvertFrom-Json -Depth 100 -DateKind String
+    if ([string]$receipt.abandoned_run_path -ne [string]$snapshot.run_root -or
+        [string]$receipt.abandoned_run_id -ne [string]$snapshot.run.run_id -or
+        [string]$receipt.abandoned_plan_hash -ne [string]$snapshot.plan_hash -or
+        [string]$receipt.source_bindings_hash -ne
+            [string]$snapshot.source_bindings_hash -or
+        [string]$receipt.successor_run_id -ne [string]$plan.run_id -or
+        [string]$receipt.successor_plan_hash -ne (Get-TextSha256 $planRaw) -or
+        [string]$receipt.successor_run_path -ne [IO.Path]::GetFullPath(
+            $ExpectedSuccessorRunDirectory
+        ).TrimEnd('\', '/') -or
+        (@($receipt.successor_milestone_ids) -join "`n") -ne
+            (@($plan.durable_review_profile.milestone_ids) -join "`n")) {
+        throw 'Abandoned successor authorization lineage changed.'
+    }
+    foreach ($property in @(
+        'checkpoint_material', 'additional_findings',
+        'unactivated_evidence_manifest', 'authorization_material'
+    )) {
+        $relative = [string]$receipt.("${property}_path")
+        $expectedHash = [string]$receipt.("${property}_hash")
+        $file = Join-Path $snapshot.run_root $relative
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or
+            $expectedHash -ne (
+                Get-FileHash -LiteralPath $file -Algorithm SHA256
+            ).Hash.ToLowerInvariant()) {
+            throw "Abandoned successor authorization material '$property' changed."
+        }
+    }
+    return $receipt
+}
+
+function Read-AbandonedSuccessorExportReceipt {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $AbandonedRunDirectory,
+        [Parameter(Mandatory)][string] $SuccessorPlanPath,
+        [string] $ExpectedSuccessorRunDirectory = ''
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Abandoned successor export receipt does not exist: $Path"
+    }
+    $receipt = Get-Content -LiteralPath $Path -Raw |
+        ConvertFrom-Json -Depth 100 -DateKind String
+    $keys = @(
+        'schema_version', 'lineage_kind', 'abandoned_run_path',
+        'abandoned_run_id', 'abandoned_plan_hash', 'abandoned_run_file_hash',
+        'abandoned_genesis_hash', 'abandoned_journal_head',
+        'abandoned_journal_event_count', 'effective_policy_version',
+        'original_adoption_receipt_path', 'original_adoption_receipt_hash',
+        'original_adoption_receipt_file_hash', 'source_bindings',
+        'source_bindings_hash', 'inherited_obligations',
+        'inherited_obligations_hash', 'additional_findings_path',
+        'additional_findings_hash', 'unactivated_evidence_manifest_path',
+        'unactivated_evidence_manifest_hash', 'checkpoint_material_path',
+        'checkpoint_material_hash', 'successor_run_id',
+        'successor_plan_hash', 'successor_run_path', 'successor_milestone_ids',
+        'authorization_receipt_path', 'authorization_receipt_hash',
+        'authorization_receipt_file_hash', 'authorization_event_hash',
+        'authorization_material_path', 'authorization_material_hash',
+        'activation_key', 'created_at_utc'
+    )
+    $payload = [ordered]@{}
+    foreach ($name in $keys) {
+        if ($null -eq $receipt.PSObject.Properties[$name]) {
+            throw "Abandoned successor export receipt is missing '$name'."
+        }
+        $payload[$name] = $receipt.$name
+    }
+    if ([string]$receipt.schema_version -ne '1.0' -or
+        [string]$receipt.lineage_kind -ne 'abandoned-successor' -or
+        [string]$receipt.receipt_hash -ne (Get-TextSha256 (
+            $payload | ConvertTo-Json -Compress -Depth 100
+        ))) {
+        throw 'Abandoned successor export receipt hash or schema is invalid.'
+    }
+    $snapshot = Get-AbandonedSuccessorSnapshot `
+        -RunDirectory $AbandonedRunDirectory
+    $events = @($snapshot.events)
+    if ($events.Count -ne ([int]$receipt.abandoned_journal_event_count + 1) -or
+        [string]$events[-2].hash -ne [string]$receipt.abandoned_journal_head) {
+        throw 'Abandoned successor journal changed outside its export event.'
+    }
+    $event = $events[-1]
+    if ([string]$event.event -ne
+            'durable-review-abandoned-successor-exported' -or
+        [string]$event.result_receipt_hash -ne [string]$receipt.receipt_hash -or
+        [string]$event.prev_hash -ne [string]$receipt.abandoned_journal_head -or
+        [string]$event.idempotency_key -ne [string]$receipt.activation_key) {
+        throw 'Abandoned successor export event does not bind the receipt.'
+    }
+    $planRaw = Get-Content -LiteralPath $SuccessorPlanPath -Raw
+    $plan = $planRaw | ConvertFrom-Json -Depth 100 -DateKind String
+    $comparisons = @(
+        @([string]$receipt.abandoned_run_path, [string]$snapshot.run_root),
+        @([string]$receipt.abandoned_run_id, [string]$snapshot.run.run_id),
+        @([string]$receipt.abandoned_plan_hash, [string]$snapshot.plan_hash),
+        @([string]$receipt.abandoned_run_file_hash,
+            [string]$snapshot.run_file_hash),
+        @([string]$receipt.abandoned_genesis_hash,
+            [string]$snapshot.genesis_hash),
+        @([string]$receipt.effective_policy_version,
+            [string]$snapshot.effective_policy_version),
+        @([string]$receipt.original_adoption_receipt_hash,
+            [string]$snapshot.adoption_receipt.receipt_hash),
+        @([string]$receipt.original_adoption_receipt_path,
+            [string]$snapshot.adoption_receipt_path),
+        @([string]$receipt.original_adoption_receipt_file_hash,
+            [string]$snapshot.adoption_receipt_file_hash),
+        @([string]$receipt.source_bindings_hash,
+            [string]$snapshot.source_bindings_hash),
+        @([string]$receipt.successor_run_id, [string]$plan.run_id),
+        @([string]$receipt.successor_plan_hash, (Get-TextSha256 $planRaw))
+    )
+    if (@($comparisons | Where-Object { $_[0] -ne $_[1] }).Count -gt 0) {
+        throw 'Abandoned successor export no longer matches its bound runs.'
+    }
+    $authorizationPath = Join-Path $snapshot.run_root (
+        [string]$receipt.authorization_receipt_path
+    )
+    $authorization = Read-AbandonedSuccessorAuthorizationReceipt `
+        -Path $authorizationPath -AbandonedRunDirectory $snapshot.run_root `
+        -SuccessorPlanPath $SuccessorPlanPath `
+        -ExpectedSuccessorRunDirectory ([string]$receipt.successor_run_path)
+    if ([string]$receipt.authorization_receipt_hash -ne
+            [string]$authorization.receipt_hash -or
+        [string]$receipt.authorization_receipt_file_hash -ne (
+            Get-FileHash -LiteralPath $authorizationPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant() -or
+        [string]$receipt.authorization_event_hash -ne
+            [string]$events[-2].hash -or
+        [string]$events[-2].event -ne
+            'durable-review-abandoned-successor-authorized' -or
+        [string]$receipt.authorization_material_path -ne
+            [string]$authorization.authorization_material_path -or
+        [string]$receipt.authorization_material_hash -ne
+            [string]$authorization.authorization_material_hash -or
+        [string]$receipt.activation_key -ne [string]$authorization.activation_key) {
+        throw 'Abandoned successor export authorization anchor changed.'
+    }
+    if ((@($receipt.source_bindings) | ConvertTo-Json -Compress -Depth 100) -ne
+        (@($snapshot.source_bindings) | ConvertTo-Json -Compress -Depth 100)) {
+        throw 'Abandoned successor source identity or attempt count changed.'
+    }
+    foreach ($relative in @(
+        'additional_findings_path', 'unactivated_evidence_manifest_path',
+        'checkpoint_material_path', 'authorization_material_path'
+    )) {
+        $filePath = Join-Path $snapshot.run_root ([string]$receipt.$relative)
+        $hashName = $relative -replace '_path$', '_hash'
+        if (-not (Test-Path -LiteralPath $filePath -PathType Leaf) -or
+            [string]$receipt.$hashName -ne (
+                Get-FileHash -LiteralPath $filePath -Algorithm SHA256
+            ).Hash.ToLowerInvariant()) {
+            throw "Abandoned successor bound material '$relative' changed."
+        }
+    }
+    if ([string]$plan.successor_review_profile.predecessor_run_id -ne
+            [string]$snapshot.run.run_id -or
+        [string]$plan.successor_review_profile.predecessor_active_milestone_id -ne
+            'abandoned-before-first-milestone' -or
+        [string]$plan.successor_review_profile.
+            predecessor_checkpoint_material_hash -ne
+            [string]$receipt.checkpoint_material_hash -or
+        (@($plan.successor_review_profile.source_node_ids) -join "`n") -ne
+            (@($snapshot.source_bindings |
+                ForEach-Object { [string]$_.source_node_id }) -join "`n") -or
+        (@($receipt.successor_milestone_ids) -join "`n") -ne
+            (@($plan.durable_review_profile.milestone_ids) -join "`n")) {
+        throw 'Fresh successor plan changed the abandoned lineage declaration.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSuccessorRunDirectory) -and
+        [string]$receipt.successor_run_path -ne [IO.Path]::GetFullPath(
+            $ExpectedSuccessorRunDirectory
+        ).TrimEnd('\', '/')) {
+        throw 'Abandoned export cannot be replayed into another run directory.'
+    }
+    if ([string]$receipt.inherited_obligations_hash -ne (Get-TextSha256 (
+        @($receipt.inherited_obligations) |
+            ConvertTo-Json -Compress -Depth 100
+    ))) {
+        throw 'Abandoned successor obligations changed.'
+    }
+    $additionalPath = Join-Path $snapshot.run_root (
+        [string]$receipt.additional_findings_path
+    )
+    $additional = @(Get-Content -LiteralPath $additionalPath -Raw |
+        ConvertFrom-Json -Depth 50 -DateKind String)
+    $expected = [Collections.Generic.List[object]]::new()
+    $seenObligations = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    foreach ($item in @($snapshot.adoption_receipt.inherited_obligations)) {
+        $key = [string]$item.source_node_id + "`n" +
+            [string]$item.source_finding_id
+        if (-not $seenObligations.Add($key)) {
+            throw 'Abandoned successor baseline obligations are duplicated.'
+        }
+        $expected.Add($item)
+    }
+    foreach ($item in $additional) {
+        $binding = @($snapshot.source_bindings | Where-Object {
+            [string]$_.source_node_id -eq [string]$item.source_node_id
+        })
+        if ($binding.Count -ne 1 -or [string]$item.severity -ne 'P1' -or
+            [string]$item.resolution_status -eq 'resolved' -or
+            [string]$item.finding_hash -ne (Get-TextSha256 (
+                [string]$item.finding
+            )) -or -not $seenObligations.Add(
+                [string]$item.source_node_id + "`n" +
+                [string]$item.source_finding_id
+            )) {
+            throw 'Abandoned successor additional finding changed.'
+        }
+        $expected.Add([ordered]@{
+            source_node_id = [string]$item.source_node_id
+            role_id = [string]$binding[0].role_id
+            source_thread_id = [string]$binding[0].source_thread_id
+            source_finding_id = [string]$item.source_finding_id
+            canonical_finding_id = [string]$item.canonical_finding_id
+            severity = 'P1'
+            finding = [string]$item.finding
+            finding_hash = [string]$item.finding_hash
+            resolution_status = [string]$item.resolution_status
+        })
+    }
+    if ((@($receipt.inherited_obligations) |
+            ConvertTo-Json -Compress -Depth 100) -ne
+        (@($expected) | ConvertTo-Json -Compress -Depth 100)) {
+        throw 'Abandoned successor omitted, merged, or changed an obligation.'
+    }
+    $manifestPath = Join-Path $snapshot.run_root (
+        [string]$receipt.unactivated_evidence_manifest_path
+    )
+    $manifest = @(Get-Content -LiteralPath $manifestPath -Raw |
+        ConvertFrom-Json -Depth 50 -DateKind String)
+    if ($manifest.Count -ne @($snapshot.source_bindings).Count) {
+        throw 'Abandoned successor evidence manifest source count changed.'
+    }
+    foreach ($binding in @($snapshot.source_bindings)) {
+        $entry = @($manifest | Where-Object {
+            [string]$_.source_node_id -eq [string]$binding.source_node_id
+        })
+        if ($entry.Count -ne 1 -or
+            [bool]$entry[0].completion_eligible -ne $false) {
+            throw 'Abandoned successor evidence manifest changed.'
+        }
+        $resultPath = Join-Path $snapshot.run_root (
+            [string]$entry[0].result_receipt_path
+        )
+        $dispositionPath = Join-Path $snapshot.run_root (
+            [string]$entry[0].disposition_receipt_path
+        )
+        if ([string]$entry[0].result_receipt_file_hash -ne (
+                Get-FileHash -LiteralPath $resultPath -Algorithm SHA256
+            ).Hash.ToLowerInvariant() -or
+            [string]$entry[0].disposition_receipt_file_hash -ne (
+                Get-FileHash -LiteralPath $dispositionPath -Algorithm SHA256
+            ).Hash.ToLowerInvariant()) {
+            throw 'Abandoned successor unactivated evidence changed.'
+        }
+        $null = Read-ThreadResultReceipt -Path $resultPath `
+            -ExpectedThreadId ([string]$binding.source_thread_id) `
+            -ExpectedSourceNodeId ([string]$binding.source_node_id) `
+            -RunDirectory $snapshot.run_root
+        $null = Read-ReviewDispositionReceipt -Path $dispositionPath `
+            -RunDirectory $snapshot.run_root `
+            -ExpectedSourceNodeId ([string]$binding.source_node_id) `
+            -ExpectedThreadId ([string]$binding.source_thread_id)
+    }
+    return $receipt
+}
+
+function Read-AbandonedSuccessorAdoptionReceipt {
+    param(
+        [Parameter(Mandatory)][string] $RunDirectory,
+        [Parameter(Mandatory)][object] $Receipt
+    )
+
+    $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+    $planPath = Join-Path $runRoot 'plan.json'
+    $runPath = Join-Path $runRoot 'run.json'
+    $eventsPath = Join-Path $runRoot 'events.jsonl'
+    $planRaw = Get-Content -LiteralPath $planPath -Raw
+    $plan = $planRaw | ConvertFrom-Json -Depth 100 -DateKind String
+    $run = Get-Content -LiteralPath $runPath -Raw |
+        ConvertFrom-Json -Depth 50 -DateKind String
+    $events = @(Read-OrchestrationJournal $eventsPath)
+    $keys = @(
+        'schema_version', 'lineage_kind', 'run_path', 'run_id', 'plan_hash',
+        'genesis_hash', 'predecessor_run_path', 'predecessor_run_id',
+        'predecessor_final_journal_head',
+        'predecessor_final_journal_event_count', 'export_receipt_path',
+        'export_receipt_hash', 'export_receipt_file_hash',
+        'predecessor_active_milestone_id', 'checkpoint_material_hash',
+        'source_bindings', 'source_bindings_hash', 'inherited_obligations',
+        'inherited_obligations_hash', 'successor_milestone_ids',
+        'created_at_utc'
+    )
+    $payload = [ordered]@{}
+    foreach ($name in $keys) {
+        if ($null -eq $Receipt.PSObject.Properties[$name]) {
+            throw "Abandoned successor adoption is missing '$name'."
+        }
+        $payload[$name] = $Receipt.$name
+    }
+    if ([string]$Receipt.schema_version -ne '1.1' -or
+        [string]$Receipt.lineage_kind -ne 'abandoned-successor' -or
+        [string]$Receipt.receipt_hash -ne (Get-TextSha256 (
+            $payload | ConvertTo-Json -Compress -Depth 100
+        ))) {
+        throw 'Abandoned successor adoption receipt hash or schema is invalid.'
+    }
+    if ($events.Count -lt (2 + @($Receipt.source_bindings).Count) -or
+        [string]$events[1].event -ne 'durable-review-successor-adopted' -or
+        [string]$events[1].result_receipt_hash -ne
+            [string]$Receipt.receipt_hash -or
+        [string]$Receipt.run_path -ne $runRoot -or
+        [string]$Receipt.run_id -ne [string]$run.run_id -or
+        [string]$Receipt.plan_hash -ne [string]$run.plan_hash -or
+        [string]$Receipt.plan_hash -ne (Get-TextSha256 $planRaw) -or
+        [string]$Receipt.genesis_hash -ne [string]$events[0].hash) {
+        throw 'Abandoned successor adoption run identity changed.'
+    }
+    $predecessorRoot = [IO.Path]::GetFullPath(
+        [string]$Receipt.predecessor_run_path
+    ).TrimEnd('\', '/')
+    $exportPath = Join-Path $predecessorRoot (
+        [string]$Receipt.export_receipt_path
+    )
+    $export = Read-AbandonedSuccessorExportReceipt -Path $exportPath `
+        -AbandonedRunDirectory $predecessorRoot `
+        -SuccessorPlanPath $planPath -ExpectedSuccessorRunDirectory $runRoot
+    $predecessorEvents = @(Read-OrchestrationJournal (
+        Join-Path $predecessorRoot 'events.jsonl'
+    ))
+    if ([string]$Receipt.predecessor_final_journal_head -ne
+            [string]$predecessorEvents[-1].hash -or
+        [int]$Receipt.predecessor_final_journal_event_count -ne
+            $predecessorEvents.Count -or
+        [string]$Receipt.export_receipt_hash -ne [string]$export.receipt_hash -or
+        [string]$Receipt.export_receipt_file_hash -ne (
+            Get-FileHash -LiteralPath $exportPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant() -or
+        (@($Receipt.source_bindings) | ConvertTo-Json -Compress -Depth 100) -ne
+            (@($export.source_bindings) |
+                ConvertTo-Json -Compress -Depth 100) -or
+        (@($Receipt.inherited_obligations) |
+            ConvertTo-Json -Compress -Depth 100) -ne
+            (@($export.inherited_obligations) |
+                ConvertTo-Json -Compress -Depth 100)) {
+        throw 'Abandoned successor adoption lineage changed.'
+    }
+    foreach ($index in 0..(@($Receipt.source_bindings).Count - 1)) {
+        $binding = @($Receipt.source_bindings)[$index]
+        $event = $events[$index + 2]
+        $node = @($plan.nodes | Where-Object {
+            [string]$_.id -eq [string]$binding.source_node_id
+        })
+        if ($node.Count -ne 1 -or
+            [string]$node[0].role_id -ne [string]$binding.role_id -or
+            [string]$node[0].context.session_policy -ne 'reuse' -or
+            [string]$node[0].context.prior_thread_id -ne
+                [string]$binding.source_thread_id -or
+            [bool]$node[0].read_only -ne $true -or
+            [bool]$node[0].allow_delegation -ne $false -or
+            [int]$node[0].max_attempts -le
+                [int]$binding.inherited_attempt_count -or
+            [string]$event.event -ne 'source-attempt-carried' -or
+            [string]$event.node_id -ne [string]$binding.source_node_id -or
+            [int]$event.attempt -ne [int]$binding.inherited_attempt_count -or
+            [string]$event.prev_hash -ne [string]$events[$index + 1].hash) {
+            throw 'Fresh successor did not preserve source continuity or attempts.'
+        }
+        $role = @($plan.roles | Where-Object {
+            [string]$_.id -eq [string]$binding.role_id
+        })
+        if ($role.Count -ne 1 -or
+            (Get-TextSha256 (
+                $role[0] | ConvertTo-Json -Compress -Depth 100
+            )) -ne [string]$binding.role_contract_hash) {
+            throw 'Fresh successor changed a durable role contract.'
+        }
+    }
+    return $Receipt
+}
+
 function Read-DurableReviewSuccessorAdoptionReceipt {
     param([Parameter(Mandatory)][string] $RunDirectory)
 
@@ -2705,6 +3329,11 @@ function Read-DurableReviewSuccessorAdoptionReceipt {
     }
     $receipt = Get-Content -LiteralPath $receiptPath -Raw |
         ConvertFrom-Json -Depth 100 -DateKind String
+    if ([string]$receipt.schema_version -eq '1.1' -and
+        [string]$receipt.lineage_kind -eq 'abandoned-successor') {
+        return Read-AbandonedSuccessorAdoptionReceipt `
+            -RunDirectory $runRoot -Receipt $receipt
+    }
     $keys = @(
         'schema_version', 'run_path', 'run_id', 'plan_hash', 'genesis_hash',
         'predecessor_run_path', 'predecessor_run_id',

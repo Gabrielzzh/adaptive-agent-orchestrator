@@ -1042,6 +1042,489 @@ try {
         @($adoption.inherited_obligations).Count -eq 2 -and
         $adoption.predecessor_run_id -eq 'durable-milestone-self-test'
     ) 'Successor adoption must preserve the predecessor obligation set.'
+
+    # Build a separate first-generation successor, cancel one source before any
+    # review message, then roll it forward without rewriting its history.
+    $abandonedPredecessor = Join-Path $testRoot 'abandoned-predecessor'
+    Copy-Item -LiteralPath $predecessorBeforeExport `
+        -Destination $abandonedPredecessor -Recurse
+    $abandonedPlanPath = Join-Path $testRoot 'abandoned-successor-plan.json'
+    $abandonedPlan = Get-Content -LiteralPath $successorPlanPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $abandonedPlan.run_id = 'durable-abandoned-self-test'
+    $abandonedPlan | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $abandonedPlanPath -Encoding utf8
+    $abandonedRun = Join-Path $testRoot 'abandoned-successor-run'
+    & (Join-Path $scriptRoot 'New-DurableReviewSuccessorExportReceipt.ps1') `
+        -PredecessorRunDirectory $abandonedPredecessor `
+        -SuccessorPlanPath $abandonedPlanPath `
+        -SuccessorRunDirectory $abandonedRun `
+        -AuthorizationMaterialPath (
+            Join-Path $abandonedPredecessor (
+                'materials/successor-authorization.md'
+            )
+        ) -ActivationKey 'controller:abandoned-base-export' | Out-Null
+    & (Join-Path $scriptRoot 'New-OrchestrationSuccessorRun.ps1') `
+        -PlanPath $abandonedPlanPath -RunDirectory $abandonedRun `
+        -WorkspaceRoot $testRoot -PredecessorRunDirectory $abandonedPredecessor `
+        -PredecessorExportReceiptPath (
+            Join-Path $abandonedPredecessor (
+                'receipts/durable-review-successor.export.json'
+            )
+        ) | Out-Null
+    foreach ($directory in @('materials', 'thread-reads')) {
+        $path = Join-Path $abandonedRun $directory
+        if (-not (Test-Path -LiteralPath $path)) {
+            $null = New-Item -ItemType Directory -Path $path
+        }
+    }
+    foreach ($status in @(
+        'launch_reserved', 'materializing', 'materialized', 'running'
+    )) {
+        $arguments = @{
+            RunDirectory = $abandonedRun
+            NodeId = 'review'
+            Status = $status
+            Message = "prospective review $status"
+            IdempotencyKey = "abandoned-review-$status"
+        }
+        if ($status -eq 'materialized') {
+            $arguments.ThreadId = 'review-thread'
+            $arguments.ModelId = 'gpt-5.6-sol'
+        }
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') @arguments |
+            Out-Null
+    }
+    & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+        -RunDirectory $abandonedRun -NodeId 'review' -Status 'cancelled' `
+        -Message 'Controller changed checkpoint before review dispatch.' `
+        -Evidence @(
+            'source:controller-checkpoint-ruling',
+            'observation:no-review-message-dispatched'
+        ) -IdempotencyKey 'controller:cancel-undispatched-review' | Out-Null
+
+    $abandonedCheckpoint = Join-Path $abandonedRun (
+        'materials/checkpoint-next.json'
+    )
+    Set-Content -LiteralPath $abandonedCheckpoint -Value (
+        '{"milestone":"next"}'
+    )
+    $unactivatedReview = New-SourceChain -Run $abandonedRun `
+        -SourceNodeId 'review' -ThreadId 'review-thread' `
+        -MilestoneId 'group-1' `
+        -CheckpointPath $abandonedCheckpoint -Stem 'unactivated-review' `
+        -Severity 'P1' -FindingText 'unactivated-review-p1' -Resolution 'open'
+    $unactivatedDomain = New-SourceChain -Run $abandonedRun `
+        -SourceNodeId 'domain' -ThreadId 'domain-thread' `
+        -MilestoneId 'group-1' `
+        -CheckpointPath $abandonedCheckpoint -Stem 'unactivated-domain' `
+        -Severity 'P1' -FindingText 'unactivated-domain-p1' -Resolution 'open'
+    $unactivatedManifestPath = Join-Path $abandonedRun (
+        'materials/unactivated-evidence.json'
+    )
+    @(
+        [ordered]@{
+            source_node_id = 'domain'
+            result_receipt_path = $unactivatedDomain.result_path
+            result_receipt_file_hash = (
+                Get-FileHash -LiteralPath (
+                    Join-Path $abandonedRun $unactivatedDomain.result_path
+                ) -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+            disposition_receipt_path = $unactivatedDomain.disposition_path
+            disposition_receipt_file_hash = (
+                Get-FileHash -LiteralPath (
+                    Join-Path $abandonedRun $unactivatedDomain.disposition_path
+                ) -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+            completion_eligible = $false
+        },
+        [ordered]@{
+            source_node_id = 'review'
+            result_receipt_path = $unactivatedReview.result_path
+            result_receipt_file_hash = (
+                Get-FileHash -LiteralPath (
+                    Join-Path $abandonedRun $unactivatedReview.result_path
+                ) -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+            disposition_receipt_path = $unactivatedReview.disposition_path
+            disposition_receipt_file_hash = (
+                Get-FileHash -LiteralPath (
+                    Join-Path $abandonedRun $unactivatedReview.disposition_path
+                ) -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+            completion_eligible = $false
+        }
+    ) | ConvertTo-Json -Depth 30 |
+        Set-Content -LiteralPath $unactivatedManifestPath -Encoding utf8
+    $additionalPath = Join-Path $abandonedRun (
+        'materials/additional-findings.json'
+    )
+    $additionalText = 'new controller P1 after the abandoned review cycle'
+    @(
+        [ordered]@{
+            source_node_id = 'review'
+            source_finding_id = 'LY-ADV-R06-P1-001'
+            canonical_finding_id = 'canonical-LY-ADV-R06-P1-001'
+            severity = 'P1'
+            finding = $additionalText
+            finding_hash = Get-TextSha256 $additionalText
+            resolution_status = 'open'
+        }
+    ) | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $additionalPath -Encoding utf8
+    $abandonmentAuthorization = Join-Path $abandonedRun (
+        'materials/abandonment-authorization.md'
+    )
+    Set-Content -LiteralPath $abandonmentAuthorization -Value (
+        'Controller authorizes one fresh successor for the next checkpoint.'
+    )
+
+    $freshAbandonedPlanPath = Join-Path $testRoot (
+        'fresh-after-abandonment-plan.json'
+    )
+    $freshAbandonedPlan = Get-Content -LiteralPath $abandonedPlanPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $freshAbandonedPlan.run_id = 'durable-fresh-after-abandonment'
+    $freshAbandonedPlan.durable_review_profile.milestone_ids = @(
+        'next-group', 'final-gate'
+    )
+    foreach ($node in @($freshAbandonedPlan.nodes | Where-Object {
+        $_.id -in @('review', 'domain')
+    })) {
+        $node.max_attempts = 2
+    }
+    $freshAbandonedPlan.successor_review_profile = [ordered]@{
+        predecessor_run_id = 'durable-abandoned-self-test'
+        predecessor_active_milestone_id =
+            'abandoned-before-first-milestone'
+        predecessor_checkpoint_material_hash = (
+            Get-FileHash -LiteralPath $abandonedCheckpoint -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        source_node_ids = @('domain', 'review')
+    }
+    $freshAbandonedPlan | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $freshAbandonedPlanPath -Encoding utf8
+    $freshAbandonedRun = Join-Path $testRoot (
+        'fresh-after-abandonment-run'
+    )
+
+    $abandonedEventsPath = Join-Path $abandonedRun 'events.jsonl'
+    $abandonedEventLines = @(Get-Content -LiteralPath $abandonedEventsPath)
+    try {
+        $cancelledEvent = $abandonedEventLines[-1] |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        $cancelledEvent.evidence = @(
+            'source:controller-checkpoint-ruling',
+            'observation:review-message-dispatched'
+        )
+        $cancelledEvent.Remove('hash')
+        $cancelledEvent.hash = Get-OrchestrationEventHash (
+            [pscustomobject]$cancelledEvent
+        )
+        $changed = @($abandonedEventLines)
+        $changed[-1] = $cancelledEvent |
+            ConvertTo-Json -Compress -Depth 100
+        $changed | Set-Content -LiteralPath $abandonedEventsPath -Encoding utf8
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-AbandonedSuccessorAuthorizationReceipt.ps1'
+            )) -AbandonedRunDirectory $abandonedRun `
+                -SuccessorPlanPath $freshAbandonedPlanPath `
+                -SuccessorRunDirectory $freshAbandonedRun `
+                -CheckpointMaterialPath $abandonedCheckpoint `
+                -AdditionalFindingRecordsPath $additionalPath `
+                -UnactivatedEvidenceManifestPath $unactivatedManifestPath `
+                -AuthorizationMaterialPath $abandonmentAuthorization `
+                -ActivationKey 'controller:dispatched-review-rejected' |
+                Out-Null
+        } 'no-dispatch evidence' (
+            'A dispatched review cannot use abandoned-successor recovery.'
+        )
+    }
+    finally {
+        $abandonedEventLines |
+            Set-Content -LiteralPath $abandonedEventsPath -Encoding utf8
+    }
+
+    try {
+        $tail = $abandonedEventLines[-1] |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        $activated = @{}
+        foreach ($entry in $tail.GetEnumerator()) {
+            $activated[$entry.Key] = $entry.Value
+        }
+        $activated.sequence = $abandonedEventLines.Count
+        $activated.prev_hash = $tail.hash
+        $activated.event = 'durable-review-milestone-activated'
+        $activated.status = 'planned'
+        $activated.idempotency_key = 'controller:forged-existing-activation'
+        $activated.request_fingerprint = ('f' * 64)
+        $activated.Remove('hash')
+        $activated.hash = Get-OrchestrationEventHash (
+            [pscustomobject]$activated
+        )
+        Add-Content -LiteralPath $abandonedEventsPath -Value (
+            $activated | ConvertTo-Json -Compress -Depth 100
+        )
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-AbandonedSuccessorAuthorizationReceipt.ps1'
+            )) -AbandonedRunDirectory $abandonedRun `
+                -SuccessorPlanPath $freshAbandonedPlanPath `
+                -SuccessorRunDirectory $freshAbandonedRun `
+                -CheckpointMaterialPath $abandonedCheckpoint `
+                -AdditionalFindingRecordsPath $additionalPath `
+                -UnactivatedEvidenceManifestPath $unactivatedManifestPath `
+                -AuthorizationMaterialPath $abandonmentAuthorization `
+                -ActivationKey 'controller:activated-run-rejected' | Out-Null
+        } 'activated or accepted milestone' (
+            'An activated durable milestone forbids abandonment recovery.'
+        )
+    }
+    finally {
+        $abandonedEventLines |
+            Set-Content -LiteralPath $abandonedEventsPath -Encoding utf8
+    }
+
+    $additionalRaw = Get-Content -LiteralPath $additionalPath -Raw
+    try {
+        $badAdditional = @($additionalRaw |
+            ConvertFrom-Json -AsHashtable -Depth 20)
+        $badAdditional[0].severity = 'P2'
+        $badAdditional | ConvertTo-Json -Depth 20 |
+            Set-Content -LiteralPath $additionalPath -Encoding utf8
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-AbandonedSuccessorAuthorizationReceipt.ps1'
+            )) -AbandonedRunDirectory $abandonedRun `
+                -SuccessorPlanPath $freshAbandonedPlanPath `
+                -SuccessorRunDirectory $freshAbandonedRun `
+                -CheckpointMaterialPath $abandonedCheckpoint `
+                -AdditionalFindingRecordsPath $additionalPath `
+                -UnactivatedEvidenceManifestPath $unactivatedManifestPath `
+                -AuthorizationMaterialPath $abandonmentAuthorization `
+                -ActivationKey 'controller:downgraded-new-finding' | Out-Null
+        } 'severity' 'A new inherited P1 cannot be downgraded.'
+    }
+    finally {
+        Set-Content -LiteralPath $additionalPath -Value $additionalRaw `
+            -Encoding utf8
+    }
+
+    $freshPlanRaw = Get-Content -LiteralPath $freshAbandonedPlanPath -Raw
+    try {
+        $badAttemptPlan = $freshPlanRaw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        @($badAttemptPlan.nodes | Where-Object {
+            $_.id -eq 'review'
+        })[0].max_attempts = 1
+        $badAttemptPlan | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $freshAbandonedPlanPath -Encoding utf8
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-AbandonedSuccessorAuthorizationReceipt.ps1'
+            )) -AbandonedRunDirectory $abandonedRun `
+                -SuccessorPlanPath $freshAbandonedPlanPath `
+                -SuccessorRunDirectory $freshAbandonedRun `
+                -CheckpointMaterialPath $abandonedCheckpoint `
+                -AdditionalFindingRecordsPath $additionalPath `
+                -UnactivatedEvidenceManifestPath $unactivatedManifestPath `
+                -AuthorizationMaterialPath $abandonmentAuthorization `
+                -ActivationKey 'controller:attempt-reset-rejected' | Out-Null
+        } 'consumed attempts' 'A fresh run cannot reset a consumed attempt.'
+    }
+    finally {
+        Set-Content -LiteralPath $freshAbandonedPlanPath -Value $freshPlanRaw `
+            -Encoding utf8
+    }
+
+    try {
+        $wrongContinuityPlan = $freshPlanRaw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        @($wrongContinuityPlan.nodes | Where-Object {
+            $_.id -eq 'review'
+        })[0].context.prior_thread_id = 'substituted-review-thread'
+        $wrongContinuityPlan | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $freshAbandonedPlanPath -Encoding utf8
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-AbandonedSuccessorAuthorizationReceipt.ps1'
+            )) -AbandonedRunDirectory $abandonedRun `
+                -SuccessorPlanPath $freshAbandonedPlanPath `
+                -SuccessorRunDirectory $freshAbandonedRun `
+                -CheckpointMaterialPath $abandonedCheckpoint `
+                -AdditionalFindingRecordsPath $additionalPath `
+                -UnactivatedEvidenceManifestPath $unactivatedManifestPath `
+                -AuthorizationMaterialPath $abandonmentAuthorization `
+                -ActivationKey 'controller:thread-substitution-rejected' |
+                Out-Null
+        } 'source continuity' (
+            'A fresh successor cannot substitute a durable source thread.'
+        )
+    }
+    finally {
+        Set-Content -LiteralPath $freshAbandonedPlanPath -Value $freshPlanRaw `
+            -Encoding utf8
+    }
+
+    $authorizationAnchor = & (Join-Path $scriptRoot (
+        'New-AbandonedSuccessorAuthorizationReceipt.ps1'
+    )) -AbandonedRunDirectory $abandonedRun `
+        -SuccessorPlanPath $freshAbandonedPlanPath `
+        -SuccessorRunDirectory $freshAbandonedRun `
+        -CheckpointMaterialPath $abandonedCheckpoint `
+        -AdditionalFindingRecordsPath $additionalPath `
+        -UnactivatedEvidenceManifestPath $unactivatedManifestPath `
+        -AuthorizationMaterialPath $abandonmentAuthorization `
+        -ActivationKey 'controller:abandon-successor-once' |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        $authorizationAnchor.lineage_kind -eq
+            'abandoned-successor-authorization'
+    ) 'Abandoned successor authorization must be recorded before export.'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-AbandonedSuccessorAuthorizationReceipt.ps1'
+        )) -AbandonedRunDirectory $abandonedRun `
+            -SuccessorPlanPath $freshAbandonedPlanPath `
+            -SuccessorRunDirectory $freshAbandonedRun `
+            -CheckpointMaterialPath $abandonedCheckpoint `
+            -AdditionalFindingRecordsPath $additionalPath `
+            -UnactivatedEvidenceManifestPath $unactivatedManifestPath `
+            -AuthorizationMaterialPath $abandonmentAuthorization `
+            -ActivationKey 'controller:duplicate-authorization' | Out-Null
+    } 'already has an authorization anchor' (
+        'An abandoned successor cannot authorize two fresh runs.'
+    )
+    $authorizationReceiptPath = Join-Path $abandonedRun (
+        'receipts/durable-review-abandoned-successor.authorization.json'
+    )
+    $abandonedExport = & (Join-Path $scriptRoot (
+        'New-AbandonedSuccessorExportReceipt.ps1'
+    )) -AbandonedRunDirectory $abandonedRun `
+        -SuccessorPlanPath $freshAbandonedPlanPath `
+        -SuccessorRunDirectory $freshAbandonedRun `
+        -CheckpointMaterialPath $abandonedCheckpoint `
+        -AdditionalFindingRecordsPath $additionalPath `
+        -UnactivatedEvidenceManifestPath $unactivatedManifestPath `
+        -AuthorizationReceiptPath $authorizationReceiptPath |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        @($abandonedExport.inherited_obligations).Count -eq 3 -and
+        @($abandonedExport.source_bindings | Where-Object {
+            $_.source_node_id -eq 'review'
+        })[0].inherited_attempt_count -eq 1
+    ) 'Abandoned export must preserve obligations and consumed attempts.'
+
+    $abandonedExportPath = Join-Path $abandonedRun (
+        'receipts/durable-review-abandoned-successor.export.json'
+    )
+    $abandonedExportRaw = Get-Content -LiteralPath $abandonedExportPath -Raw
+    $postExportLines = @(Get-Content -LiteralPath $abandonedEventsPath)
+    try {
+        $mutatedExport = $abandonedExportRaw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        $mutatedExport.activation_key = 'controller:resigned-export-key'
+        $mutatedExport.Remove('receipt_hash')
+        $mutatedExport.receipt_hash = Get-TextSha256 (
+            $mutatedExport | ConvertTo-Json -Compress -Depth 100
+        )
+        $mutatedExport | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $abandonedExportPath -Encoding utf8
+        $mutatedLines = @($postExportLines)
+        $tail = $mutatedLines[-1] |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        $tail.result_receipt_hash = $mutatedExport.receipt_hash
+        $tail.request_fingerprint = $mutatedExport.receipt_hash
+        $tail.idempotency_key = $mutatedExport.activation_key
+        $tail.Remove('hash')
+        $tail.hash = Get-OrchestrationEventHash ([pscustomobject]$tail)
+        $mutatedLines[-1] = $tail | ConvertTo-Json -Compress -Depth 100
+        $mutatedLines |
+            Set-Content -LiteralPath $abandonedEventsPath -Encoding utf8
+        Assert-ThrowsLike {
+            Read-AbandonedSuccessorExportReceipt `
+                -Path $abandonedExportPath `
+                -AbandonedRunDirectory $abandonedRun `
+                -SuccessorPlanPath $freshAbandonedPlanPath | Out-Null
+        } 'authorization anchor changed' (
+            'A re-signed export cannot replace the pre-bound activation key.'
+        )
+    }
+    finally {
+        Set-Content -LiteralPath $abandonedExportPath `
+            -Value $abandonedExportRaw -Encoding utf8
+        $postExportLines |
+            Set-Content -LiteralPath $abandonedEventsPath -Encoding utf8
+    }
+
+    $authorizationMaterialRaw = Get-Content `
+        -LiteralPath $abandonmentAuthorization -Raw
+    try {
+        Set-Content -LiteralPath $abandonmentAuthorization `
+            -Value 'changed controller authorization' -Encoding utf8
+        Assert-ThrowsLike {
+            Read-AbandonedSuccessorExportReceipt `
+                -Path $abandonedExportPath `
+                -AbandonedRunDirectory $abandonedRun `
+                -SuccessorPlanPath $freshAbandonedPlanPath | Out-Null
+        } 'authorization material' (
+            'Authorization material cannot change after its anchor event.'
+        )
+    }
+    finally {
+        Set-Content -LiteralPath $abandonmentAuthorization `
+            -Value $authorizationMaterialRaw -Encoding utf8 -NoNewline
+    }
+
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-AbandonedSuccessorExportReceipt.ps1') `
+            -AbandonedRunDirectory $abandonedRun `
+            -SuccessorPlanPath $freshAbandonedPlanPath `
+            -SuccessorRunDirectory $freshAbandonedRun `
+            -CheckpointMaterialPath $abandonedCheckpoint `
+            -AdditionalFindingRecordsPath $additionalPath `
+            -UnactivatedEvidenceManifestPath $unactivatedManifestPath `
+            -AuthorizationReceiptPath $authorizationReceiptPath | Out-Null
+    } 'already has an export' (
+        'An abandoned successor cannot fork or export twice.'
+    )
+    $freshAdoption = & (Join-Path $scriptRoot (
+        'New-AbandonedSuccessorRun.ps1'
+    )) -PlanPath $freshAbandonedPlanPath -RunDirectory $freshAbandonedRun `
+        -WorkspaceRoot $testRoot -AbandonedRunDirectory $abandonedRun `
+        -AbandonedExportReceiptPath (
+            Join-Path $abandonedRun (
+                'receipts/durable-review-abandoned-successor.export.json'
+            )
+        ) | ConvertFrom-Json -Depth 100
+    Assert-True (
+        $freshAdoption.lineage_kind -eq 'abandoned-successor' -and
+        @($freshAdoption.inherited_obligations).Count -eq 3
+    ) 'Fresh successor adoption must preserve the abandoned lineage.'
+    $freshState = & (Join-Path $scriptRoot 'Get-OrchestrationState.ps1') `
+        -RunDirectory $freshAbandonedRun | ConvertFrom-Json -Depth 30
+    Assert-True (
+        @($freshState.nodes | Where-Object {
+            $_.id -eq 'review'
+        })[0].attempts -eq 1
+    ) 'Fresh successor state must expose the consumed review attempt.'
+    $carriedLaunch = & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+        -RunDirectory $freshAbandonedRun -NodeId 'review' `
+        -Status 'launch_reserved' -Message 'launch after carried attempt' `
+        -IdempotencyKey 'fresh-review-attempt-two' |
+        ConvertFrom-Json -Depth 30
+    Assert-True ($carriedLaunch.attempt -eq 2) (
+        'The next launch after abandonment must use attempt two.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $freshAbandonedRun | Out-Null
+    } 'Inherited P1' (
+        'Fresh successor genesis and adoption cannot complete inherited P1.'
+    )
+
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot (
             'New-OrchestrationSuccessorRun.ps1'

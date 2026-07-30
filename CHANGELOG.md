@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.7.8 - 2026-07-30
+
+Append-only abandoned-successor recovery release.
+
+- Add a pre-bound controller authorization receipt before abandonment export;
+  export cannot create, replace, or restate its own authority.
+- Permit a first-generation successor cancelled before its first durable
+  milestone and before any review message to roll forward into one fresh
+  successor without rewriting the abandoned run.
+- Bind the cancelled event, no-dispatch evidence, old successor adoption,
+  journal head/count, checkpoint, ordered source/role/thread identities,
+  inherited and newly added P1 occurrences, target plan/run/milestones, and
+  non-completion evidence.
+- Preserve consumed source attempts in the fresh run. A cancelled source cannot
+  regain attempt 1, change thread or role, or be revived in the old run.
+- Reject repeated or forked export, cross-run/source/thread/checkpoint replay,
+  omitted or downgraded obligations, activated milestones, existing result
+  lifecycles, and unactivated receipts used as completion evidence.
+- Validate the real multi-divination control run: 18/18 P1 occurrences carried
+  across two sources, zero P0, and completion remained correctly blocked.
+- Preserve the boundary: this release does not repair platform `systemError`,
+  prove Token savings or business accuracy, or resist an attacker who can
+  coherently rewrite the complete retained history without an external anchor.
+
 ## 0.7.7 - 2026-07-30
 
 Raw Codex thread-capture compatibility patch release.
