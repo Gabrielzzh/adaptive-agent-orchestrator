@@ -985,6 +985,76 @@ try {
         [string]$revisionSelection.schema_version -eq '1.1' -and
         @($revisionSelection.source_bindings).Count -eq 2
     ) 'A revision selection must bind both fresh source lifecycles.'
+    $laterLifecycleRun = Join-Path $testRoot (
+        'revision-selection-with-later-source-lifecycle'
+    )
+    Copy-Item -LiteralPath $revisionRun -Destination $laterLifecycleRun -Recurse
+    $laterEventsPath = Join-Path $laterLifecycleRun 'events.jsonl'
+    $laterEvents = @(Read-OrchestrationJournal $laterEventsPath)
+    $declaredReviewLifecycle = @(
+        $revisionSelection.source_lifecycle_bindings | Where-Object {
+            [string]$_.source_node_id -eq 'review'
+        }
+    )[0]
+    foreach ($laterStatus in @('completed', 'validated', 'adopted')) {
+        $templateSequence = switch ($laterStatus) {
+            'completed' { [int]$declaredReviewLifecycle.completed_event_sequence }
+            'validated' { [int]$declaredReviewLifecycle.validated_event_sequence }
+            'adopted' { [int]$declaredReviewLifecycle.adopted_event_sequence }
+        }
+        $laterEvent = @(
+            $laterEvents | Where-Object {
+                [int]$_.sequence -eq $templateSequence
+            }
+        )[0] | ConvertTo-Json -Depth 30 |
+            ConvertFrom-Json -AsHashtable -Depth 30
+        $laterEvent.sequence = $laterEvents.Count
+        $laterEvent.prev_hash = [string]$laterEvents[-1].hash
+        $laterEvent.timestamp = [DateTimeOffset]::UtcNow.ToString('o')
+        $laterEvent.milestone_id = 'method-2'
+        $laterEvent.message = "Later milestone review $laterStatus."
+        $laterEvent.evidence = if ($laterStatus -eq 'completed') {
+            @('artifact:receipts/review.method-2-later-result.json')
+        } else {
+            @('artifact:receipts/review.method-2-later-disposition.json')
+        }
+        $laterEvent.idempotency_key = "later-review-$laterStatus"
+        $laterEvent.request_fingerprint = Get-TextSha256 (
+            "later-review-$laterStatus"
+        )
+        $laterEvent.hash = Get-OrchestrationEventHash (
+            [pscustomobject]$laterEvent
+        )
+        Add-Content -LiteralPath $laterEventsPath -Value (
+            [pscustomobject]$laterEvent | ConvertTo-Json -Compress -Depth 30
+        )
+        $laterEvents += [pscustomobject]$laterEvent
+    }
+    $laterSelectionPath = Join-Path $laterLifecycleRun (
+        "receipts/durable-review-milestone.method-1.revision-" +
+        "$($revisionAuthorization.revision_id).selection.json"
+    )
+    $laterSelectionReadback =
+        Read-DurableReviewMilestoneRevisionSelection `
+            -Path $laterSelectionPath -RunDirectory $laterLifecycleRun
+    $laterReviewLifecycle = @(
+        $laterSelectionReadback.source_lifecycle_bindings | Where-Object {
+            [string]$_.source_node_id -eq 'review'
+        }
+    )[0]
+    Assert-True (
+        [int]$laterReviewLifecycle.completed_event_sequence -eq
+            [int]$declaredReviewLifecycle.completed_event_sequence -and
+        [string]$laterReviewLifecycle.completed_event_hash -eq
+            [string]$declaredReviewLifecycle.completed_event_hash -and
+        [int]$laterReviewLifecycle.adopted_event_sequence -eq
+            [int]$declaredReviewLifecycle.adopted_event_sequence -and
+        [string]$laterReviewLifecycle.adopted_event_hash -eq
+            [string]$declaredReviewLifecycle.adopted_event_hash
+    ) (
+        'A revision selection must revalidate its bound lifecycle events ' +
+        'instead of later valid source events.'
+    )
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot (
             'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'

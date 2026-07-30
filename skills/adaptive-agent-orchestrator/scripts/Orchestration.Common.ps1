@@ -2850,11 +2850,9 @@ function Read-DurableReviewMilestoneRevisionSelection {
             [string]$binding.disposition_receipt_path -in $excludedPaths) {
             throw "Milestone revision source '$sourceNodeId' binding changed."
         }
-        $sourceEvents = @($events | Where-Object {
+        $rearmCandidates = @($events | Where-Object {
             [string]$_.node_id -eq $sourceNodeId -and
-            [int]$_.sequence -gt [int]$authorizationEvents[0].sequence
-        })
-        $rearm = @($sourceEvents | Where-Object {
+            [int]$_.sequence -gt [int]$authorizationEvents[0].sequence -and
             [string]$_.prior_state -eq 'adopted' -and
             [string]$_.status -eq 'running' -and
             [string]$_.thread_id -eq [string]$requiredSource.thread_id -and
@@ -2862,27 +2860,65 @@ function Read-DurableReviewMilestoneRevisionSelection {
             [string]$_.milestone_revision_authorization_receipt_hash -eq
                 [string]$authorization.receipt_hash
         })
-        if ($rearm.Count -ne 1) {
+        if ($rearmCandidates.Count -ne 1) {
             throw "Milestone revision source '$sourceNodeId' re-arm changed."
         }
-        $completed = @($sourceEvents | Where-Object {
-            [string]$_.status -eq 'completed' -and
-            [int]$_.sequence -gt [int]$rearm[0].sequence
-        }) | Select-Object -Last 1
-        $validated = @($sourceEvents | Where-Object {
-            [string]$_.status -eq 'validated' -and
-            [int]$_.sequence -gt [int]$rearm[0].sequence
-        }) | Select-Object -Last 1
-        $adopted = @($sourceEvents | Where-Object {
-            [string]$_.status -eq 'adopted' -and
-            [int]$_.sequence -gt [int]$rearm[0].sequence
-        }) | Select-Object -Last 1
-        if ($null -eq $completed -or
-            $null -eq $validated -or $null -eq $adopted -or
+        $boundEvents = [ordered]@{}
+        foreach ($eventBinding in @(
+            @{
+                name = 'rearm'
+                sequence = 'rearm_event_sequence'
+                hash = 'rearm_event_hash'
+            },
+            @{
+                name = 'completed'
+                sequence = 'completed_event_sequence'
+                hash = 'completed_event_hash'
+            },
+            @{
+                name = 'validated'
+                sequence = 'validated_event_sequence'
+                hash = 'validated_event_hash'
+            },
+            @{
+                name = 'adopted'
+                sequence = 'adopted_event_sequence'
+                hash = 'adopted_event_hash'
+            }
+        )) {
+            $bound = @($events | Where-Object {
+                [int]$_.sequence -eq
+                    [int]$declaredLifecycle[0].$($eventBinding.sequence) -and
+                [string]$_.hash -eq
+                    [string]$declaredLifecycle[0].$($eventBinding.hash)
+            })
+            if ($bound.Count -ne 1 -or
+                [string]$bound[0].node_id -ne $sourceNodeId) {
+                throw (
+                    "Milestone revision source '$sourceNodeId' lifecycle " +
+                    "binding changed."
+                )
+            }
+            $boundEvents[$eventBinding.name] = $bound[0]
+        }
+        $rearm = $boundEvents.rearm
+        $completed = $boundEvents.completed
+        $validated = $boundEvents.validated
+        $adopted = $boundEvents.adopted
+        if ([int]$rearm.sequence -ne
+                [int]$rearmCandidates[0].sequence -or
+            [string]$rearm.hash -ne [string]$rearmCandidates[0].hash -or
             [string]$completed.prior_state -ne 'running' -or
             [string]$validated.prior_state -ne 'completed' -or
             [string]$adopted.prior_state -ne 'validated' -or
-            @($rearm[0], $completed, $validated, $adopted |
+            [string]$completed.status -ne 'completed' -or
+            [string]$validated.status -ne 'validated' -or
+            [string]$adopted.status -ne 'adopted' -or
+            [int]$authorizationEvents[0].sequence -ge [int]$rearm.sequence -or
+            [int]$rearm.sequence -ge [int]$completed.sequence -or
+            [int]$completed.sequence -ge [int]$validated.sequence -or
+            [int]$validated.sequence -ge [int]$adopted.sequence -or
+            @($rearm, $completed, $validated, $adopted |
                 Where-Object {
                     [int]$_.sequence -in $excludedSequences
                 }).Count -gt 0) {
@@ -2900,8 +2936,8 @@ function Read-DurableReviewMilestoneRevisionSelection {
             source_node_id = $sourceNodeId
             role_id = [string]$requiredSource.role_id
             source_thread_id = [string]$requiredSource.thread_id
-            rearm_event_sequence = [int]$rearm[0].sequence
-            rearm_event_hash = [string]$rearm[0].hash
+            rearm_event_sequence = [int]$rearm.sequence
+            rearm_event_hash = [string]$rearm.hash
             completed_event_sequence = [int]$completed.sequence
             completed_event_hash = [string]$completed.hash
             validated_event_sequence = [int]$validated.sequence
