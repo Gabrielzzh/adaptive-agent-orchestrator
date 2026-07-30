@@ -139,16 +139,23 @@ function New-SourceChain {
         [string] $Stem,
         [string] $Severity,
         [string] $FindingText,
-        [string] $Resolution
+        [string] $Resolution,
+        [string] $FindingId = '',
+        [string] $CanonicalFindingId = ''
     )
     $capturePath = Join-Path $Run "thread-reads/$Stem.json"
     New-ThreadCapture -Path $capturePath -ThreadId $ThreadId `
         -Text "Report for $SourceNodeId at $MilestoneId."
-    $findingId = "$SourceNodeId-$MilestoneId-finding"
+    if ([string]::IsNullOrWhiteSpace($FindingId)) {
+        $FindingId = "$SourceNodeId-$MilestoneId-finding"
+    }
+    if ([string]::IsNullOrWhiteSpace($CanonicalFindingId)) {
+        $CanonicalFindingId = "canonical-$FindingId"
+    }
     $findingPath = Join-Path $Run "materials/$Stem-findings.json"
     @(
         [ordered]@{
-            finding_id = $findingId
+            finding_id = $FindingId
             severity = $Severity
             text = $FindingText
         }
@@ -171,10 +178,10 @@ function New-SourceChain {
     } else { 'requested' }
     @(
         [ordered]@{
-            source_finding_id = $findingId
+            source_finding_id = $FindingId
             finding = $FindingText
             finding_hash = Get-TextSha256 $FindingText
-            canonical_finding_id = "canonical-$findingId"
+            canonical_finding_id = $CanonicalFindingId
             severity = $Severity
             disposition = 'adopted'
             rationale = 'Self-test decision.'
@@ -276,6 +283,39 @@ function Resign-AcceptanceTail {
     $event.hash = Get-OrchestrationEventHash ([pscustomobject]$event)
     $eventLines[-1] = $event | ConvertTo-Json -Compress -Depth 100
     $eventLines | Set-Content -LiteralPath $eventsPath -Encoding utf8
+}
+
+function Resign-SuccessorExportTail {
+    param(
+        [string] $Run,
+        [scriptblock] $ReceiptMutation
+    )
+    $receiptPath = Join-Path $Run (
+        'receipts/durable-review-successor.export.json'
+    )
+    $receipt = Get-Content -LiteralPath $receiptPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    & $ReceiptMutation $receipt
+    $receipt.open_obligations_hash = Get-TextSha256 (
+        @($receipt.open_obligations) |
+            ConvertTo-Json -Compress -Depth 100
+    )
+    $receipt.Remove('receipt_hash')
+    $receipt.receipt_hash = Get-TextSha256 (
+        $receipt | ConvertTo-Json -Compress -Depth 100
+    )
+    $receipt | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $receiptPath -Encoding utf8
+
+    $eventsPath = Join-Path $Run 'events.jsonl'
+    $lines = @(Get-Content -LiteralPath $eventsPath)
+    $event = $lines[-1] | ConvertFrom-Json -AsHashtable -Depth 100
+    $event.result_receipt_hash = $receipt.receipt_hash
+    $event.request_fingerprint = $receipt.receipt_hash
+    $event.Remove('hash')
+    $event.hash = Get-OrchestrationEventHash ([pscustomobject]$event)
+    $lines[-1] = $event | ConvertTo-Json -Compress -Depth 100
+    $lines | Set-Content -LiteralPath $eventsPath -Encoding utf8
 }
 
 function Complete-SourceLifecycle {
@@ -767,6 +807,341 @@ try {
             -RunDirectory $tamperedDispositionRun | Out-Null
     } 'receipt hash mismatch' (
         'Changed active disposition content must fail closed.'
+    )
+
+    $successorPlanPath = Join-Path $testRoot 'successor-plan.json'
+    New-ReviewPlan -Path $successorPlanPath
+    $successorPlan = Get-Content -LiteralPath $successorPlanPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $successorPlan.run_id = 'durable-successor-self-test'
+    $successorPlan.goal = 'Adopt unresolved predecessor P1 obligations.'
+    $successorPlan.durable_review_profile.milestone_ids = @(
+        'group-1', 'group-2'
+    )
+    foreach ($node in @($successorPlan.nodes | Where-Object {
+        $_.id -in @('review', 'domain')
+    })) {
+        $node.context.session_policy = 'reuse'
+        $node.context.max_prior_turns = 1
+        $node.context.prior_thread_id = "$($node.id)-thread"
+        $node.context.prior_handoff = "handoffs/$($node.id).md"
+        $node.context.prior_handoff_hash = ('a' * 64)
+        $node.context.reuse_reason = 'Continue the same durable source.'
+    }
+    $successorPlan.successor_review_profile = [ordered]@{
+        predecessor_run_id = 'durable-milestone-self-test'
+        predecessor_active_milestone_id = 'method-2'
+        predecessor_checkpoint_material_hash = (
+            Get-FileHash -LiteralPath $checkpoint2 -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        source_node_ids = @('domain', 'review')
+    }
+    $successorPlan | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $successorPlanPath -Encoding utf8
+    $authorizationPath = Join-Path $run (
+        'materials/successor-authorization.md'
+    )
+    Set-Content -LiteralPath $authorizationPath -Value (
+        'Controller authorizes one successor run for the unresolved P1 set.'
+    )
+    $predecessorBeforeExport = Join-Path $testRoot (
+        'predecessor-before-successor-export'
+    )
+    Copy-Item -LiteralPath $run -Destination $predecessorBeforeExport -Recurse
+    $export = & (Join-Path $scriptRoot (
+        'New-DurableReviewSuccessorExportReceipt.ps1'
+    )) -PredecessorRunDirectory $run `
+        -SuccessorPlanPath $successorPlanPath `
+        -SuccessorRunDirectory (Join-Path $testRoot 'successor-run') `
+        -AuthorizationMaterialPath $authorizationPath `
+        -ActivationKey 'controller:self-test-successor' |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        @($export.open_obligations).Count -eq 2 -and
+        @($export.source_bindings).Count -eq 2
+    ) 'Successor export must bind every source and unresolved P1.'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewSuccessorExportReceipt.ps1'
+        )) -PredecessorRunDirectory $run `
+            -SuccessorPlanPath $successorPlanPath `
+            -SuccessorRunDirectory (Join-Path $testRoot 'successor-run') `
+            -AuthorizationMaterialPath $authorizationPath `
+            -ActivationKey 'controller:self-test-successor-fork' | Out-Null
+    } 'already has a successor export' (
+        'A predecessor cannot export duplicate or forked successors.'
+    )
+
+    $wrongThreadPlanPath = Join-Path $testRoot 'wrong-thread-successor.json'
+    $wrongThreadPlan = Get-Content -LiteralPath $successorPlanPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    @($wrongThreadPlan.nodes | Where-Object {
+        $_.id -eq 'review'
+    })[0].context.prior_thread_id = 'different-review-thread'
+    $wrongThreadPlan | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $wrongThreadPlanPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewSuccessorExportReceipt.ps1'
+        )) -PredecessorRunDirectory $predecessorBeforeExport `
+            -SuccessorPlanPath $wrongThreadPlanPath `
+            -SuccessorRunDirectory (
+                Join-Path $testRoot 'wrong-thread-successor-run'
+            ) `
+            -AuthorizationMaterialPath (
+                Join-Path $predecessorBeforeExport (
+                    'materials/successor-authorization.md'
+                )
+            ) -ActivationKey 'controller:wrong-thread-successor' | Out-Null
+    } 'role/thread continuity' (
+        'A successor cannot reuse a different or unbound source thread.'
+    )
+    $freshPlanPath = Join-Path $testRoot 'fresh-successor.json'
+    $freshPlan = Get-Content -LiteralPath $successorPlanPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $freshNode = @($freshPlan.nodes | Where-Object {
+        $_.id -eq 'review'
+    })[0]
+    $freshNode.context.session_policy = 'fresh'
+    $freshNode.context.max_prior_turns = 0
+    foreach ($name in @(
+        'prior_thread_id', 'prior_handoff', 'prior_handoff_hash',
+        'reuse_reason'
+    )) {
+        $freshNode.context.Remove($name)
+    }
+    $freshPlan | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $freshPlanPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Test-OrchestrationPlan.ps1') `
+            -PlanPath $freshPlanPath -WorkspaceRoot $testRoot | Out-Null
+    } 'must explicitly reuse' (
+        'A successor durable source cannot silently start a fresh thread.'
+    )
+    $openP0Run = Join-Path $testRoot 'open-p0-predecessor'
+    Copy-Item -LiteralPath $preActivation -Destination $openP0Run -Recurse
+    $openP0Checkpoint = Join-Path $openP0Run (
+        'materials/checkpoint-method-2.json'
+    )
+    $openP0Review = New-SourceChain -Run $openP0Run `
+        -SourceNodeId 'review' -ThreadId 'review-thread' `
+        -MilestoneId 'method-2' -CheckpointPath $openP0Checkpoint `
+        -Stem 'review.method-2.open-p0' -Severity 'P0' `
+        -FindingText 'open-review-p0' -Resolution 'open'
+    $openP0SelectionPath = Join-Path $openP0Run (
+        'materials/method-2-selection.json'
+    )
+    $openP0Selection = @(
+        Get-Content -LiteralPath $openP0SelectionPath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 20
+    )
+    $openP0Selection[0].result_receipt_path = $openP0Review.result_path
+    $openP0Selection[0].disposition_receipt_path =
+        $openP0Review.disposition_path
+    $openP0Selection | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $openP0SelectionPath
+    & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneActivationReceipt.ps1'
+    )) -RunDirectory $openP0Run -MilestoneId 'method-2' `
+        -SelectionPath $openP0SelectionPath `
+        -AuthorizationMaterialPath (
+            Join-Path $openP0Run 'materials/method-2-authorization.md'
+        ) -AcceptanceAuthorizationMaterialPath (
+            Join-Path $openP0Run (
+                'materials/method-2-acceptance-authorization.json'
+            )
+        ) -ActivationKey 'controller:open-p0-method-2' | Out-Null
+    Set-Content -LiteralPath (
+        Join-Path $openP0Run 'materials/successor-authorization.md'
+    ) -Value 'Controller must not export unresolved P0.'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewSuccessorExportReceipt.ps1'
+        )) -PredecessorRunDirectory $openP0Run `
+            -SuccessorPlanPath $successorPlanPath `
+            -SuccessorRunDirectory (
+                Join-Path $testRoot 'open-p0-successor'
+            ) -AuthorizationMaterialPath (
+                Join-Path $openP0Run 'materials/successor-authorization.md'
+            ) -ActivationKey 'controller:open-p0-successor' | Out-Null
+    } 'cannot carry unresolved P0' (
+        'A successor cannot move unresolved P0 into a later run.'
+    )
+
+    $genesisOnly = Join-Path $testRoot 'successor-genesis-only'
+    & (Join-Path $scriptRoot 'New-OrchestrationRun.ps1') `
+        -PlanPath $successorPlanPath -RunDirectory $genesisOnly `
+        -WorkspaceRoot $testRoot | Out-Null
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $genesisOnly | Out-Null
+    } 'successor adoption' (
+        'A successor plan cannot complete from a copied or bare genesis.'
+    )
+
+    $successorRun = Join-Path $testRoot 'successor-run'
+    $adoption = & (Join-Path $scriptRoot (
+        'New-OrchestrationSuccessorRun.ps1'
+    )) -PlanPath $successorPlanPath -RunDirectory $successorRun `
+        -WorkspaceRoot $testRoot -PredecessorRunDirectory $run `
+        -PredecessorExportReceiptPath (
+            Join-Path $run 'receipts/durable-review-successor.export.json'
+        ) | ConvertFrom-Json -Depth 100
+    Assert-True (
+        @($adoption.inherited_obligations).Count -eq 2 -and
+        $adoption.predecessor_run_id -eq 'durable-milestone-self-test'
+    ) 'Successor adoption must preserve the predecessor obligation set.'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-OrchestrationSuccessorRun.ps1'
+        )) -PlanPath $successorPlanPath `
+            -RunDirectory (Join-Path $testRoot 'successor-run-fork') `
+            -WorkspaceRoot $testRoot -PredecessorRunDirectory $run `
+            -PredecessorExportReceiptPath (
+                Join-Path $run (
+                    'receipts/durable-review-successor.export.json'
+                )
+            ) | Out-Null
+    } 'another run directory' (
+        'One export cannot materialize a parallel successor directory.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $successorRun | Out-Null
+    } 'Inherited P1' (
+        'Inherited P1 obligations must block a new successor run.'
+    )
+
+    foreach ($directory in @('materials', 'thread-reads')) {
+        $path = Join-Path $successorRun $directory
+        if (-not (Test-Path -LiteralPath $path)) {
+            $null = New-Item -ItemType Directory -Path $path
+        }
+    }
+    $successorCheckpoint = Join-Path $successorRun (
+        'materials/checkpoint-group-1.json'
+    )
+    Set-Content -LiteralPath $successorCheckpoint -Value (
+        '{"milestone":"group-1"}'
+    )
+    $resolvedSuccessorReview = New-SourceChain -Run $successorRun `
+        -SourceNodeId 'review' -ThreadId 'review-thread' `
+        -MilestoneId 'group-1' -CheckpointPath $successorCheckpoint `
+        -Stem 'review' -Severity 'P1' `
+        -FindingText 'current-review-p1' -Resolution 'resolved' `
+        -FindingId 'review-method-2-finding' `
+        -CanonicalFindingId 'canonical-review-method-2-finding'
+    $resolvedSuccessorDomain = New-SourceChain -Run $successorRun `
+        -SourceNodeId 'domain' -ThreadId 'domain-thread' `
+        -MilestoneId 'group-1' -CheckpointPath $successorCheckpoint `
+        -Stem 'domain' -Severity 'P1' `
+        -FindingText 'current-domain-p1' -Resolution 'resolved' `
+        -FindingId 'domain-method-2-finding' `
+        -CanonicalFindingId 'canonical-domain-method-2-finding'
+    Complete-SourceLifecycle -Run $successorRun -SourceNodeId 'review' `
+        -ThreadId 'review-thread' `
+        -ResultRelativePath $resolvedSuccessorReview.result_path
+    Complete-SourceLifecycle -Run $successorRun -SourceNodeId 'domain' `
+        -ThreadId 'domain-thread' `
+        -ResultRelativePath $resolvedSuccessorDomain.result_path
+    foreach ($status in @('running', 'completed', 'validated')) {
+        $arguments = @{
+            RunDirectory = $successorRun
+            NodeId = 'integrate'
+            Status = $status
+            Message = "successor integrate $status"
+            IdempotencyKey = "successor-integrate-$status"
+        }
+        if ($status -eq 'completed') {
+            $arguments.Evidence = @('observation:successor-integrated')
+        }
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') @arguments |
+            Out-Null
+    }
+    $successorCompletion = & (Join-Path $scriptRoot (
+        'Test-OrchestrationCompletion.ps1'
+    )) -RunDirectory $successorRun | ConvertFrom-Json -Depth 30
+    Assert-True $successorCompletion.complete (
+        'Same-source resolved and re-reviewed inherited P1 may complete.'
+    )
+    $copiedSuccessor = Join-Path $testRoot 'copied-successor-run'
+    Copy-Item -LiteralPath $successorRun -Destination $copiedSuccessor -Recurse
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $copiedSuccessor | Out-Null
+    } 'adoption run identity changed' (
+        'Copying a successor directory cannot preserve its adoption identity.'
+    )
+
+    $tamperedExportRun = Join-Path $testRoot 'tampered-successor-export'
+    Copy-Item -LiteralPath $predecessorBeforeExport `
+        -Destination $tamperedExportRun -Recurse
+    & (Join-Path $scriptRoot (
+        'New-DurableReviewSuccessorExportReceipt.ps1'
+    )) -PredecessorRunDirectory $tamperedExportRun `
+        -SuccessorPlanPath $successorPlanPath `
+        -SuccessorRunDirectory (
+            Join-Path $testRoot 'tampered-successor-run'
+        ) `
+        -AuthorizationMaterialPath (
+            Join-Path $tamperedExportRun (
+                'materials/successor-authorization.md'
+            )
+        ) -ActivationKey 'controller:tampered-export-fixture' | Out-Null
+    $tamperedExportPath = Join-Path $tamperedExportRun (
+        'receipts/durable-review-successor.export.json'
+    )
+    Resign-SuccessorExportTail -Run $tamperedExportRun -ReceiptMutation {
+        param($receipt)
+        $receipt.open_obligations =
+            @($receipt.open_obligations | Select-Object -Skip 1)
+    }
+    Assert-ThrowsLike {
+        Read-DurableReviewSuccessorExportReceipt -Path $tamperedExportPath `
+            -PredecessorRunDirectory $tamperedExportRun `
+            -SuccessorPlanPath $successorPlanPath | Out-Null
+    } 'bound runs' (
+        'Omitting an inherited P1 must invalidate the export chain.'
+    )
+    $severityRun = Join-Path $testRoot 'downgraded-successor-severity'
+    Copy-Item -LiteralPath $predecessorBeforeExport `
+        -Destination $severityRun -Recurse
+    & (Join-Path $scriptRoot (
+        'New-DurableReviewSuccessorExportReceipt.ps1'
+    )) -PredecessorRunDirectory $severityRun `
+        -SuccessorPlanPath $successorPlanPath `
+        -SuccessorRunDirectory (
+            Join-Path $testRoot 'severity-successor-run'
+        ) `
+        -AuthorizationMaterialPath (
+            Join-Path $severityRun 'materials/successor-authorization.md'
+        ) -ActivationKey 'controller:severity-export-fixture' | Out-Null
+    Resign-SuccessorExportTail -Run $severityRun -ReceiptMutation {
+        param($receipt)
+        $receipt.open_obligations[0].severity = 'P2'
+    }
+    Assert-ThrowsLike {
+        Read-DurableReviewSuccessorExportReceipt -Path (
+            Join-Path $severityRun (
+                'receipts/durable-review-successor.export.json'
+            )
+        ) -PredecessorRunDirectory $severityRun `
+            -SuccessorPlanPath $successorPlanPath | Out-Null
+    } 'bound runs' (
+        'An inherited P1 severity cannot be downgraded and re-signed.'
+    )
+
+    $copiedPredecessor = Join-Path $testRoot 'copied-predecessor'
+    Copy-Item -LiteralPath $run -Destination $copiedPredecessor -Recurse
+    Assert-ThrowsLike {
+        Read-DurableReviewSuccessorExportReceipt -Path (
+            Join-Path $copiedPredecessor (
+                'receipts/durable-review-successor.export.json'
+            )
+        ) -PredecessorRunDirectory $copiedPredecessor `
+            -SuccessorPlanPath $successorPlanPath | Out-Null
+    } 'bound runs' (
+        'Copying a predecessor directory cannot replay its export.'
     )
 
     [pscustomobject]@{

@@ -323,6 +323,13 @@ After all active P0/P1 findings are resolved, the main integration owner must
 record a fresh `New-DurableReviewMilestoneAcceptanceReceipt.ps1` bound to that
 activation, its source bindings, checkpoint, and acceptance evidence. A main
 node status inherited from an earlier milestone never satisfies this gate.
+If the final declared milestone still has open P1 work, use the successor-run
+protocol in [workflow-contract.md](references/workflow-contract.md): export the
+terminal predecessor chain with
+`New-DurableReviewSuccessorExportReceipt.ps1`, then create the new run only
+through `New-OrchestrationSuccessorRun.ps1`. Never copy or edit the old run.
+Inherited P1 items retain their exact source, severity, text/hash, role and
+thread identity until that source resolves and re-reviews them.
 Durable source receipts use schema 1.3 findings bound to a source finding ID,
 original P0/P1/P2 severity, exact text, and text hash. Disposition must match
 all four values. Older receipts remain readable for history but cannot satisfy

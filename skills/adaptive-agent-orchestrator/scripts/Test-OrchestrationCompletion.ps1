@@ -177,6 +177,21 @@ $durableMilestoneAcceptance = $null
 $durableMilestoneError = ''
 $durableAcceptanceError = ''
 $activeDurableBindings = @{}
+$successorAdoption = $null
+$successorAdoptionError = ''
+$currentDurableDispositions = @{}
+if ($null -ne $plan.PSObject.Properties['successor_review_profile']) {
+    try {
+        $successorAdoption = Read-DurableReviewSuccessorAdoptionReceipt `
+            -RunDirectory $RunDirectory
+    } catch {
+        $successorAdoptionError = $_.Exception.Message
+        $errors.Add(
+            'Durable review successor adoption is invalid: ' +
+            $successorAdoptionError
+        )
+    }
+}
 if ($durableReviewNodeIds.Count -gt 0) {
     try {
         $durableMilestoneChain =
@@ -271,6 +286,9 @@ foreach ($check in $reviewDispositionChecks) {
         $receipt = Read-ReviewDispositionReceipt -Path $receiptPath `
             -RunDirectory $RunDirectory -ExpectedSourceNodeId $nodeId `
             -ExpectedThreadId $expectedThreadId
+        if ($durableReviewNodeIds.Contains($nodeId)) {
+            $currentDurableDispositions[$nodeId] = $receipt
+        }
         if ($null -ne $activeBinding -and
             -not [string]::IsNullOrWhiteSpace(
                 [string]$durableMilestoneChain.activation_receipt_hash
@@ -334,6 +352,54 @@ foreach ($durableNodeId in $durableReviewNodeIds) {
         $errors.Add(
             "Durable review source '$durableNodeId' lacks a disposition check."
         )
+    }
+}
+if ($null -ne $successorAdoption -and
+    [string]::IsNullOrWhiteSpace($successorAdoptionError)) {
+    foreach ($obligation in @($successorAdoption.inherited_obligations)) {
+        $sourceNodeId = [string]$obligation.source_node_id
+        if (-not $currentDurableDispositions.ContainsKey($sourceNodeId)) {
+            $errors.Add(
+                "Inherited P1 '$($obligation.source_finding_id)' lacks a " +
+                "current disposition from source '$sourceNodeId'."
+            )
+            continue
+        }
+        $matches = @(
+            $currentDurableDispositions[$sourceNodeId].decisions |
+                Where-Object {
+                    [string]$_.source_finding_id -eq
+                        [string]$obligation.source_finding_id
+                }
+        )
+        if ($matches.Count -ne 1) {
+            $errors.Add(
+                "Inherited P1 '$($obligation.source_finding_id)' is missing " +
+                "or repeated in source '$sourceNodeId'."
+            )
+            continue
+        }
+        $decision = $matches[0]
+        if ([string]$decision.canonical_finding_id -ne
+                [string]$obligation.canonical_finding_id -or
+            [string]$decision.severity -ne [string]$obligation.severity -or
+            [string]$decision.finding -ne [string]$obligation.finding -or
+            [string]$decision.finding_hash -ne
+                [string]$obligation.finding_hash) {
+            $errors.Add(
+                "Inherited P1 '$($obligation.source_finding_id)' identity or " +
+                'severity changed.'
+            )
+            continue
+        }
+        if ([string]$decision.resolution_status -ne 'resolved' -or
+            [string]$decision.re_review_status -ne 'completed' -or
+            [string]$decision.re_review_source_node_id -ne $sourceNodeId) {
+            $errors.Add(
+                "Inherited P1 '$($obligation.source_finding_id)' remains " +
+                'unresolved or lacks same-source re-review.'
+            )
+        }
     }
 }
 
