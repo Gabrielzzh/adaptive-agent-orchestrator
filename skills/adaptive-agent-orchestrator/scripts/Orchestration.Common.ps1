@@ -193,6 +193,40 @@ function Read-OrchestrationJournal {
     return $events
 }
 
+function Get-ThreadCaptureId {
+    param(
+        [Parameter(Mandatory)][object] $Capture,
+        [Parameter(Mandatory)][string] $CaptureKind
+    )
+
+    $ids = [Collections.Generic.List[string]]::new()
+    $threadProperty = $Capture.PSObject.Properties['thread']
+    if ($null -ne $threadProperty -and $null -ne $Capture.thread) {
+        if ($null -ne $Capture.thread.PSObject.Properties['id']) {
+            $ids.Add([string]$Capture.thread.id)
+        }
+        if ($null -ne $Capture.thread.PSObject.Properties['threadId']) {
+            $ids.Add([string]$Capture.thread.threadId)
+        }
+    }
+    if ($null -ne $Capture.PSObject.Properties['threadId']) {
+        $ids.Add([string]$Capture.threadId)
+    }
+    if ($ids.Count -eq 0) {
+        throw "$CaptureKind capture does not declare a thread identity."
+    }
+    if (@($ids | Where-Object {
+        [string]::IsNullOrWhiteSpace($_)
+    }).Count -gt 0) {
+        throw "$CaptureKind capture contains an empty thread identity."
+    }
+    $first = [string]$ids[0]
+    if (@($ids | Where-Object { [string]$_ -cne $first }).Count -gt 0) {
+        throw "$CaptureKind capture declares conflicting thread identities."
+    }
+    return $first
+}
+
 function Read-ThreadReadCapture {
     param(
         [Parameter(Mandatory)][string] $Path,
@@ -208,15 +242,9 @@ function Read-ThreadReadCapture {
         [string]$capture.page.order -ne 'newest_first') {
         throw 'Thread-read capture must declare newest_first turn order.'
     }
-    $captureThreadId = if (
-        $null -ne $capture.PSObject.Properties['thread'] -and
-        $null -ne $capture.thread.PSObject.Properties['threadId']
-    ) {
-        [string]$capture.thread.threadId
-    } elseif ($null -ne $capture.PSObject.Properties['threadId']) {
-        [string]$capture.threadId
-    } else { '' }
-    if ($captureThreadId -ne $ExpectedThreadId) {
+    $captureThreadId = Get-ThreadCaptureId -Capture $capture `
+        -CaptureKind 'Thread-read'
+    if ($captureThreadId -cne $ExpectedThreadId) {
         throw 'Thread-read capture does not match the expected thread.'
     }
     $turns = @($capture.turns)
@@ -527,15 +555,9 @@ function Read-ThreadProgressCapture {
         [string]$capture.page.order -ne 'newest_first') {
         throw 'Thread progress capture must declare newest_first turn order.'
     }
-    $captureThreadId = if (
-        $null -ne $capture.PSObject.Properties['thread'] -and
-        $null -ne $capture.thread.PSObject.Properties['threadId']
-    ) {
-        [string]$capture.thread.threadId
-    } elseif ($null -ne $capture.PSObject.Properties['threadId']) {
-        [string]$capture.threadId
-    } else { '' }
-    if ($captureThreadId -ne $ExpectedThreadId) {
+    $captureThreadId = Get-ThreadCaptureId -Capture $capture `
+        -CaptureKind 'Thread progress'
+    if ($captureThreadId -cne $ExpectedThreadId) {
         throw 'Thread progress capture does not match the expected thread.'
     }
     $turns = @($capture.turns)

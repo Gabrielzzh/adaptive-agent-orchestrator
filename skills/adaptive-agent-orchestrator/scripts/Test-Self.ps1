@@ -64,6 +64,13 @@ function Assert-ThrowsLike {
 try {
     $null = New-Item -ItemType Directory -Path $testRoot
 
+    $captureCompatibility = & (
+        Join-Path $scriptRoot 'Test-ThreadCaptureCompatibility.ps1'
+    ) | ConvertFrom-Json
+    Assert-True $captureCompatibility.pass (
+        'Thread capture compatibility tests must pass.'
+    )
+
     $valid = & (Join-Path $scriptRoot 'Test-OrchestrationPlan.ps1') `
         -PlanPath $examplePath -WorkspaceRoot $skillRoot |
         ConvertFrom-Json
@@ -1201,7 +1208,7 @@ try {
     [ordered]@{
         schemaVersion = 1
         thread = [ordered]@{
-            threadId = 'test-thread-draft'
+            id = 'test-thread-draft'
         }
         page = [ordered]@{
             order = 'newest_first'
