@@ -1,7 +1,7 @@
 # Release validation receipt
 
-Release: `0.7.3`
-Policy version: `0.7.3`
+Release: `0.7.4`
+Policy version: `0.7.4`
 Date: `2026-07-30`
 
 ## Environment
@@ -30,6 +30,8 @@ pwsh -NoProfile -File "$skill\scripts\Test-Self.ps1"
 
 pwsh -NoProfile -File "$skill\scripts\Test-RecoveryProtocol.ps1"
 
+pwsh -NoProfile -File "$skill\scripts\Test-RunPolicyActivation.ps1"
+
 python `
   "$HOME\.codex\skills\.system\skill-creator\scripts\quick_validate.py" `
   $skill
@@ -38,9 +40,10 @@ python `
 ## Results
 
 - Exit code: 0
-- PowerShell scripts parsed: 33
-- Recovery-protocol assertions: 41 passed
-- Self-test assertions: 617 passed
+- PowerShell scripts parsed: 35
+- Run-policy activation assertions: 15 passed
+- Recovery-protocol assertions: 45 passed
+- Self-test assertions: 637 passed
 - Intentional invalid negative cases: 57 correctly rejected
 - Strict reference JSON files parsed: 8
 - Skill Creator validation: `Skill is valid!`
@@ -68,30 +71,36 @@ platform-bound model launch, platform-independent write-scope overlap
 comparison, read-only run measurement, honest unverified actual-model
 materialization, a separate replacement recovery epoch, lifecycle-derived
 recovery stage, canonical receipt uniqueness, and rejection of
-replacement-of-replacement.
+replacement-of-replacement. v0.7.4 adds immutable predecessor policy
+activation, artifact and source-obligation binding, existing-replacement
+lifecycle adoption, source/runtime policy separation, and fail-closed replay,
+downgrade, tamper, duplicate, and concurrent-activation checks.
 
-Functional candidate `c9d87f6c0e552eb536287fa4b0babe73284c9ebf`
+Functional candidate `e580b6ab71afed0a56c916aefd6ad71219b10ddd`
 was independently re-attacked before release preparation. The Reviewer used a
-clean 52-file archive matching that commit and ended GREEN with P0=0, P1=0,
-and P2=0.
+clean 54-file archive matching that commit and ended GREEN with P0=0, P1=0,
+and P2=0. The dynamic attack set included 27 activation assertions, 55
+recovery/adoption assertions, and 12 synchronized concurrent-activation
+rounds; each round produced exactly one writer.
 
-The final v0.7.3 Skill content was last changed by release-preparation commit
-`e0b0abdfc338671f80d7cd5a95a3824228162049` and is bound to Git tree
-`7696e33247889768396b09c5850ba2b038306260`. The Skill-only archive contains
-52 files and has SHA-256
-`35f27ff5bd70a050209f725657a156ceecdc278487de322fd714436f2c80f7d8`.
+The final v0.7.4 Skill content was last changed by functional commit
+`e580b6ab71afed0a56c916aefd6ad71219b10ddd` and is bound to Git tree
+`5a090450cc0b5ee0ca0c554fa544a769bb12b437`. The final Skill-only archive
+contains 54 files and has SHA-256
+`05c753da6abd1304d7b9cdb60136e59c04ccdf7c21efd5189a9ddd36d1f40a77`.
 Git for Windows exported text files with CRLF line endings; after normalizing
-CRLF to the repository's LF blob form, all 52/52 archive files match that
-Skill tree. The archive was extracted and the 33-script parser, 41-assertion
-recovery suite, 617-assertion self-test with 57 rejected invalid cases, and
-Skill Creator validation all passed again.
+CRLF to the repository's LF blob form, all 54/54 archive files match that
+Skill tree. The archive was extracted and the 35-script parser, 15-assertion
+activation suite, 45-assertion recovery suite, 637-assertion self-test with 57
+rejected invalid cases, and Skill Creator validation all passed again.
 
 This receipt does not claim measured production Token savings. Synthetic and
 local validation prove contract and implementation behavior, not a universal
 end-to-end savings percentage. GitHub publication is verified separately after
 the release is created.
 
-The Skill does not repair platform `systemError` or missing-final behavior. It
-fails closed, preserves evidence, and constrains recovery or replacement. The
+The Skill does not repair platform `systemError` or missing-final behavior,
+migrate business artifacts, or modify the multi-divination project. It fails
+closed, preserves evidence, and constrains recovery or replacement. The
 symbolic-link fixture was skipped because this Windows session did not permit
 link creation. Linux and macOS were not dynamically validated.
