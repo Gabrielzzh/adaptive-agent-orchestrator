@@ -10,8 +10,9 @@ param(
     [ValidateSet('original', 'replacement')]
     [string] $RecoveryStage = 'original',
     [string] $ReplacementContinuityReceiptPath,
+    [string] $MilestoneId,
     [Parameter(Mandatory)][ValidateRange(1, 3)][int] $Attempt,
-    [Parameter(Mandatory)][string] $OutputPath
+    [string] $OutputPath
 )
 
 Set-StrictMode -Version Latest
@@ -74,6 +75,37 @@ $checkpointPath = Resolve-InputPath $CheckpointManifestPath (
     'Checkpoint manifest'
 )
 $inputPath = Resolve-InputPath $InputManifestPath 'Input manifest'
+$checkpointHash = Get-TextSha256 (
+    Get-Content -LiteralPath $checkpointPath -Raw
+)
+$inputManifestHash = Get-TextSha256 (
+    Get-Content -LiteralPath $inputPath -Raw
+)
+$cycleAwareOriginal = (
+    $RecoveryStage -eq 'original' -and
+    [string]::IsNullOrWhiteSpace($LegacySourceAdoptionReceiptPath)
+)
+$cycle = $null
+if ($cycleAwareOriginal) {
+    $cycle = Get-OriginalRecoveryCycleBinding `
+        -RunDirectory $runRoot -SourceNodeId $SourceNodeId `
+        -OriginalThreadId $OriginalThreadId `
+        -CheckpointHash $checkpointHash `
+        -InputManifestHash $inputManifestHash -MilestoneId $MilestoneId
+} elseif (-not [string]::IsNullOrWhiteSpace($MilestoneId)) {
+    throw 'MilestoneId is only valid for cycle-aware original recovery.'
+}
+$expectedName = if ($RecoveryStage -eq 'replacement') {
+    "$SourceNodeId.replacement.attempt-$Attempt.result-recovery.json"
+} elseif ($cycleAwareOriginal) {
+    "$SourceNodeId.cycle-$([string]$cycle.recovery_cycle_id)." +
+        "attempt-$Attempt.result-recovery.json"
+} else {
+    "$SourceNodeId.attempt-$Attempt.result-recovery.json"
+}
+if ([string]::IsNullOrWhiteSpace($OutputPath)) {
+    $OutputPath = Join-Path (Join-Path $runRoot 'receipts') $expectedName
+}
 $outputFullPath = [IO.Path]::GetFullPath($OutputPath)
 if (-not $outputFullPath.StartsWith(
     $runRoot + [IO.Path]::DirectorySeparatorChar,
@@ -89,17 +121,11 @@ if ([IO.Path]::GetFullPath(
 ).TrimEnd('\', '/') -ne $canonicalReceiptDirectory) {
     throw 'Recovery receipt must use the canonical run receipts directory.'
 }
-if (Test-Path -LiteralPath $outputFullPath) {
-    throw "Recovery receipt already exists: $outputFullPath"
-}
-
-$expectedName = if ($RecoveryStage -eq 'replacement') {
-    "$SourceNodeId.replacement.attempt-$Attempt.result-recovery.json"
-} else {
-    "$SourceNodeId.attempt-$Attempt.result-recovery.json"
-}
 if ([IO.Path]::GetFileName($outputFullPath) -ne $expectedName) {
     throw "Recovery receipt filename must be '$expectedName'."
+}
+if (Test-Path -LiteralPath $outputFullPath) {
+    throw "Recovery receipt already exists: $outputFullPath"
 }
 $evidenceSource = ''
 $legacyRelativePath = ''
@@ -173,11 +199,37 @@ if (-not [string]::IsNullOrWhiteSpace($LegacySourceAdoptionReceiptPath)) {
     $evidenceSource = 'platform-read-capture'
 }
 
+if ($cycleAwareOriginal) {
+    $existingCycleStarts = @(
+        Get-ChildItem -LiteralPath $canonicalReceiptDirectory -File `
+            -Filter "$SourceNodeId.cycle-*.attempt-1.result-recovery.json" `
+            -ErrorAction SilentlyContinue
+    )
+    foreach ($existingCycleStart in $existingCycleStarts) {
+        $existing = Read-ThreadResultRecoveryReceipt `
+            -Path $existingCycleStart.FullName -RunDirectory $runRoot `
+            -ExpectedSourceNodeId $SourceNodeId `
+            -ExpectedOriginalThreadId $OriginalThreadId `
+            -ExpectedRecoveryStage 'original'
+        if ([string]$existing.checkpoint_hash -eq $checkpointHash -and
+            [string]$existing.recovery_cycle_id -ne
+                [string]$cycle.recovery_cycle_id) {
+            throw (
+                'An original recovery cycle already binds this source, thread, ' +
+                'and checkpoint with different input or milestone identity.'
+            )
+        }
+    }
+}
+
 $previousPath = ''
 $previousHash = ''
 if ($Attempt -gt 1) {
     $previousName = if ($RecoveryStage -eq 'replacement') {
         "$SourceNodeId.replacement.attempt-$($Attempt - 1).result-recovery.json"
+    } elseif ($cycleAwareOriginal) {
+        "$SourceNodeId.cycle-$([string]$cycle.recovery_cycle_id)." +
+            "attempt-$($Attempt - 1).result-recovery.json"
     } else {
         "$SourceNodeId.attempt-$($Attempt - 1).result-recovery.json"
     }
@@ -195,7 +247,13 @@ if ($Attempt -gt 1) {
 }
 
 $payload = [ordered]@{
-    schema_version = if ($RecoveryStage -eq 'replacement') { '1.1' } else { '1.0' }
+    schema_version = if ($RecoveryStage -eq 'replacement') {
+        '1.1'
+    } elseif ($cycleAwareOriginal) {
+        '1.2'
+    } else {
+        '1.0'
+    }
     run_id = [string]$run.run_id
     source_node_id = $SourceNodeId
     role_id = [string]$node.role_id
@@ -204,15 +262,11 @@ $payload = [ordered]@{
     checkpoint_path = [IO.Path]::GetRelativePath(
         $runRoot, $checkpointPath
     ).Replace('\', '/')
-    checkpoint_hash = Get-TextSha256 (
-        Get-Content -LiteralPath $checkpointPath -Raw
-    )
+    checkpoint_hash = $checkpointHash
     input_manifest_path = [IO.Path]::GetRelativePath(
         $runRoot, $inputPath
     ).Replace('\', '/')
-    input_manifest_hash = Get-TextSha256 (
-        Get-Content -LiteralPath $inputPath -Raw
-    )
+    input_manifest_hash = $inputManifestHash
     thread_read_path = [IO.Path]::GetRelativePath(
         $runRoot, $capturePath
     ).Replace('\', '/')
@@ -239,6 +293,14 @@ if ($RecoveryStage -eq 'replacement') {
     $payload['recovery_stage'] = 'replacement'
     $payload['replacement_continuity_receipt_path'] = $replacementRelativePath
     $payload['replacement_continuity_receipt_hash'] = $replacementHash
+} elseif ($cycleAwareOriginal) {
+    $payload['recovery_stage'] = 'original'
+    $payload['recovery_cycle_id'] = [string]$cycle.recovery_cycle_id
+    $payload['milestone_id'] = [string]$cycle.milestone_id
+    $payload['milestone_activation_receipt_path'] =
+        [string]$cycle.milestone_activation_receipt_path
+    $payload['milestone_activation_receipt_hash'] =
+        [string]$cycle.milestone_activation_receipt_hash
 }
 $receipt = [ordered]@{}
 foreach ($key in $payload.Keys) { $receipt[$key] = $payload[$key] }
