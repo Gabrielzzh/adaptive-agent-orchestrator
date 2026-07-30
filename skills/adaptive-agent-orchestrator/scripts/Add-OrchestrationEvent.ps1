@@ -518,6 +518,14 @@ try {
     $isRecoveryCycleReentry = $false
     $isMilestoneRevisionRearm = $false
     $previousAdoptedEvent = $null
+    $previousReviewBindingKind = ''
+    $previousResultRelativePath = ''
+    $previousResultReceiptHash = ''
+    $previousDispositionRelativePath = ''
+    $previousDispositionReceiptHash = ''
+    $previousMilestoneActivationRelativePath = ''
+    $previousMilestoneActivationReceiptHash = ''
+    $previousMilestoneActivationEvent = $null
     if ($priorState -eq 'adopted' -and $Status -eq 'result_pending') {
         if ($null -eq $recoveryReceipt -or
             [string]$recoveryReceipt.schema_version -ne '1.2' -or
@@ -558,43 +566,136 @@ try {
                 [string]$_ -like 'artifact:receipts/*.disposition.json'
             }
         )
-        if ($resultPointers.Count -ne 1 -or $dispositionPointers.Count -ne 1) {
-            throw (
-                'Recovery-cycle re-entry requires exactly one prior result ' +
-                'receipt and one source-specific disposition receipt.'
-            )
-        }
-        $priorResultRelativePath = (
-            [string]$resultPointers[0]
+        $priorResult = $null
+        $priorDisposition = $null
+        if ($resultPointers.Count -eq 1 -and $dispositionPointers.Count -eq 1) {
+            $priorResultRelativePath = (
+                [string]$resultPointers[0]
         ).Substring('artifact:'.Length).Replace('\', '/')
-        $priorDispositionRelativePath = (
-            [string]$dispositionPointers[0]
+            $priorDispositionRelativePath = (
+                [string]$dispositionPointers[0]
         ).Substring('artifact:'.Length).Replace('\', '/')
-        $priorResultPath = Get-RunLocalReceiptPath `
-            -RunDirectory $RunDirectory -RelativePath $priorResultRelativePath `
-            -Label 'Prior review result receipt'
-        $priorDispositionPath = Get-RunLocalReceiptPath `
-            -RunDirectory $RunDirectory `
-            -RelativePath $priorDispositionRelativePath `
-            -Label 'Prior review disposition receipt'
-        $priorResult = Read-ThreadResultReceipt -Path $priorResultPath `
-            -ExpectedThreadId $ThreadId -ExpectedSourceNodeId $NodeId `
-            -RunDirectory $RunDirectory
-        $priorDisposition = Read-ReviewDispositionReceipt `
-            -Path $priorDispositionPath -RunDirectory $RunDirectory `
-            -ExpectedSourceNodeId $NodeId -ExpectedThreadId $ThreadId
-        if ([string]$priorResult.schema_version -ne '1.3' -or
-            [string]$priorResult.milestone_id -ne
-                [string]$recoveryReceipt.milestone_id -or
-            [string]$priorDisposition.milestone_id -ne
-                [string]$recoveryReceipt.milestone_id -or
-            [string]$priorDisposition.source_result_receipt_hash -ne
-                [string]$priorResult.receipt_hash) {
-            throw (
-                'Recovery-cycle re-entry does not match the prior verified ' +
-                'result, disposition, and active milestone.'
-            )
+            $priorResultPath = Get-RunLocalReceiptPath `
+                -RunDirectory $RunDirectory `
+                -RelativePath $priorResultRelativePath `
+                -Label 'Prior review result receipt'
+            $priorDispositionPath = Get-RunLocalReceiptPath `
+                -RunDirectory $RunDirectory `
+                -RelativePath $priorDispositionRelativePath `
+                -Label 'Prior review disposition receipt'
+            $priorResult = Read-ThreadResultReceipt -Path $priorResultPath `
+                -ExpectedThreadId $ThreadId -ExpectedSourceNodeId $NodeId `
+                -RunDirectory $RunDirectory
+            $priorDisposition = Read-ReviewDispositionReceipt `
+                -Path $priorDispositionPath -RunDirectory $RunDirectory `
+                -ExpectedSourceNodeId $NodeId -ExpectedThreadId $ThreadId
+            if ([string]$priorResult.schema_version -eq '1.3' -and
+                [string]$priorResult.milestone_id -eq
+                    [string]$recoveryReceipt.milestone_id -and
+                [string]$priorDisposition.milestone_id -eq
+                    [string]$recoveryReceipt.milestone_id -and
+                [string]$priorDisposition.source_result_receipt_hash -eq
+                    [string]$priorResult.receipt_hash) {
+                $previousReviewBindingKind = 'node-lifecycle'
+            } else {
+                $priorResult = $null
+                $priorDisposition = $null
+            }
         }
+        if ($null -eq $priorResult) {
+            $milestoneChain = Read-DurableReviewMilestoneActivationChain `
+                -RunDirectory $RunDirectory
+            $activeBindings = @(
+                $milestoneChain.active_source_bindings | Where-Object {
+                    [string]$_.source_node_id -eq $NodeId
+                }
+            )
+            if ([string]$milestoneChain.active_milestone_id -ne
+                    [string]$recoveryReceipt.milestone_id -or
+                [string]::IsNullOrWhiteSpace(
+                    [string]$milestoneChain.activation_receipt_path
+                ) -or
+                [string]$milestoneChain.activation_receipt_path -ne
+                    [string]$recoveryReceipt.
+                        milestone_activation_receipt_path -or
+                [string]$milestoneChain.activation_receipt_hash -ne
+                    [string]$recoveryReceipt.
+                        milestone_activation_receipt_hash -or
+                $activeBindings.Count -ne 1 -or
+                [string]$activeBindings[0].source_thread_id -ne $ThreadId) {
+                throw (
+                    'Recovery-cycle re-entry does not match the prior verified ' +
+                    'result, disposition, and active milestone.'
+                )
+            }
+            $activeBinding = $activeBindings[0]
+            $activeResultRelativePath =
+                [string]$activeBinding.result_receipt_path
+            $activeDispositionRelativePath =
+                [string]$activeBinding.disposition_receipt_path
+            $activeResultPath = Get-RunLocalReceiptPath `
+                -RunDirectory $RunDirectory `
+                -RelativePath $activeResultRelativePath `
+                -Label 'Active milestone result receipt'
+            $activeDispositionPath = Get-RunLocalReceiptPath `
+                -RunDirectory $RunDirectory `
+                -RelativePath $activeDispositionRelativePath `
+                -Label 'Active milestone disposition receipt'
+            $activeResult = Read-ThreadResultReceipt -Path $activeResultPath `
+                -ExpectedThreadId $ThreadId -ExpectedSourceNodeId $NodeId `
+                -RunDirectory $RunDirectory
+            $activeDisposition = Read-ReviewDispositionReceipt `
+                -Path $activeDispositionPath -RunDirectory $RunDirectory `
+                -ExpectedSourceNodeId $NodeId -ExpectedThreadId $ThreadId
+            $matchingActivationEvents = @($events | Where-Object {
+                [string]$_.event -in @(
+                    'milestone-activated', 'milestone-revision-selected'
+                ) -and
+                [string]$_.milestone_id -eq
+                    [string]$milestoneChain.active_milestone_id -and
+                [string]$_.milestone_activation_receipt_path -eq
+                    [string]$milestoneChain.activation_receipt_path -and
+                [string]$_.milestone_activation_receipt_hash -eq
+                    [string]$milestoneChain.activation_receipt_hash
+            })
+            if ([string]$activeResult.schema_version -ne '1.3' -or
+                [string]$activeResult.milestone_id -ne
+                    [string]$recoveryReceipt.milestone_id -or
+                [string]$activeDisposition.milestone_id -ne
+                    [string]$recoveryReceipt.milestone_id -or
+                [string]$activeDisposition.source_result_receipt_hash -ne
+                    [string]$activeResult.receipt_hash -or
+                [string]$activeBinding.result_receipt_hash -ne
+                    [string]$activeResult.receipt_hash -or
+                [string]$activeBinding.disposition_receipt_hash -ne
+                    [string]$activeDisposition.receipt_hash -or
+                $matchingActivationEvents.Count -ne 1 -or
+                [int]$matchingActivationEvents[0].sequence -le
+                    [int]$previousAdoptedEvent.sequence) {
+                throw (
+                    'Recovery-cycle re-entry active milestone source binding ' +
+                    'is incomplete, stale, or ambiguous.'
+                )
+            }
+            $priorResult = $activeResult
+            $priorDisposition = $activeDisposition
+            $priorResultRelativePath = $activeResultRelativePath
+            $priorDispositionRelativePath =
+                $activeDispositionRelativePath
+            $previousReviewBindingKind =
+                'active-milestone-source-binding'
+            $previousMilestoneActivationRelativePath =
+                [string]$milestoneChain.activation_receipt_path
+            $previousMilestoneActivationReceiptHash =
+                [string]$milestoneChain.activation_receipt_hash
+            $previousMilestoneActivationEvent =
+                $matchingActivationEvents[0]
+        }
+        $previousResultRelativePath = $priorResultRelativePath
+        $previousResultReceiptHash = [string]$priorResult.receipt_hash
+        $previousDispositionRelativePath = $priorDispositionRelativePath
+        $previousDispositionReceiptHash =
+            [string]$priorDisposition.receipt_hash
         $priorCheckpointPath = Get-RunLocalReceiptPath `
             -RunDirectory $RunDirectory `
             -RelativePath ([string]$priorResult.checkpoint_material_path) `
@@ -1255,6 +1356,26 @@ try {
                     [int]$previousAdoptedEvent.sequence
                 $event['previous_adopted_event_hash'] =
                     [string]$previousAdoptedEvent.hash
+                $event['previous_review_binding_kind'] =
+                    $previousReviewBindingKind
+                $event['previous_result_receipt_path'] =
+                    $previousResultRelativePath
+                $event['previous_result_receipt_hash'] =
+                    $previousResultReceiptHash
+                $event['previous_disposition_receipt_path'] =
+                    $previousDispositionRelativePath
+                $event['previous_disposition_receipt_hash'] =
+                    $previousDispositionReceiptHash
+                if ($null -ne $previousMilestoneActivationEvent) {
+                    $event['previous_milestone_activation_receipt_path'] =
+                        $previousMilestoneActivationRelativePath
+                    $event['previous_milestone_activation_receipt_hash'] =
+                        $previousMilestoneActivationReceiptHash
+                    $event['previous_milestone_activation_event_sequence'] =
+                        [int]$previousMilestoneActivationEvent.sequence
+                    $event['previous_milestone_activation_event_hash'] =
+                        [string]$previousMilestoneActivationEvent.hash
+                }
             }
         }
     }

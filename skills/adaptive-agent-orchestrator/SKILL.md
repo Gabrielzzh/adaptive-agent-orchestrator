@@ -381,8 +381,12 @@ hash-bound recovery cycle; pass `-MilestoneId` and start that cycle at attempt
 start, extend, or reset the new cycle. If the prior checkpoint already reached
 `completed -> validated -> adopted`, only an unused schema 1.2 attempt-1 cycle
 for a different checkpoint/input may re-enter `result_pending`; the event binds
-the prior adopted event hash and the new cycle identity. Ordinary `adopted`
-remains terminal. Only a complete 3/3 chain may authorize
+the prior adopted event hash and the new cycle identity. If the current active
+milestone was selected through a verified activation without a newer source
+lifecycle chain, re-entry must instead bind that activation's exact same-source
+result, disposition, durable task, and activation event in addition to the
+older adopted state. Ordinary `adopted` remains terminal. Only a complete 3/3
+chain may authorize
 one same-role read-only replacement through
 `New-ReplacementContinuityReceipt.ps1`. A replacement result remains bound to
 the original logical source, is labeled `replacement`, and never claims the
