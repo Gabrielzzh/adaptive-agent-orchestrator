@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.7.12 release notes](docs/releases/v0.7.12.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.7.13 release notes](docs/releases/v0.7.13.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -75,7 +75,10 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   remains terminal. If a later milestone selected a newer same-source review
   without adding another node lifecycle, re-entry binds that exact active
   result, disposition, and activation event instead of stale prior-stage
-  evidence. An authorized replacement must preserve source, role,
+  evidence. Historical recovery receipts are revalidated against their own
+  recorded milestone and activation epoch, and an immutable review revision is
+  re-read by its exact recorded lifecycle sequence/hash rather than later
+  same-source events. An authorized replacement must preserve source, role,
   checkpoint, input, and recovery-chain continuity. If the replacement also
   loses its final, it receives one separate bounded recovery epoch—not another
   replacement.
@@ -250,13 +253,13 @@ state, integrates results, and performs authorized external actions.
 
 ## Validation
 
-The v0.7.12 release passes:
+The v0.7.13 release passes:
 
 - PowerShell parser validation for all 48 scripts;
-- 66 recovery-protocol assertions;
-- 102 durable-milestone, revision, and successor-run assertions;
+- 69 recovery-protocol assertions;
+- 106 durable-milestone, revision, and successor-run assertions;
 - 15 run-policy activation assertions;
-- 810 self-test assertions;
+- 817 self-test assertions;
 - 59 intentionally invalid negative-test cases correctly rejected;
 - strict parsing for all 8 bundled reference JSON files;
 - plan, metadata, journal, handoff, dependency, idempotency, ownership,
@@ -299,6 +302,11 @@ The v0.7.12 release passes:
   current Group2 result, disposition, and activation event. The original
   durable task returned a formal final; its incomplete domain review remained
   unfinished work rather than an Orchestrator success claim.
+- a real later-milestone checkpoint13 recovery coexisted with valid historical
+  recovery cycles and an older immutable first-milestone selection. The
+  original source exhausted 3/3, one authorized same-role replacement recovered
+  a formal final through its own bounded epoch, all nine occurrences remained
+  open, and completion stayed correctly `BLOCKED`.
 
 Run:
 
