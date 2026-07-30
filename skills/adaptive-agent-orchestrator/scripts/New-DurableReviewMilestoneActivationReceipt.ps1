@@ -5,6 +5,8 @@ param(
     [Parameter(Mandatory)][string] $SelectionPath,
     [Parameter(Mandatory)][string] $AuthorizationMaterialPath,
     [Parameter(Mandatory)][string] $AcceptanceAuthorizationMaterialPath,
+    [string] $ScopeTransitionAuthorizationMaterialPath = '',
+    [string] $ScopeTransitionKey = '',
     [Parameter(Mandatory)][string] $ActivationKey
 )
 
@@ -46,11 +48,43 @@ if ([string]$chain.next_milestone_id -ne $MilestoneId) {
         "'$($chain.active_milestone_id)'."
     )
 }
+$scopePathProvided = -not [string]::IsNullOrWhiteSpace(
+    $ScopeTransitionAuthorizationMaterialPath
+)
+$scopeKeyProvided = -not [string]::IsNullOrWhiteSpace($ScopeTransitionKey)
+if ($scopePathProvided -ne $scopeKeyProvided) {
+    throw (
+        'Scoped milestone transition requires both its authorization material ' +
+        'and stable key.'
+    )
+}
+$previousMilestoneGate = 'baseline'
 if (-not [string]::IsNullOrWhiteSpace(
     [string]$chain.activation_receipt_hash
 )) {
-    $null = Read-DurableReviewMilestoneAcceptance `
-        -RunDirectory $runRoot -MilestoneChain $chain
+    try {
+        $null = Read-DurableReviewMilestoneAcceptance `
+            -RunDirectory $runRoot -MilestoneChain $chain
+        $previousMilestoneGate = 'main-owner-acceptance'
+    } catch {
+        if ($_.Exception.Message -notlike
+            '*lacks main-owner acceptance.') {
+            throw
+        }
+        if (-not $scopePathProvided) {
+            throw
+        }
+        $previousMilestoneGate = 'scoped-carry-forward'
+    }
+} elseif ($scopePathProvided) {
+    throw 'Baseline milestone activation cannot claim a scoped transition.'
+}
+if ($scopePathProvided -and
+    $previousMilestoneGate -ne 'scoped-carry-forward') {
+    throw (
+        'Scoped milestone transition is only valid when unresolved P0/P1 ' +
+        'prevent prior final main acceptance.'
+    )
 }
 $milestoneIds = @(
     $plan.durable_review_profile.milestone_ids | ForEach-Object { [string]$_ }
@@ -160,6 +194,45 @@ $checkpointHashes = @($bindings |
 if ($checkpointPaths.Count -ne 1 -or $checkpointHashes.Count -ne 1) {
     throw 'All milestone sources must bind the same checkpoint material.'
 }
+$scopeTransitionRelativePath = ''
+$scopeTransitionHash = ''
+$carryForward = $null
+if ($previousMilestoneGate -eq 'scoped-carry-forward') {
+    if ($ScopeTransitionKey -cnotmatch
+        '^(user|controller):[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$') {
+        throw 'Scoped milestone transition requires a stable user: or controller: key.'
+    }
+    $scopeTransitionFullPath = Resolve-RunFile (
+        $ScopeTransitionAuthorizationMaterialPath
+    ) 'Scoped milestone transition authorization'
+    if ([string]::IsNullOrWhiteSpace(
+        (Get-Content -LiteralPath $scopeTransitionFullPath -Raw)
+    )) {
+        throw 'Scoped milestone transition authorization cannot be empty.'
+    }
+    $scopeTransitionRelativePath = [IO.Path]::GetRelativePath(
+        $runRoot, $scopeTransitionFullPath
+    ).Replace('\', '/')
+    $scopeTransitionHash = (
+        Get-FileHash -LiteralPath $scopeTransitionFullPath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    $carryForward = Get-DurableReviewScopedCarryForward `
+        -RunDirectory $runRoot `
+        -PreviousSourceBindings @($chain.active_source_bindings) `
+        -NextSourceBindings @($bindings)
+    if ([int]$carryForward.previous_open_count -lt 1) {
+        throw (
+            'Scoped milestone transition requires at least one prior open ' +
+            'P0/P1 occurrence; use final main acceptance otherwise.'
+        )
+    }
+    if ([int]$carryForward.remaining_open_count -lt 1) {
+        throw (
+            'Scoped milestone transition cannot bypass final main acceptance ' +
+            'after every prior P0/P1 occurrence is resolved.'
+        )
+    }
+}
 
 $receiptDirectory = Join-Path $runRoot 'receipts'
 $receiptName = "durable-review-milestone.$MilestoneId.activation.json"
@@ -177,7 +250,9 @@ $acceptanceAuthorizationRelativePath = [IO.Path]::GetRelativePath(
     $runRoot, $acceptanceAuthorizationFullPath
 ).Replace('\', '/')
 $payload = [ordered]@{
-    schema_version = '1.1'
+    schema_version = if (
+        $previousMilestoneGate -eq 'scoped-carry-forward'
+    ) { '1.2' } else { '1.1' }
     run_id = [string]$run.run_id
     plan_hash = [string]$run.plan_hash
     milestone_id = $MilestoneId
@@ -226,6 +301,24 @@ $payload = [ordered]@{
     activation_key = $ActivationKey
     created_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
 }
+if ($previousMilestoneGate -eq 'scoped-carry-forward') {
+    $payload.previous_milestone_gate = $previousMilestoneGate
+    $payload.scope_transition_authorization_material_path =
+        $scopeTransitionRelativePath
+    $payload.scope_transition_authorization_material_hash =
+        $scopeTransitionHash
+    $payload.scope_transition_key = $ScopeTransitionKey
+    $payload.carry_forward_occurrences = @($carryForward.occurrences)
+    $payload.carry_forward_occurrences_hash = Get-TextSha256 (
+        @($carryForward.occurrences) |
+            ConvertTo-Json -Compress -Depth 50
+    )
+    $payload.previous_open_occurrence_count =
+        [int]$carryForward.previous_open_count
+    $payload.resolved_occurrence_count = [int]$carryForward.resolved_count
+    $payload.remaining_open_occurrence_count =
+        [int]$carryForward.remaining_open_count
+}
 $receipt = [ordered]@{}
 foreach ($key in $payload.Keys) { $receipt[$key] = $payload[$key] }
 $receipt.receipt_hash = Get-TextSha256 (
@@ -253,6 +346,14 @@ try {
     Move-Item -LiteralPath $tempReceiptPath -Destination $receiptPath
     $runPolicy = Resolve-OrchestrationRunPolicy -RunDirectory $runRoot `
         -Events $currentEvents
+    $eventEvidence = @(
+        "artifact:receipts/$receiptName",
+        "artifact:$authorizationRelativePath",
+        "artifact:$acceptanceAuthorizationRelativePath"
+    )
+    if ($previousMilestoneGate -eq 'scoped-carry-forward') {
+        $eventEvidence += "artifact:$scopeTransitionRelativePath"
+    }
     $event = [ordered]@{
         sequence = $currentEvents.Count
         prev_hash = [string]$currentEvents[-1].hash
@@ -285,13 +386,25 @@ try {
         coordination_tokens_delta = 0
         usage_source = 'none'
         error_class = $null
-        evidence = @(
-            "artifact:receipts/$receiptName",
-            "artifact:$authorizationRelativePath",
-            "artifact:$acceptanceAuthorizationRelativePath"
-        )
+        evidence = $eventEvidence
         idempotency_key = $ActivationKey
         request_fingerprint = [string]$receipt.receipt_hash
+    }
+    if ($previousMilestoneGate -eq 'scoped-carry-forward') {
+        $event.previous_milestone_gate = $previousMilestoneGate
+        $event.scope_transition_authorization_material_path =
+            $scopeTransitionRelativePath
+        $event.scope_transition_authorization_material_hash =
+            $scopeTransitionHash
+        $event.scope_transition_key = $ScopeTransitionKey
+        $event.carry_forward_occurrences_hash =
+            [string]$receipt.carry_forward_occurrences_hash
+        $event.previous_open_occurrence_count =
+            [int]$receipt.previous_open_occurrence_count
+        $event.resolved_occurrence_count =
+            [int]$receipt.resolved_occurrence_count
+        $event.remaining_open_occurrence_count =
+            [int]$receipt.remaining_open_occurrence_count
     }
     if (-not [string]::IsNullOrWhiteSpace(
         [string]$runPolicy.activation_receipt_path

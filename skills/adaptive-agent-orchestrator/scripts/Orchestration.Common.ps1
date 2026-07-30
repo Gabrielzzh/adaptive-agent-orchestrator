@@ -1794,6 +1794,110 @@ function Get-DurableReviewDispositionBinding {
     }
 }
 
+function Get-DurableReviewScopedCarryForward {
+    param(
+        [Parameter(Mandatory)][string] $RunDirectory,
+        [Parameter(Mandatory)][object[]] $PreviousSourceBindings,
+        [Parameter(Mandatory)][object[]] $NextSourceBindings
+    )
+
+    $occurrences = [Collections.Generic.List[object]]::new()
+    foreach ($previousBinding in @($PreviousSourceBindings)) {
+        $sourceNodeId = [string]$previousBinding.source_node_id
+        $sourceThreadId = [string]$previousBinding.source_thread_id
+        $nextMatches = @($NextSourceBindings | Where-Object {
+            [string]$_.source_node_id -eq $sourceNodeId
+        })
+        if ($nextMatches.Count -ne 1 -or
+            [string]$nextMatches[0].source_thread_id -ne $sourceThreadId) {
+            throw (
+                "Scoped milestone transition source '$sourceNodeId' changed " +
+                'its durable thread or source identity.'
+            )
+        }
+        $previousPath = Get-RunLocalReceiptPath `
+            -RunDirectory $RunDirectory -RelativePath (
+                [string]$previousBinding.disposition_receipt_path
+            ) -Label 'Previous scoped milestone disposition'
+        $nextPath = Get-RunLocalReceiptPath `
+            -RunDirectory $RunDirectory -RelativePath (
+                [string]$nextMatches[0].disposition_receipt_path
+            ) -Label 'Next scoped milestone disposition'
+        $previousDisposition = Read-ReviewDispositionReceipt `
+            -Path $previousPath -RunDirectory $RunDirectory `
+            -ExpectedSourceNodeId $sourceNodeId `
+            -ExpectedThreadId $sourceThreadId
+        $nextDisposition = Read-ReviewDispositionReceipt `
+            -Path $nextPath -RunDirectory $RunDirectory `
+            -ExpectedSourceNodeId $sourceNodeId `
+            -ExpectedThreadId $sourceThreadId
+        foreach ($previousDecision in @(
+            $previousDisposition.decisions | Where-Object {
+                [string]$_.severity -in @('P0', 'P1') -and
+                [string]$_.resolution_status -ne 'resolved'
+            }
+        )) {
+            $same = @($nextDisposition.decisions | Where-Object {
+                [string]$_.source_finding_id -eq
+                    [string]$previousDecision.source_finding_id
+            })
+            if ($same.Count -ne 1) {
+                throw (
+                    "Scoped milestone transition source '$sourceNodeId' lost " +
+                    'a carry-forward occurrence.'
+                )
+            }
+            $nextDecision = $same[0]
+            if ([string]$nextDecision.canonical_finding_id -ne
+                    [string]$previousDecision.canonical_finding_id -or
+                [string]$nextDecision.severity -ne
+                    [string]$previousDecision.severity -or
+                [string]$nextDecision.finding -ne
+                    [string]$previousDecision.finding -or
+                [string]$nextDecision.finding_hash -ne
+                    [string]$previousDecision.finding_hash) {
+                throw (
+                    "Scoped milestone transition source '$sourceNodeId' " +
+                    'changed a carry-forward occurrence.'
+                )
+            }
+            if ([string]$nextDecision.resolution_status -eq 'resolved' -and (
+                [string]$nextDecision.re_review_status -ne 'completed' -or
+                [string]$nextDecision.re_review_source_node_id -ne
+                    $sourceNodeId
+            )) {
+                throw (
+                    "Scoped milestone transition source '$sourceNodeId' " +
+                    'resolved an occurrence without same-source re-review.'
+                )
+            }
+            $occurrences.Add([ordered]@{
+                source_node_id = $sourceNodeId
+                source_thread_id = $sourceThreadId
+                source_finding_id = [string]$previousDecision.source_finding_id
+                canonical_finding_id =
+                    [string]$previousDecision.canonical_finding_id
+                severity = [string]$previousDecision.severity
+                finding = [string]$previousDecision.finding
+                finding_hash = [string]$previousDecision.finding_hash
+                next_resolution_status =
+                    [string]$nextDecision.resolution_status
+                next_disposition = [string]$nextDecision.disposition
+                next_re_review_status = [string]$nextDecision.re_review_status
+            })
+        }
+    }
+    $remaining = @($occurrences | Where-Object {
+        [string]$_.next_resolution_status -ne 'resolved'
+    })
+    return [pscustomobject]@{
+        occurrences = @($occurrences)
+        previous_open_count = $occurrences.Count
+        resolved_count = $occurrences.Count - $remaining.Count
+        remaining_open_count = $remaining.Count
+    }
+}
+
 function Get-MilestoneRevisionExcludedInventory {
     param(
         [Parameter(Mandatory)][string] $RunDirectory,
@@ -2737,7 +2841,7 @@ function Read-DurableReviewMilestoneActivationChain {
             'authorization_material_hash', 'activation_key',
             'created_at_utc', 'receipt_hash'
         )
-        if ([string]$receipt.schema_version -eq '1.1') {
+        if ([string]$receipt.schema_version -in @('1.1', '1.2')) {
             $required += @(
                 'acceptance_authorization_material_path',
                 'acceptance_authorization_material_hash', 'main_node_id',
@@ -2745,12 +2849,24 @@ function Read-DurableReviewMilestoneActivationChain {
                 'acceptance_evidence_material_hash'
             )
         }
+        if ([string]$receipt.schema_version -eq '1.2') {
+            $required += @(
+                'previous_milestone_gate',
+                'scope_transition_authorization_material_path',
+                'scope_transition_authorization_material_hash',
+                'scope_transition_key', 'carry_forward_occurrences',
+                'carry_forward_occurrences_hash',
+                'previous_open_occurrence_count',
+                'resolved_occurrence_count',
+                'remaining_open_occurrence_count'
+            )
+        }
         foreach ($name in $required) {
             if ($null -eq $receipt.PSObject.Properties[$name]) {
                 throw "Milestone activation receipt is missing '$name'."
             }
         }
-        if ([string]$receipt.schema_version -notin @('1.0', '1.1') -or
+        if ([string]$receipt.schema_version -notin @('1.0', '1.1', '1.2') -or
             [string]$receipt.run_id -ne [string]$run.run_id -or
             [string]$receipt.plan_hash -ne [string]$run.plan_hash -or
             [string]$receipt.milestone_id -ne $milestoneId -or
@@ -2800,7 +2916,7 @@ function Read-DurableReviewMilestoneActivationChain {
             )) {
             throw 'Milestone activation authorization binding changed.'
         }
-        if ([string]$receipt.schema_version -eq '1.1') {
+        if ([string]$receipt.schema_version -in @('1.1', '1.2')) {
             $acceptanceAuthorizationPath = Get-RunLocalReceiptPath `
                 -RunDirectory $runRoot -RelativePath (
                     [string]$receipt.acceptance_authorization_material_path
@@ -2908,6 +3024,75 @@ function Read-DurableReviewMilestoneActivationChain {
             [string]$receipt.checkpoint_material_hash -ne $checkpointHashes[0]) {
             throw 'Milestone activation sources do not share one checkpoint.'
         }
+        if ([string]$receipt.schema_version -eq '1.2') {
+            if ([string]$receipt.previous_milestone_gate -ne
+                    'scoped-carry-forward' -or
+                [string]$receipt.scope_transition_key -cnotmatch
+                    '^(user|controller):[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$') {
+                throw 'Scoped milestone transition binding is invalid.'
+            }
+            $scopeAuthorizationPath = Get-RunLocalReceiptPath `
+                -RunDirectory $runRoot -RelativePath (
+                    [string]$receipt.scope_transition_authorization_material_path
+                ) -Label 'Scoped milestone transition authorization'
+            if (-not (Test-Path -LiteralPath $scopeAuthorizationPath `
+                -PathType Leaf) -or
+                [string]::IsNullOrWhiteSpace(
+                    (Get-Content -LiteralPath $scopeAuthorizationPath -Raw)
+                ) -or
+                [string]$receipt.scope_transition_authorization_material_hash -ne (
+                    Get-FileHash -LiteralPath $scopeAuthorizationPath `
+                        -Algorithm SHA256
+                ).Hash.ToLowerInvariant()) {
+                throw 'Scoped milestone transition authorization binding changed.'
+            }
+            $computedCarry = Get-DurableReviewScopedCarryForward `
+                -RunDirectory $runRoot `
+                -PreviousSourceBindings @($activeBindings) `
+                -NextSourceBindings @($verifiedBindings)
+            $computedCarryJson = ConvertTo-Json -InputObject @(
+                $computedCarry.occurrences
+            ) -Compress -Depth 50
+            $declaredCarryJson = ConvertTo-Json -InputObject @(
+                $receipt.carry_forward_occurrences
+            ) -Compress -Depth 50
+            if ([int]$computedCarry.previous_open_count -lt 1 -or
+                [int]$computedCarry.remaining_open_count -lt 1 -or
+                [string]$receipt.carry_forward_occurrences_hash -ne
+                    (Get-TextSha256 $computedCarryJson) -or
+                $declaredCarryJson -ne $computedCarryJson -or
+                [int]$receipt.previous_open_occurrence_count -ne
+                    [int]$computedCarry.previous_open_count -or
+                [int]$receipt.resolved_occurrence_count -ne
+                    [int]$computedCarry.resolved_count -or
+                [int]$receipt.remaining_open_occurrence_count -ne
+                    [int]$computedCarry.remaining_open_count) {
+                throw 'Scoped milestone transition occurrence conservation changed.'
+            }
+            $activationEvent = $matchingEvents[0]
+            if ([string]$activationEvent.previous_milestone_gate -ne
+                    [string]$receipt.previous_milestone_gate -or
+                [string]$activationEvent.scope_transition_authorization_material_path -ne
+                    [string]$receipt.scope_transition_authorization_material_path -or
+                [string]$activationEvent.scope_transition_authorization_material_hash -ne
+                    [string]$receipt.scope_transition_authorization_material_hash -or
+                [string]$activationEvent.scope_transition_key -cne
+                    [string]$receipt.scope_transition_key -or
+                [string]$activationEvent.carry_forward_occurrences_hash -ne
+                    [string]$receipt.carry_forward_occurrences_hash -or
+                [int]$activationEvent.previous_open_occurrence_count -ne
+                    [int]$receipt.previous_open_occurrence_count -or
+                [int]$activationEvent.resolved_occurrence_count -ne
+                    [int]$receipt.resolved_occurrence_count -or
+                [int]$activationEvent.remaining_open_occurrence_count -ne
+                    [int]$receipt.remaining_open_occurrence_count -or
+                @($activationEvent.evidence) -notcontains (
+                    'artifact:' +
+                    [string]$receipt.scope_transition_authorization_material_path
+                )) {
+                throw 'Scoped milestone transition journal binding changed.'
+            }
+        }
         $payload = [ordered]@{}
         foreach ($property in $receipt.PSObject.Properties) {
             if ($property.Name -ne 'receipt_hash') {
@@ -3012,7 +3197,9 @@ function Read-DurableReviewMilestoneAcceptance {
             [string]$chain.activation_receipt.checkpoint_material_path -or
         [string]$receipt.checkpoint_material_hash -ne
             [string]$chain.activation_receipt.checkpoint_material_hash -or
-        [string]$chain.activation_receipt.schema_version -ne '1.1' -or
+        [string]$chain.activation_receipt.schema_version -notin @(
+            '1.1', '1.2'
+        ) -or
         [string]$receipt.acceptance_key -ne
             [string]$chain.activation_receipt.acceptance_key -or
         [string]$receipt.evidence_material_path -ne
