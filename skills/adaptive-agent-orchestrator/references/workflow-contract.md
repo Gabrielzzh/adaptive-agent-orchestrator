@@ -349,29 +349,44 @@ avoid deadlocking the declared sequence, the next activation may use the
 strict scoped carry-forward gate:
 
 ```powershell
+pwsh -File `
+  scripts/New-DurableReviewScopeTransitionAuthorizationReceipt.ps1 `
+  -RunDirectory <run> -MilestoneId method-3 `
+  -SelectionPath <run>/materials/method-3-selection.json `
+  -ScopeTransitionAuthorizationMaterialPath `
+    <run>/materials/method-2-to-method-3-scope-transition.md `
+  -ScopeTransitionKey "controller:<stable-scope-transition-reference>" `
+  -ActivationKey "controller:<stable-scope-authorization-reference>"
+
 pwsh -File scripts/New-DurableReviewMilestoneActivationReceipt.ps1 `
   -RunDirectory <run> -MilestoneId method-3 `
   -SelectionPath <run>/materials/method-3-selection.json `
   -AuthorizationMaterialPath <run>/materials/method-3-authorization.md `
   -AcceptanceAuthorizationMaterialPath `
     <run>/materials/method-3-acceptance-authorization.json `
-  -ScopeTransitionAuthorizationMaterialPath `
-    <run>/materials/method-2-to-method-3-scope-transition.md `
-  -ScopeTransitionKey "controller:<stable-scope-transition-reference>" `
+  -ScopeTransitionAuthorizationReceiptPath `
+    <run>/receipts/durable-review-milestone.method-3.scope-transition-authorization.json `
   -ActivationKey "controller:<stable-activation-reference>"
 ```
 
-This produces activation schema 1.2. It is permitted only when the previous
-active chain has no final acceptance and still has at least one open P0/P1
-occurrence after the selected next-stage review. Every prior open occurrence
-must reappear under the same source, durable thread, source finding ID,
-canonical ID, severity, exact text, and text hash. The next source-specific
-disposition may resolve it only with same-source re-review, or carry it forward
-as open. Omission, downgrade, text drift, cross-source transfer, mixed
-checkpoint selection, missing authorization, or a fully resolved prior
-inventory fails before journal write. The activation receipt and event record
-the exact prior count, resolved count, remaining count, occurrence inventory,
-and scope authorization.
+The first command appends one authorization receipt/event before activation and
+pre-binds the run, previous activation, exact next milestone, selection
+path/hash, checkpoint, controller material path/hash, scope key, and conserved
+occurrence counts. The second command produces activation schema 1.2 and must
+consume that exact receipt. Replacing only the later activation's scope key or
+controller material cannot replace the earlier authorization.
+
+This route is permitted only when the previous active chain has no final
+acceptance and still has at least one open P0/P1 occurrence after the selected
+next-stage review. Every prior open occurrence must reappear under the same
+source, durable thread, source finding ID, canonical ID, severity, exact text,
+and text hash. The next source-specific disposition may resolve it only with
+same-source re-review, or carry it forward as open. Omission, downgrade, text
+drift, cross-source transfer, mixed checkpoint selection, missing
+authorization, or a fully resolved prior inventory fails before activation
+journal write. The activation receipt and event record the exact prior count,
+resolved count, remaining count, occurrence inventory, and authorization
+receipt.
 
 Scoped carry-forward means only that the current milestone boundary was
 reviewed and the remaining work was conserved into the next declared scope. It

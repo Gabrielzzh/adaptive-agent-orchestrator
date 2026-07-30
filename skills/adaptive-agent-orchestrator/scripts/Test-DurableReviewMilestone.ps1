@@ -259,6 +259,18 @@ function Invoke-ScopeTransitionActivation {
         [Parameter(Mandatory)][string] $ActivationKey
     )
     & (Join-Path $scriptRoot (
+        'New-DurableReviewScopeTransitionAuthorizationReceipt.ps1'
+    )) -RunDirectory $Run -MilestoneId 'scope-3' `
+        -SelectionPath $SelectionPath `
+        -ScopeTransitionAuthorizationMaterialPath (
+            Join-Path $Run 'materials/scope-2-to-scope-3-transition.md'
+        ) -ScopeTransitionKey $ScopeTransitionKey `
+        -ActivationKey "$ActivationKey.authorization" | Out-Null
+    $scopeAuthorizationReceiptPath = Join-Path $Run (
+        'receipts/durable-review-milestone.scope-3.' +
+        'scope-transition-authorization.json'
+    )
+    & (Join-Path $scriptRoot (
         'New-DurableReviewMilestoneActivationReceipt.ps1'
     )) -RunDirectory $Run -MilestoneId 'scope-3' `
         -SelectionPath $SelectionPath `
@@ -268,9 +280,9 @@ function Invoke-ScopeTransitionActivation {
             Join-Path $Run (
                 'materials/scope-3-acceptance-authorization.json'
             )
-        ) -ScopeTransitionAuthorizationMaterialPath (
-            Join-Path $Run 'materials/scope-2-to-scope-3-transition.md'
-        ) -ScopeTransitionKey $ScopeTransitionKey `
+        ) -ScopeTransitionAuthorizationReceiptPath (
+            $scopeAuthorizationReceiptPath
+        ) `
         -ActivationKey $ActivationKey
 }
 
@@ -338,6 +350,58 @@ function Resign-AcceptanceTail {
         $receipt.evidence_material_hash
     $event.idempotency_key = $receipt.acceptance_key
     $event.request_fingerprint = $receipt.receipt_hash
+    $event.Remove('hash')
+    $event.hash = Get-OrchestrationEventHash ([pscustomobject]$event)
+    $eventLines[-1] = $event | ConvertTo-Json -Compress -Depth 100
+    $eventLines | Set-Content -LiteralPath $eventsPath -Encoding utf8
+}
+
+function Resign-ScopeActivationTail {
+    param(
+        [string] $Run,
+        [scriptblock] $ReceiptMutation
+    )
+    $receiptPath = Join-Path $Run (
+        'receipts/durable-review-milestone.scope-3.activation.json'
+    )
+    $receipt = Get-Content -LiteralPath $receiptPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $oldMaterialPath =
+        [string]$receipt.scope_transition_authorization_material_path
+    & $ReceiptMutation $receipt
+    $receipt.Remove('receipt_hash')
+    $receipt.receipt_hash = Get-TextSha256 (
+        $receipt | ConvertTo-Json -Compress -Depth 100
+    )
+    $receipt | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $receiptPath -Encoding utf8
+
+    $eventsPath = Join-Path $Run 'events.jsonl'
+    $eventLines = @(Get-Content -LiteralPath $eventsPath)
+    $event = $eventLines[-1] |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $event.milestone_activation_receipt_hash = $receipt.receipt_hash
+    $event.scope_transition_authorization_receipt_path =
+        $receipt.scope_transition_authorization_receipt_path
+    $event.scope_transition_authorization_receipt_hash =
+        $receipt.scope_transition_authorization_receipt_hash
+    $event.scope_transition_authorization_material_path =
+        $receipt.scope_transition_authorization_material_path
+    $event.scope_transition_authorization_material_hash =
+        $receipt.scope_transition_authorization_material_hash
+    $event.scope_transition_key = $receipt.scope_transition_key
+    $event.request_fingerprint = $receipt.receipt_hash
+    if ($oldMaterialPath -ne
+        [string]$receipt.scope_transition_authorization_material_path) {
+        $oldPointer = "artifact:$oldMaterialPath"
+        $newPointer = (
+            'artifact:' +
+            [string]$receipt.scope_transition_authorization_material_path
+        )
+        $event.evidence = @($event.evidence | ForEach-Object {
+            if ([string]$_ -eq $oldPointer) { $newPointer } else { $_ }
+        })
+    }
     $event.Remove('hash')
     $event.hash = Get-OrchestrationEventHash ([pscustomobject]$event)
     $eventLines[-1] = $event | ConvertTo-Json -Compress -Depth 100
@@ -2011,7 +2075,7 @@ try {
                 Join-Path $scopeReadyRun 'materials/scope-3-selection.json'
             ) -ScopeTransitionKey 'Controller:scope-2-to-scope-3' `
             -ActivationKey 'controller:reject-scope-key-case' | Out-Null
-    } 'stable user: or controller: key' (
+    } 'stable, exact user: or controller: keys' (
         'Scope transition keys are exact and cannot use a case variant.'
     )
 
@@ -2043,6 +2107,54 @@ try {
     ) (
         'Completion must select the next milestone, keep only its unresolved ' +
         'occurrences, and still require independent final main acceptance.'
+    )
+
+    $resignedScopeKeyRun = Join-Path $testRoot (
+        'scope-transition-resigned-key'
+    )
+    Copy-Item -LiteralPath $scopeReadyRun `
+        -Destination $resignedScopeKeyRun -Recurse
+    Resign-ScopeActivationTail -Run $resignedScopeKeyRun `
+        -ReceiptMutation {
+            param($receipt)
+            $receipt.scope_transition_key =
+                'user:replacement-scope-authority'
+        }
+    Assert-ThrowsLike {
+        Read-DurableReviewMilestoneActivationChain `
+            -RunDirectory $resignedScopeKeyRun | Out-Null
+    } 'pre-existing authorization' (
+        'Changing the scope key in the activation receipt and journal tail ' +
+        'cannot replace the earlier authorization.'
+    )
+
+    $resignedScopePathRun = Join-Path $testRoot (
+        'scope-transition-resigned-material'
+    )
+    Copy-Item -LiteralPath $scopeReadyRun `
+        -Destination $resignedScopePathRun -Recurse
+    $alternateScopeMaterial = Join-Path $resignedScopePathRun (
+        'materials/alternate-scope-transition.md'
+    )
+    Set-Content -LiteralPath $alternateScopeMaterial `
+        -Value 'A different scope transition authority.'
+    $alternateScopeMaterialHash = (
+        Get-FileHash -LiteralPath $alternateScopeMaterial -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    Resign-ScopeActivationTail -Run $resignedScopePathRun `
+        -ReceiptMutation {
+            param($receipt)
+            $receipt.scope_transition_authorization_material_path =
+                'materials/alternate-scope-transition.md'
+            $receipt.scope_transition_authorization_material_hash =
+                $alternateScopeMaterialHash
+        }
+    Assert-ThrowsLike {
+        Read-DurableReviewMilestoneActivationChain `
+            -RunDirectory $resignedScopePathRun | Out-Null
+    } 'pre-existing authorization' (
+        'Changing the scope material path and hash in the activation tail ' +
+        'cannot replace the earlier authorization.'
     )
 
     Assert-ThrowsLike {
