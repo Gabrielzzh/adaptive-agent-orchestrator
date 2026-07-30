@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.7.12 - 2026-07-31
+
+Active-milestone durable-source recovery patch release.
+
+- Fix a fail-closed block where a later milestone activation selected a fresh
+  same-source result/disposition, but the source's latest node lifecycle still
+  referenced the preceding milestone. A valid new recovery cycle could be
+  created, yet `adopted -> result_pending` could not consume it.
+- Allow that narrow re-entry only when the complete active milestone chain
+  verifies the same source, role, durable task, result, disposition, activation
+  receipt/event, new checkpoint/input, and unused schema 1.2 attempt-1 cycle.
+- Record the exact prior adopted event, active result/disposition hashes, and
+  milestone activation event on the new `result_pending` event.
+- Keep ordinary `adopted` terminal. Reject old or unselected milestone evidence,
+  cross-source/role/thread substitution, same-checkpoint replay, used cycles,
+  direct attempt 2/3 entry, and selection/activation/checkpoint/input tampering.
+- Validate the real multi-divination 39-event run: its immutable prefix stayed
+  unchanged, the traditional source entered `result_pending` and `running`
+  against checkpoint12, and the original durable task returned a formal final.
+- Preserve the boundary: this release does not repair platform `systemError`,
+  treat an incomplete domain review as a product PASS, claim measured Token
+  savings or business accuracy, or modify multi-divination product files.
+
 ## 0.7.11 - 2026-07-31
 
 Scoped durable-review milestone progression release.

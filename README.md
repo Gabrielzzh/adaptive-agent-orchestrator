@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.7.11 release notes](docs/releases/v0.7.11.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.7.12 release notes](docs/releases/v0.7.12.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -72,7 +72,10 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   most three same-thread attempts; an earlier cycle cannot extend or reset a
   later one. An already adopted source may re-enter recovery only through an
   unused attempt-1 cycle for a different checkpoint/input; ordinary `adopted`
-  remains terminal. An authorized replacement must preserve source, role,
+  remains terminal. If a later milestone selected a newer same-source review
+  without adding another node lifecycle, re-entry binds that exact active
+  result, disposition, and activation event instead of stale prior-stage
+  evidence. An authorized replacement must preserve source, role,
   checkpoint, input, and recovery-chain continuity. If the replacement also
   loses its final, it receives one separate bounded recovery epoch—not another
   replacement.
@@ -247,13 +250,13 @@ state, integrates results, and performs authorized external actions.
 
 ## Validation
 
-The v0.7.11 release passes:
+The v0.7.12 release passes:
 
 - PowerShell parser validation for all 48 scripts;
 - 66 recovery-protocol assertions;
-- 91 durable-milestone, revision, and successor-run assertions;
+- 102 durable-milestone, revision, and successor-run assertions;
 - 15 run-policy activation assertions;
-- 799 self-test assertions;
+- 810 self-test assertions;
 - 59 intentionally invalid negative-test cases correctly rejected;
 - strict parsing for all 8 bundled reference JSON files;
 - plan, metadata, journal, handoff, dependency, idempotency, ownership,
@@ -291,6 +294,11 @@ The v0.7.11 release passes:
   of eleven P1 occurrences were resolved by same-source review, seven remained
   open, and completion stayed `BLOCKED` by those seven findings plus missing
   final main-owner acceptance. P1-03 through P1-06 did not reappear.
+- the real 39-event run preserved its exact prefix, then let the same traditional
+  source enter checkpoint12 `result_pending` and `running` by binding the
+  current Group2 result, disposition, and activation event. The original
+  durable task returned a formal final; its incomplete domain review remained
+  unfinished work rather than an Orchestrator success claim.
 
 Run:
 

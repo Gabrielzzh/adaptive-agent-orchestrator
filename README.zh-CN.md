@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[English](README.md) · [v0.7.11 正式版说明](docs/releases/v0.7.11.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+[English](README.md) · [v0.7.12 正式版说明](docs/releases/v0.7.12.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
 
 ![Adaptive Agent Orchestrator v0.7.0 发布图](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -63,7 +63,10 @@
   checkpoint/input 都建立独立哈希绑定的恢复 cycle，每个 cycle 最多三次
   同 thread 回收；旧 cycle 不能延长或重置新 cycle。已经 adopted 的来源
   只有在不同 checkpoint/input 存在未使用的 attempt-1 cycle 时才能重新进入
-  恢复，普通 `adopted` 仍是终态。替代角色必须经过主控授权，并保持来源、
+  恢复，普通 `adopted` 仍是终态。若后续里程碑只选定了较新的同来源复审链，
+  却没有新增节点生命周期，恢复入口会绑定该里程碑的精确 result、disposition
+  与 activation event，而不是误读上一阶段证据。替代角色必须经过主控授权，
+  并保持来源、
   角色、checkpoint、input 和恢复链连续性。如果 replacement 也丢失 final，
   只能使用自己独立的三次恢复阶段，不能再创建
   replacement-of-replacement。
@@ -218,13 +221,13 @@ $adaptive-agent-orchestrator。共享上下文留在主 Agent，Worker 只拿引
 
 ## 验证情况
 
-v0.7.11 正式版本通过：
+v0.7.12 正式版本通过：
 
 - 48 个 PowerShell 脚本语法解析；
 - 66 项恢复协议专项断言；
-- 91 项 durable milestone、revision 与 successor-run 专项断言；
+- 102 项 durable milestone、revision 与 successor-run 专项断言；
 - 15 项 run policy activation 专项断言；
-- 799 项完整自测断言；
+- 810 项完整自测断言；
 - 59 份故意构造的非法负面案例均被正确拦截；
 - 8 个 reference JSON 文件严格解析；
 - 计划、元数据、日志、handoff、依赖、幂等、所有权、上下文重叠、渐进
@@ -254,6 +257,10 @@ v0.7.11 正式版本通过：
 - 真实 37-event run 通过预授权进入计划内 Group2：11 条 P1 中 4 条经同
   来源复审解决、7 条继续保留；completion 仍因这 7 条问题和缺少主任务最终
   验收保持 `BLOCKED`，P1-03 至 P1-06 没有回流。
+- 真实 39-event run 完整保留旧前缀；同一传统部来源随后通过当前 Group2
+  result、disposition 与 activation event 的精确绑定进入 checkpoint12
+  `result_pending` 和 `running`。原长期任务返回了正式 final；其中尚未完成的
+  领域审查继续作为未完成工作，而没有被误写成 Orchestrator 成功。
 
 ```powershell
 pwsh -NoProfile -File `
