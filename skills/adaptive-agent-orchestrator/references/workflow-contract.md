@@ -422,6 +422,14 @@ an unused schema 1.2 attempt-1 receipt for a different checkpoint/input may
 authorize exactly one `adopted -> result_pending` re-entry. The new event binds
 the preceding adopted sequence/hash and the new cycle, milestone activation,
 checkpoint, and input hashes. This is not a general reopening of `adopted`.
+When a later milestone activation selected a newer source-specific result and
+disposition without appending another node lifecycle chain, that terminal,
+fully verified activation binding is the preceding checkpoint for this narrow
+gate. Re-entry additionally binds its exact result/disposition paths and hashes
+plus the activation receipt and journal event. The source, role, durable task,
+milestone, activation epoch, checkpoint, and input must all match; an older
+lifecycle receipt, unselected file, changed activation, or another source
+cannot substitute.
 The only legal continuations are a bounded same-source recovery or, after a
 verified 3/3 same-cycle recovery chain, `replacement_pending` followed by the
 bound replacement thread. Neither pending state satisfies a dependency or completion

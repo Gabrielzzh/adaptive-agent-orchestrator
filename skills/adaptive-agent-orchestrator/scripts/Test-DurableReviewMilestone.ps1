@@ -1660,6 +1660,252 @@ try {
         $activeChain.activation_receipt_hash -eq $activation.receipt_hash
     ) 'The append-only chain must select the activated milestone.'
 
+    # A later checkpoint can lose its final after a milestone activation selected
+    # source receipts without appending another node lifecycle chain. The active
+    # source binding, not the older node-level receipt, is the verified prior
+    # review in this shape.
+    $activeRecoveryRun = Join-Path $testRoot 'active-milestone-recovery'
+    Copy-Item -LiteralPath $run -Destination $activeRecoveryRun -Recurse
+    $activeRecoveryCheckpoint = Join-Path $activeRecoveryRun (
+        'materials/checkpoint-method-2-recovery.json'
+    )
+    $activeRecoveryInput = Join-Path $activeRecoveryRun (
+        'materials/input-method-2-recovery.json'
+    )
+    $activeRecoveryCapture = Join-Path $activeRecoveryRun (
+        'thread-reads/review.method-2-recovery-progress.json'
+    )
+    Set-Content -LiteralPath $activeRecoveryCheckpoint -Value (
+        '{"milestone":"method-2","checkpoint":"recovery"}'
+    )
+    Set-Content -LiteralPath $activeRecoveryInput -Value (
+        '{"scope":"method-2-recovery"}'
+    )
+    [ordered]@{
+        schemaVersion = 1
+        thread = [ordered]@{ id = 'review-thread' }
+        page = [ordered]@{ order = 'newest_first' }
+        latestAssistantMessageId = $null
+        turns = @(
+            [ordered]@{
+                id = 'method-2-recovery-turn'
+                status = 'completed'
+                items = @(
+                    [ordered]@{
+                        type = 'agentMessage'
+                        phase = 'commentary'
+                        text = 'Method-2 recovery has progress but no final.'
+                    }
+                )
+            }
+        )
+    } | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $activeRecoveryCapture -Encoding utf8
+    $activeRecovery = & (
+        Join-Path $scriptRoot 'New-ThreadResultRecoveryReceipt.ps1'
+    ) -RunDirectory $activeRecoveryRun -SourceNodeId 'review' `
+        -OriginalThreadId 'review-thread' `
+        -CheckpointManifestPath $activeRecoveryCheckpoint `
+        -InputManifestPath $activeRecoveryInput `
+        -ThreadReadPath $activeRecoveryCapture `
+        -MilestoneId 'method-2' -Attempt 1 |
+        ConvertFrom-Json -Depth 50
+    $activeRecoveryRelativePath = (
+        'receipts/review.cycle-' +
+        [string]$activeRecovery.recovery_cycle_id +
+        '.attempt-1.result-recovery.json'
+    )
+    $activeRecoveryEvent = & (
+        Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1'
+    ) -RunDirectory $activeRecoveryRun -NodeId 'review' `
+        -Status 'result_pending' -ThreadId 'review-thread' `
+        -Message 'Method-2 checkpoint final missing.' `
+        -ErrorClass 'final_missing_with_progress_evidence' `
+        -RecoveryReceiptPath $activeRecoveryRelativePath `
+        -IdempotencyKey 'method-2-active-binding-result-pending' |
+        ConvertFrom-Json -Depth 50
+    Assert-True (
+        [string]$activeRecoveryEvent.previous_review_binding_kind -eq
+            'active-milestone-source-binding' -and
+        [string]$activeRecoveryEvent.previous_result_receipt_hash -eq
+            [string]$currentReview.result_hash -and
+        [string]$activeRecoveryEvent.previous_disposition_receipt_hash -eq
+            [string]$currentReview.disposition_hash -and
+        [string]$activeRecoveryEvent.
+            previous_milestone_activation_receipt_hash -eq
+            [string]$activation.receipt_hash -and
+        [int]$activeRecoveryEvent.
+            previous_milestone_activation_event_sequence -ge 1 -and
+        [string]$activeRecoveryEvent.
+            previous_milestone_activation_event_hash -match '^[0-9a-f]{64}$'
+    ) (
+        'Recovery re-entry must bind the active milestone source result, ' +
+        'disposition, and activation event instead of the older lifecycle.'
+    )
+
+    $sameCheckpointRun = Join-Path $testRoot (
+        'active-milestone-recovery-same-checkpoint'
+    )
+    Copy-Item -LiteralPath $run -Destination $sameCheckpointRun -Recurse
+    $sameCheckpointInput = Join-Path $sameCheckpointRun (
+        'materials/input-method-2-same-checkpoint.json'
+    )
+    $sameCheckpointCapture = Join-Path $sameCheckpointRun (
+        'thread-reads/review.method-2-same-checkpoint-progress.json'
+    )
+    Set-Content -LiteralPath $sameCheckpointInput -Value (
+        '{"scope":"method-2-same-checkpoint"}'
+    )
+    Copy-Item -LiteralPath $activeRecoveryCapture `
+        -Destination $sameCheckpointCapture
+    $sameCheckpointRecovery = & (
+        Join-Path $scriptRoot 'New-ThreadResultRecoveryReceipt.ps1'
+    ) -RunDirectory $sameCheckpointRun -SourceNodeId 'review' `
+        -OriginalThreadId 'review-thread' `
+        -CheckpointManifestPath (
+            Join-Path $sameCheckpointRun 'materials/checkpoint-method-2.json'
+        ) -InputManifestPath $sameCheckpointInput `
+        -ThreadReadPath $sameCheckpointCapture `
+        -MilestoneId 'method-2' -Attempt 1 |
+        ConvertFrom-Json -Depth 50
+    $sameCheckpointRelativePath = (
+        'receipts/review.cycle-' +
+        [string]$sameCheckpointRecovery.recovery_cycle_id +
+        '.attempt-1.result-recovery.json'
+    )
+    $sameCheckpointJournal = Get-Content -LiteralPath (
+        Join-Path $sameCheckpointRun 'events.jsonl'
+    ) -Raw
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $sameCheckpointRun -NodeId 'review' `
+            -Status 'result_pending' -ThreadId 'review-thread' `
+            -Message 'Replay the selected checkpoint.' `
+            -ErrorClass 'final_missing_with_progress_evidence' `
+            -RecoveryReceiptPath $sameCheckpointRelativePath `
+            -IdempotencyKey 'reject-active-binding-checkpoint-replay' |
+            Out-Null
+    } 'requires a new checkpoint' (
+        'The active milestone source binding cannot reopen its own checkpoint.'
+    )
+    Assert-True (
+        (Get-Content -LiteralPath (
+            Join-Path $sameCheckpointRun 'events.jsonl'
+        ) -Raw) -eq $sameCheckpointJournal
+    ) 'Rejected active-binding checkpoint replay must not change the journal.'
+
+    $selectionTamperRun = Join-Path $testRoot (
+        'active-milestone-recovery-selection-tamper'
+    )
+    Copy-Item -LiteralPath $activeRecoveryRun `
+        -Destination $selectionTamperRun -Recurse
+    Copy-Item -LiteralPath (Join-Path $run 'events.jsonl') `
+        -Destination (Join-Path $selectionTamperRun 'events.jsonl') -Force
+    Add-Content -LiteralPath (
+        Join-Path $selectionTamperRun 'materials/method-2-selection.json'
+    ) -Value ' '
+    $selectionTamperJournal = Get-Content -LiteralPath (
+        Join-Path $selectionTamperRun 'events.jsonl'
+    ) -Raw
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $selectionTamperRun -NodeId 'review' `
+            -Status 'result_pending' -ThreadId 'review-thread' `
+            -Message 'Use a changed milestone selection.' `
+            -ErrorClass 'final_missing_with_progress_evidence' `
+            -RecoveryReceiptPath $activeRecoveryRelativePath `
+            -IdempotencyKey 'reject-active-selection-tamper' |
+            Out-Null
+    } 'selection binding changed' (
+        'A changed active milestone selection must fail before journal write.'
+    )
+    Assert-True (
+        (Get-Content -LiteralPath (
+            Join-Path $selectionTamperRun 'events.jsonl'
+        ) -Raw) -eq $selectionTamperJournal
+    ) 'Rejected active selection tamper must not change the journal.'
+
+    $activationTamperRun = Join-Path $testRoot (
+        'active-milestone-recovery-activation-tamper'
+    )
+    Copy-Item -LiteralPath $activeRecoveryRun `
+        -Destination $activationTamperRun -Recurse
+    Copy-Item -LiteralPath (Join-Path $run 'events.jsonl') `
+        -Destination (Join-Path $activationTamperRun 'events.jsonl') -Force
+    $activationTamperPath = Join-Path $activationTamperRun (
+        'receipts/durable-review-milestone.method-2.activation.json'
+    )
+    $activationTamper = Get-Content -LiteralPath $activationTamperPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $activationTamper.activation_key = 'controller:changed-after-activation'
+    $activationTamper | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $activationTamperPath -Encoding utf8
+    $activationTamperJournal = Get-Content -LiteralPath (
+        Join-Path $activationTamperRun 'events.jsonl'
+    ) -Raw
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $activationTamperRun -NodeId 'review' `
+            -Status 'result_pending' -ThreadId 'review-thread' `
+            -Message 'Use a changed activation receipt.' `
+            -ErrorClass 'final_missing_with_progress_evidence' `
+            -RecoveryReceiptPath $activeRecoveryRelativePath `
+            -IdempotencyKey 'reject-active-activation-tamper' |
+            Out-Null
+    } 'Milestone activation receipt binding is invalid' (
+        'A changed milestone activation must invalidate its recovery cycle.'
+    )
+    Assert-True (
+        (Get-Content -LiteralPath (
+            Join-Path $activationTamperRun 'events.jsonl'
+        ) -Raw) -eq $activationTamperJournal
+    ) 'Rejected active activation tamper must not change the journal.'
+
+    foreach ($materialAttack in @(
+        [ordered]@{
+            name = 'checkpoint'
+            path = 'materials/checkpoint-method-2-recovery.json'
+            expected = 'Checkpoint manifest is missing or changed'
+        },
+        [ordered]@{
+            name = 'input'
+            path = 'materials/input-method-2-recovery.json'
+            expected = 'Input manifest is missing or changed'
+        }
+    )) {
+        $materialTamperRun = Join-Path $testRoot (
+            'active-milestone-recovery-' + $materialAttack.name + '-tamper'
+        )
+        Copy-Item -LiteralPath $activeRecoveryRun `
+            -Destination $materialTamperRun -Recurse
+        Copy-Item -LiteralPath (Join-Path $run 'events.jsonl') `
+            -Destination (Join-Path $materialTamperRun 'events.jsonl') -Force
+        Add-Content -LiteralPath (
+            Join-Path $materialTamperRun $materialAttack.path
+        ) -Value 'changed'
+        $materialTamperJournal = Get-Content -LiteralPath (
+            Join-Path $materialTamperRun 'events.jsonl'
+        ) -Raw
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+                -RunDirectory $materialTamperRun -NodeId 'review' `
+                -Status 'result_pending' -ThreadId 'review-thread' `
+                -Message "Use changed $($materialAttack.name) material." `
+                -ErrorClass 'final_missing_with_progress_evidence' `
+                -RecoveryReceiptPath $activeRecoveryRelativePath `
+                -IdempotencyKey (
+                    'reject-active-' + $materialAttack.name + '-tamper'
+                ) | Out-Null
+        } $materialAttack.expected (
+            "A changed recovery $($materialAttack.name) must fail closed."
+        )
+        Assert-True (
+            (Get-Content -LiteralPath (
+                Join-Path $materialTamperRun 'events.jsonl'
+            ) -Raw) -eq $materialTamperJournal
+        ) "Rejected $($materialAttack.name) tamper must not change the journal."
+    }
+
     $currentError = ''
     try {
         & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
