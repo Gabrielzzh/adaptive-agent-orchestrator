@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[English](README.md) · [v0.7.7 正式版说明](docs/releases/v0.7.7.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+[English](README.md) · [v0.7.8 正式版说明](docs/releases/v0.7.8.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
 
 ![Adaptive Agent Orchestrator v0.7.0 发布图](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -207,13 +207,14 @@ $adaptive-agent-orchestrator。共享上下文留在主 Agent，Worker 只拿引
 
 ## 验证情况
 
-v0.7.7 正式版本通过：
+v0.7.8 正式版本通过：
 
-- 42 个 PowerShell 脚本语法解析；
+- 45 个 PowerShell 脚本语法解析；
+- 52 项 abandoned-successor 恢复专项断言；
 - 37 项 durable milestone 与 successor-run 专项断言；
 - 15 项 run policy activation 专项断言；
 - 45 项恢复协议专项断言；
-- 724 项完整自测断言；
+- 739 项完整自测断言；
 - 59 份故意构造的非法负面案例均被正确拦截；
 - 8 个 reference JSON 文件严格解析；
 - 计划、元数据、日志、handoff、依赖、幂等、所有权、上下文重叠、渐进
@@ -231,6 +232,9 @@ v0.7.7 正式版本通过：
   全部继承，完成门继续正确保持 `BLOCKED`；
 - 两份真实 Codex 原始 capture 无需调用方转换，分别生成 schema 1.3
   result 与 disposition 收据。
+- 真实 cancelled successor 依次完成 authorization、export 和 fresh
+  adoption：两个来源的 18/18 条 P1 完整继承，已消耗 attempt 保留，P0
+  没有回流，完成门继续正确保持 `BLOCKED`。
 
 ```powershell
 pwsh -NoProfile -File `
@@ -246,6 +250,9 @@ pwsh -NoProfile -File `
   编排合同。
 - successor adoption 只继承编排义务和身份，不复制项目文件或业务状态；
   successor plan 必须自行声明后续里程碑。
+- abandoned-successor 恢复只适用于首个 durable milestone 与任何复审消息
+  或结果生命周期之前；它创建 fresh run，不会在旧 run 中复活 cancelled
+  source。
 - 自然语言排除项无法删除宿主已经注入的历史；应使用 fresh Worker 和明确
   输入引用。
 - 精确重叠检查无法发现“不同名称但语义相同”的材料，主 Agent 仍需拒绝。
