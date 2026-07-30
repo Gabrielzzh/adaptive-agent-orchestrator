@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.7.11 - 2026-07-31
+
+Scoped durable-review milestone progression release.
+
+- Remove a fail-closed deadlock where an active milestone intentionally carried
+  later-stage P0/P1 findings, could not receive final main-owner acceptance, and
+  therefore could not activate the next milestone already declared in the plan.
+- Add an append-once scope-transition authorization before activation. It binds
+  the run, previous milestone, exact next milestone, selection/checkpoint,
+  controller material, scope key, source set, and conserved finding counts.
+- Require the next activation to consume that exact earlier authorization.
+  Replacing the scope key, controller material, selection, run, milestone, or
+  source set only in the activation tail fails closed.
+- Conserve every prior P0/P1 source occurrence by source/thread, finding ID,
+  canonical ID, severity, exact text, and text hash. Only same-source reviewed
+  occurrences may be resolved; every other occurrence remains open.
+- Keep scoped progression separate from final main-owner acceptance. It cannot
+  validate the main node, satisfy completion, skip a declared milestone, or
+  make an open blocker disappear.
+- Validate the real multi-divination 37-event control run: Group2 activation
+  advanced append-only, resolved four in-scope P1 occurrences, retained seven
+  later P1 occurrences, and completion remained correctly blocked by those
+  seven findings plus missing final main acceptance.
+- Preserve the boundary: this release does not repair platform `systemError`,
+  prove Token savings or business accuracy, modify multi-divination product
+  files, or protect against coherent rewriting of the authorization event and
+  all later retained history.
+
 ## 0.7.10 - 2026-07-30
 
 First-milestone review-revision and verified recovery re-entry release.

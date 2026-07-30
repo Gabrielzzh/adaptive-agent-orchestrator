@@ -1,8 +1,8 @@
 # Release validation receipt
 
-Release: `0.7.10`
+Release: `0.7.11`
 Policy version: `0.7.6` (unchanged)
-Date: `2026-07-30`
+Date: `2026-07-31`
 
 ## Environment
 
@@ -12,20 +12,22 @@ Date: `2026-07-30`
 
 ## Scope
 
-v0.7.10 closes two fail-closed gaps in repeated durable review.
+v0.7.11 removes a fail-closed deadlock in staged durable review. A current
+milestone could legitimately retain P0/P1 findings assigned to later declared
+stages, which correctly prevented final main-owner acceptance. The next
+milestone also required that unavailable final acceptance, so the declared
+sequence could not progress.
 
-First, a source that adopted an earlier checkpoint may enter `result_pending`
-for a different checkpoint/input only through an unused schema 1.2 attempt-1
-recovery cycle bound to the same run, source, role, thread, and active
-milestone. Ordinary `adopted` remains terminal.
+The fix adds an append-once scope-transition authorization before activation.
+It pre-binds the run, previous milestone, exact next milestone, selection and
+checkpoint, controller material, scope key, source set, and conserved finding
+counts. Activation must consume that exact earlier authorization.
 
-Second, before the first declared milestone advances, a pre-authorized revision
-may re-arm every required read-only source once and select one exact set of
-fresh cumulative results. Authorization fixes the only selection identity
-before results exist. Selection conserves each prior source finding occurrence
-by source ID, severity, exact text/hash, and canonical ID. Completion reads only
-the terminal valid selection; open P0/P1 and missing main acceptance remain
-blockers.
+Every prior open occurrence remains bound to its source/thread, source finding
+ID, canonical ID, severity, exact text, and text hash. Only same-source reviewed
+occurrences may become resolved; the rest remain open. Scoped progression is
+not final main-owner acceptance, does not validate the main node, and never
+satisfies completion.
 
 The orchestration policy remains `0.7.6`. This patch does not rewrite an older
 plan, run, genesis, result, disposition, or journal.
@@ -33,94 +35,123 @@ plan, run, genesis, result, disposition, or journal.
 ## Fixed functional candidate
 
 Functional commit:
-`cbf98d4ab1bfc48fb65008a2f13ca0aa492d8e5a`
+`93bcec0d1fb3088eb86c4ae98847225731ba6abe`
 
 Parent:
-`9321bd414469f60a60558716cae98e3dd46a1e36`
+`0afc97a729054215b241df85031c79356022ead6`
 
-The fixed Skill contains 66 files.
+The fixed Skill contains 67 files.
+
+Candidate archive:
+`adaptive-agent-orchestrator-v0.7.11-candidate-93bcec0.zip`
+
+Candidate archive SHA-256:
+`9b98348b256ecee18d920d78bb0c95110178cf13cb6ba493f701132b7d7d2afc`
 
 ## Repository results
 
 - Exit code: 0
-- PowerShell scripts parsed: 47
+- PowerShell scripts parsed: 48
 - Recovery-protocol focused assertions: 66 passed
-- Durable-milestone/revision focused assertions: 79 passed
-- Self-test assertions: 787 passed
+- Durable-milestone/revision focused assertions: 91 passed
+- Self-test assertions: 799 passed
 - Intentional invalid negative cases: 59 correctly rejected
 - Strict reference JSON files parsed: 8
 - Skill Creator validation: `Skill is valid!`
-- Local Markdown links checked: 60
-- `git diff --check`: passed
+- Local Markdown links checked: 104
+- `git diff --check`: passed with line-ending warnings only
 - Symbolic-link fixture: skipped because this Windows session did not permit
   symbolic-link creation
 
 ## Independent acceptance
 
 The same read-only Noether reviewer dynamically re-attacked fixed functional
-commit `cbf98d4` and candidate archive SHA-256
-`413888a0e5b628401fdfbb62dac9fb9817058d2521f1f2c40915fc8ca4f0d4dd`.
-The final disposition was GREEN with no blocking finding.
+commit `93bcec0` and candidate archive SHA-256
+`9b98348b256ecee18d920d78bb0c95110178cf13cb6ba493f701132b7d7d2afc`.
+The final disposition was GREEN with P0=0, P1=0, and P2=0.
 
-The reviewer confirmed that authorization pre-binds the only permitted
-selection identity; a caller cannot choose or re-sign another identity after
-results exist. Missing, empty, case/prefix-mutated, cross-run, or cross-revision
-selection keys fail closed. Existing recovery, milestone, completion, and
-history-tamper boundaries remain in force.
+The reviewer verified the legal preauthorization-to-activation path and eight
+adjacent fail-closed boundaries. Missing or empty authorization, cross-run or
+cross-milestone reuse, selection path/content/hash changes, and replacing the
+pre-bound scope key or controller material in the later activation were all
+rejected before journal mutation.
+
+The review did not claim resistance to coherent rewriting of the earlier
+authorization event and every later history entry. That remains outside the
+local append-only threat model.
 
 ## Real adoption
 
 The installed candidate was exercised against the real multi-divination
-control run without modifying product files:
+37-event control run without modifying product files or old history:
 
 `C:\Users\Administrator\Documents\主task\orchestration-control\multi-divination-v072\runs\multi-divination-liuyao-p1-successor-v076-checkpoint07`
 
-The original 27-event run created revision
-`a19386b09506bb173ba3656524f09a3edc3beabbfd765c907c104903bfe75474`,
-then re-armed the original traditional and adversarial read-only sources. Both
-returned fresh formal PASS results with no new P0/P1/P2, and each produced
-source-specific schema 1.3 result/disposition evidence followed by
-`completed -> validated -> adopted`.
+The pre-transition journal head was
+`9b4acf9d3cfdd8a29269388fcc7d5be8cc5bdbc92a6a5521792221110898d341`.
+The declared Group2 selection and checkpoint were bound to SHA-256:
 
-One selection chose checkpoint10 SHA-256
-`22e0e6c86b90d273d3d7929c764eafdbc72c92f570f49ef22eed8dc474ae966c`:
+- selection:
+  `ce1ff837c8055045ed4045c4e2b5fd59a4190ab130893e9bc4f06ea9fc7a95d6`
+- checkpoint:
+  `37d50e92a4ff03df61c7839eb876e7c5e990b91231dba4ed9a6f5b5e5204264d`
 
-- selection internal/event hash:
-  `e969fe49bd02588d9ca9d6abcd6882e0a3935d7a15309c3700161dd0f28e7ca9`
-- selection file SHA-256:
-  `ba8431b466715cb57b4d5e2065d05b653610d6731c1120f060959c0104f5c7be`
-- final event count: 37
-- final journal file SHA-256:
-  `412a0e68bc55697d232411ff766a5e4b5035c76f7e71cf8036cc06b28517bdf3`
+The scope-transition authorization succeeded:
 
-Completion intentionally exited 1 because fresh main-owner acceptance was still
-absent and 11 later P1 source occurrences remained open. It reported zero P0,
-did not revive resolved older findings, and did not treat either source as a
-substitute for the other. Product development then advanced to the next group.
-No new Orchestrator P0/P1 was found.
+- internal receipt hash:
+  `63f1abc9ac24f93c2d8138479cbd501997be85b7fca7b50ecc80b23fa0a7b643`
+- file SHA-256:
+  `e589ec090ee1a097cc40c8ddd007e109ebf8355e94c273dc5f446235d2d35ac0`
+
+Group2 activation succeeded with schema 1.2:
+
+- internal receipt hash:
+  `2dc7bd36e331ad0a950028088e7e8e1e97c32685edff169c09b25c355e0601c6`
+- file SHA-256:
+  `88b70328becf4675a00059ab13e14d7205051aa78c2217c6a3fecbfc431a792c`
+- conserved counts: 11 prior, 4 resolved, 7 remaining
+
+The journal appended from 37 to 39 events. Its new head and file SHA-256 were:
+
+- head:
+  `6b33d464f06da99494833102c1ed6c0b90f844a1cce02e3844bd989dc1c64510`
+- file:
+  `aeb0bccd788239d1c5ce579a34e927995198f2ad7b62547ba8419a51096b725d`
+
+Completion intentionally exited 1. It reported five traditional and two
+adversarial open P1 occurrences plus missing final main-owner acceptance.
+Resolved P1-03 through P1-06 did not reappear. This is
+`PASS_EXPECTED_BLOCKED`: staged progression passed while the full method
+remained safely blocked by real unfinished work.
+
+The first completion call was denied only because the sandbox could not update
+derived `state.json`; the immutable journal did not change. An authorized retry
+produced the formal completion result above. No new Orchestrator P0/P1 was
+found.
 
 ## Release archive
 
 Archive:
-`adaptive-agent-orchestrator-v0.7.10.zip`
+`adaptive-agent-orchestrator-v0.7.11.zip`
 
 Archive SHA-256:
-`413888a0e5b628401fdfbb62dac9fb9817058d2521f1f2c40915fc8ca4f0d4dd`
+`9b98348b256ecee18d920d78bb0c95110178cf13cb6ba493f701132b7d7d2afc`
 
-The archive was generated from fixed functional commit `cbf98d4` with
-`git archive` and contains 66 Skill files. After line-ending normalization,
-archive content matched the 66 Git blobs 66/66. From a fresh extraction:
+The archive is the 67-file Skill tree from fixed functional commit `93bcec0`.
+Root README files, changelog, release notes, and this validation receipt are
+repository documentation and are intentionally outside the installable Skill
+archive.
 
-- PowerShell parse: 47/47
+From a fresh extraction:
+
+- PowerShell parse: 48/48
 - recovery-protocol assertions: 66
-- durable-milestone/revision assertions: 79
-- self-test assertions: 787
+- durable-milestone/revision assertions: 91
+- self-test assertions: 799
 - invalid cases rejected: 59/59
 - strict reference JSON: 8/8
 - Skill Creator validation: passed
-
-Root README files, changelog, release notes, and this receipt are repository
-documentation and are intentionally outside the installable Skill archive.
+- archive content versus commit Git blobs: 67/67
 
 ## Installed copy
 
@@ -128,14 +159,12 @@ Installed path:
 `C:\Users\Administrator\.codex\skills\adaptive-agent-orchestrator`
 
 Backup:
-`C:\Users\Administrator\.codex\skill-backups\adaptive-agent-orchestrator-before-cbf98d4-20260730-232957`
+`C:\Users\Administrator\.codex\skill-backups\adaptive-agent-orchestrator-before-v0.7.11-20260731-021049`
 
-The fixed ZIP and installed Skill copies matched 66/66 files by exact SHA-256
-with zero missing, extra, or different files. The Windows working tree differed
-in raw bytes for 36 text files because of CRLF checkout conversion; after
-stripping trailing CR, all 66 files matched the fixed ZIP. The installed copy
-passed 47-script parse, 66 focused recovery assertions, 79 milestone/revision
-assertions, 787 self-test assertions, 59 rejected invalid cases, strict parsing
+The fixed archive and installed Skill copies matched 67/67 files by exact
+SHA-256 with zero missing, extra, or different files. The installed copy passed
+48-script parse, 66 focused recovery assertions, 91 milestone/revision
+assertions, 799 self-test assertions, 59 rejected invalid cases, strict parsing
 of 8 reference JSON files, and Skill Creator validation.
 
 ## Boundaries
@@ -143,15 +172,12 @@ of 8 reference JSON files, and Skill Creator validation.
 - The Skill does not repair platform `systemError` or missing-final behavior.
 - It does not claim measured production Token savings or business accuracy.
 - It does not migrate or modify multi-divination product files.
-- The 11 open multi-divination P1 source occurrences are product work, not
+- The seven open multi-divination P1 source occurrences are product work, not
   Orchestrator defects.
-- Recovery cycles do not permit replacement-of-replacement or relax P0/P1
-  completion gates.
-- A first-milestone revision cannot advance or impersonate a later milestone,
-  replace one required source with another, or substitute selection for fresh
-  main-owner acceptance.
+- Scoped progression cannot replace final main-owner acceptance, validate the
+  main node, skip a declared milestone, or make an open P0/P1 disappear.
 - The local hash chain detects in-chain changes but does not resist an attacker
-  who can coherently rewrite every retained anchor. That threat requires an
-  external WORM, signature, or remote log anchor.
+  who can coherently rewrite the scope authorization event and every later
+  retained entry. That threat requires an external immutable anchor.
 - Windows symbolic-link creation was unavailable. Linux and macOS were not
   dynamically validated.

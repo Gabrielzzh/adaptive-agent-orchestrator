@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.7.10 release notes](docs/releases/v0.7.10.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.7.11 release notes](docs/releases/v0.7.11.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -52,6 +52,11 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   activate its next declared milestone through an append-only receipt. Exact
   source chains and fresh main-owner acceptance replace stale fixed paths
   without rewriting the plan or guessing from file timestamps.
+- **Scoped finding conservation:** when the current milestone has finished its
+  own scope but retains P0/P1 assigned to later stages, one pre-bound scope
+  transition may advance to the next declared milestone. Every finding remains
+  bound to its source, severity, and exact text unless resolved by that same
+  source; stage progression is not final main-owner acceptance.
 - **First-milestone review revisions:** before advancing to a later milestone,
   one pre-authorized revision may re-arm every required read-only source and
   select one exact set of fresh cumulative results. Older evidence remains
@@ -242,13 +247,13 @@ state, integrates results, and performs authorized external actions.
 
 ## Validation
 
-The v0.7.10 release passes:
+The v0.7.11 release passes:
 
-- PowerShell parser validation for all 47 scripts;
+- PowerShell parser validation for all 48 scripts;
 - 66 recovery-protocol assertions;
-- 79 durable-milestone, revision, and successor-run assertions;
+- 91 durable-milestone, revision, and successor-run assertions;
 - 15 run-policy activation assertions;
-- 787 self-test assertions;
+- 799 self-test assertions;
 - 59 intentionally invalid negative-test cases correctly rejected;
 - strict parsing for all 8 bundled reference JSON files;
 - plan, metadata, journal, handoff, dependency, idempotency, ownership,
@@ -282,6 +287,10 @@ The v0.7.10 release passes:
   checkpoint10 result set, retained all 11 later P1 source occurrences, and did
   not revive resolved older findings. The product then advanced to its next
   group without a new Orchestrator P0/P1.
+- the real 37-event run used pre-authorization to enter declared Group2. Four
+  of eleven P1 occurrences were resolved by same-source review, seven remained
+  open, and completion stayed `BLOCKED` by those seven findings plus missing
+  final main-owner acceptance. P1-03 through P1-06 did not reappear.
 
 Run:
 
