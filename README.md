@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.7.3 release notes](docs/releases/v0.7.3.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.7.4 release notes](docs/releases/v0.7.4.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -57,6 +57,10 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
 - **Honest legacy adoption:** older tasks can capture the role, checkpoint,
   input, observed turns, and authorization that actually exist while listing
   unavailable machine identity fields as unknown instead of inventing them.
+- **Auditable run-policy activation:** a consistent older run can adopt the
+  current runtime policy through an append-only receipt without rewriting its
+  plan, run metadata, genesis event, or journal. Existing replacements remain
+  bound to their source and continuity evidence.
 - **Untrusted-result boundary:** the main-agent control policy treats Worker
   outputs as untrusted data, never direct authorization; verified, inferred,
   and assumed findings have different review and adoption rules.
@@ -221,17 +225,19 @@ state, integrates results, and performs authorized external actions.
 
 ## Validation
 
-The v0.7.3 release passes:
+The v0.7.4 release passes:
 
-- PowerShell parser validation for all 33 scripts;
-- 41 recovery-protocol assertions;
-- 617 self-test assertions;
+- PowerShell parser validation for all 35 scripts;
+- 15 run-policy activation assertions;
+- 45 recovery-protocol assertions;
+- 637 self-test assertions;
 - 57 intentionally invalid negative-test cases correctly rejected;
 - strict parsing for all 8 bundled reference JSON files;
 - plan, metadata, journal, handoff, dependency, idempotency, ownership,
   context-overlap, progressive-dispatch, short-packet, durable-task selection,
   queued setup, worktree preflight, task receipt, durable review, result
-  recovery, replacement continuity, and completion tests;
+  recovery, replacement continuity, immutable-run policy activation, and
+  completion tests;
 - strict JSON parsing and a real Windows Junction/reparse-point fixture;
 - Skill Creator validation;
 - independent dynamic re-attack of both release-blocking bypasses, ending
@@ -250,6 +256,8 @@ pwsh -NoProfile -File `
 - It does not fix platform `systemError` or missing-final failures; it prevents
   those states from being accepted as success and preserves verifiable recovery
   and replacement continuity.
+- It does not migrate business artifacts. Policy activation only authorizes the
+  existing immutable run to use the newer orchestration contract.
 - Natural-language exclusions cannot erase history already injected by a host;
   use fresh workers and explicit input references.
 - Exact context-overlap checks cannot detect two differently named references

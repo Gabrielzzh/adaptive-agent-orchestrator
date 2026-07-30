@@ -426,6 +426,119 @@ try {
     Set-Content -LiteralPath $authorizationPath `
         -Value $authorizationOriginal -NoNewline
 
+    $activatedRun = Join-Path $testRoot 'activated-legacy-run'
+    Copy-Item -LiteralPath $run -Destination $activatedRun -Recurse
+    $activatedPlanPath = Join-Path $activatedRun 'plan.json'
+    $activatedPlan = Get-Content -LiteralPath $activatedPlanPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $activatedPlan.policy_version = '0.7.2'
+    $activatedPlan | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $activatedPlanPath
+    $activatedPlanRaw = Get-Content -LiteralPath $activatedPlanPath -Raw
+    $activatedPlanHash = Get-TextSha256 $activatedPlanRaw
+    $activatedRunMetadataPath = Join-Path $activatedRun 'run.json'
+    $activatedRunMetadata = Get-Content -LiteralPath (
+        $activatedRunMetadataPath
+    ) -Raw | ConvertFrom-Json -AsHashtable
+    $activatedRunMetadata.policy_version = '0.7.2'
+    $activatedRunMetadata.plan_hash = $activatedPlanHash
+    $activatedRunMetadata | ConvertTo-Json |
+        Set-Content -LiteralPath $activatedRunMetadataPath
+    $activatedGenesis = [ordered]@{
+        sequence = 0
+        prev_hash = $null
+        timestamp = '2026-07-30T00:00:00.0000000+00:00'
+        event = 'run-created'
+        run_id = [string]$activatedPlan.run_id
+        plan_hash = $activatedPlanHash
+        workspace_root = [string]$activatedRunMetadata.workspace_root
+        policy_version = '0.7.2'
+        actor = [string]$activatedPlan.orchestrator.id
+        node_id = $null
+        role_id = $null
+        prior_state = $null
+        status = 'planned'
+        message = 'Validated orchestration run created.'
+        thread_id = $null
+        model_id = $null
+        artifact = $null
+        topology = $null
+        capability = $null
+        effort = $null
+        wave = 0
+        attempt = 0
+        execution_slot_delta = 0
+        input_tokens_delta = 0
+        output_tokens_delta = 0
+        coordination_tokens_delta = 0
+        usage_source = 'none'
+        error_class = $null
+        evidence = @()
+        idempotency_key = "$($activatedPlan.run_id):run-created"
+        request_fingerprint = $null
+    }
+    $activatedGenesis.hash = Get-OrchestrationEventHash (
+        [pscustomobject]$activatedGenesis
+    )
+    $activatedGenesis | ConvertTo-Json -Compress |
+        Set-Content -LiteralPath (Join-Path $activatedRun 'events.jsonl')
+    $activatedAuthorizationPath = Join-Path $activatedRun (
+        'materials/authorization.txt'
+    )
+    $activationReceipt = & (
+        Join-Path $scriptRoot 'New-RunPolicyActivationReceipt.ps1'
+    ) -RunDirectory $activatedRun `
+        -AuthorizationMaterialPath $activatedAuthorizationPath `
+        -ActivationKey 'controller:legacy-run-policy-activation' |
+        ConvertFrom-Json -Depth 100
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $activatedRun -NodeId 'review' `
+            -Status replacement_pending `
+            -Message 'attempt unbound lifecycle adoption' `
+            -ThreadId 'replacement-review-thread' `
+            -ReplacementContinuityReceiptPath (
+                'receipts/review.replacement-continuity.json'
+            ) -IdempotencyKey 'unbound-activated-lifecycle' | Out-Null
+    } 'Illegal state transition' (
+        'A migrated run cannot skip lifecycle without explicit adoption.'
+    )
+    $activatedLifecycle = & (
+        Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1'
+    ) -RunDirectory $activatedRun -NodeId 'review' `
+        -Status replacement_pending `
+        -Message 'adopt exact pre-existing replacement lifecycle' `
+        -ThreadId 'replacement-review-thread' `
+        -ReplacementContinuityReceiptPath (
+            'receipts/review.replacement-continuity.json'
+        ) -AdoptActivatedLifecycle `
+        -ModelVerificationState unverified `
+        -ModelVerificationEvidence (
+            'observation:platform-did-not-expose-actual-model'
+        ) -IdempotencyKey 'bound-activated-lifecycle' |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        $activatedLifecycle.runtime_policy_version -eq '0.7.4' -and
+        $activatedLifecycle.policy_activation_receipt_hash -eq
+            $activationReceipt.receipt_hash -and
+        $activatedLifecycle.replacement_receipt_hash -eq
+            $replacement.receipt_hash
+    ) 'Activated lifecycle must bind policy and replacement continuity.'
+    $activatedState = & (
+        Join-Path $scriptRoot 'Get-OrchestrationState.ps1'
+    ) -RunDirectory $activatedRun | ConvertFrom-Json -Depth 100
+    $activatedNode = @($activatedState.nodes | Where-Object {
+        $_.id -eq 'review'
+    }) | Select-Object -First 1
+    Assert-True (
+        $activatedNode.status -eq 'replacement_pending' -and
+        $activatedNode.actual_model_verification -eq 'unverified' -and
+        [string]::IsNullOrWhiteSpace([string]$activatedNode.actual_model)
+    ) 'Activated lifecycle must preserve an unverified actual model.'
+    Assert-True (
+        [int]$activatedState.materialized_workers -eq 1
+    ) 'An adopted replacement lifecycle must consume one Worker slot.'
+
     & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
         -RunDirectory $run -NodeId 'review' -Status 'replacement_pending' `
         -Message 'authorized same-role replacement materialized' `

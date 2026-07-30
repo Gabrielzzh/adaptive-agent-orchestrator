@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[English](README.md) · [v0.7.3 正式版说明](docs/releases/v0.7.3.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+[English](README.md) · [v0.7.4 正式版说明](docs/releases/v0.7.4.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
 
 ![Adaptive Agent Orchestrator v0.7.0 发布图](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -51,6 +51,9 @@
   创建 replacement-of-replacement。
 - **诚实接入旧任务：** 对旧任务只捕获真实存在的角色、checkpoint、input、
   turn 与授权材料；平台从未提供的机器身份字段明确标为 unknown，不补造。
+- **旧 run 可审计激活：** 内部一致的旧 run 可通过追加式收据采用当前运行
+  策略，无需改写 plan、run metadata、genesis 或既有 journal；已存在的
+  replacement 继续绑定原来源与连续性证据。
 - **不可信结果边界：** 主 Agent 的控制面政策把 Worker 输出视为不可信数据，
   而不是直接授权；已验证、推断和假设类发现采用不同的复核与采纳规则。
 - **回执绑定归档：** durable task 的结果回执消失或被修改后，不能进入归档。
@@ -197,11 +200,12 @@ $adaptive-agent-orchestrator。共享上下文留在主 Agent，Worker 只拿引
 
 ## 验证情况
 
-v0.7.3 正式版本通过：
+v0.7.4 正式版本通过：
 
-- 33 个 PowerShell 脚本语法解析；
-- 41 项恢复协议专项断言；
-- 617 项完整自测断言；
+- 35 个 PowerShell 脚本语法解析；
+- 15 项 run policy activation 专项断言；
+- 45 项恢复协议专项断言；
+- 637 项完整自测断言；
 - 57 份故意构造的非法负面案例均被正确拦截；
 - 8 个 reference JSON 文件严格解析；
 - 计划、元数据、日志、handoff、依赖、幂等、所有权、上下文重叠、渐进
@@ -222,6 +226,8 @@ pwsh -NoProfile -File `
 - 这是治理 Skill，不是独立 Agent 托管平台。
 - Skill 不修复平台自身的 `systemError` 或 final 丢失；它保证这些状态不会
   被误报为成功，并使恢复与替代连续性可核验。
+- Skill 不迁移业务产物；policy activation 只允许既有不可变 run 采用新的
+  编排合同。
 - 自然语言排除项无法删除宿主已经注入的历史；应使用 fresh Worker 和明确
   输入引用。
 - 精确重叠检查无法发现“不同名称但语义相同”的材料，主 Agent 仍需拒绝。

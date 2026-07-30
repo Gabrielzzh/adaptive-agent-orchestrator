@@ -355,6 +355,12 @@ pwsh -File scripts/Get-OrchestrationState.ps1 `
   -RunDirectory <run-directory>
 ```
 
+Never edit an older run's plan, run metadata, or journal to make its policy
+version current. Read [workflow-contract.md](references/workflow-contract.md)
+and create one append-only `New-RunPolicyActivationReceipt.ps1` receipt. Then
+validate that exact plan with `-ExistingRunDirectory`; new plans still require
+the current policy version.
+
 Record typed evidence on completion. Derive compact state from the journal;
 never replay the full journal into a model. Write an immutable handoff with
 `New-ThreadHandoff.ps1` only when `context.handoff_required` is true.

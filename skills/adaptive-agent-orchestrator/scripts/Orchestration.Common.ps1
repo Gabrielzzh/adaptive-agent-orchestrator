@@ -1,4 +1,6 @@
 Set-StrictMode -Version Latest
+$script:OrchestrationCurrentPolicyVersion = '0.7.4'
+$script:OrchestrationMigratablePolicyVersions = @('0.7.2', '0.7.3')
 
 function Get-TextSha256 {
     param([Parameter(Mandatory)][string] $Text)
@@ -39,6 +41,18 @@ function Get-OrchestrationEventHash {
             'model_verification_state'
             'model_verification_evidence'
             $keys[$modelIndex..($keys.Count - 1)]
+        )
+    }
+    if ($null -ne $Event.PSObject.Properties['runtime_policy_version'] -or
+        $null -ne $Event.PSObject.Properties['policy_activation_receipt_path'] -or
+        $null -ne $Event.PSObject.Properties['policy_activation_receipt_hash']) {
+        $policyIndex = [Array]::IndexOf($keys, 'policy_version') + 1
+        $keys = @(
+            $keys[0..($policyIndex - 1)]
+            'runtime_policy_version'
+            'policy_activation_receipt_path'
+            'policy_activation_receipt_hash'
+            $keys[$policyIndex..($keys.Count - 1)]
         )
     }
     $payload = [ordered]@{}
@@ -1428,4 +1442,267 @@ function Read-ThreadReconciliationReceipt {
         }
     }
     return $receipt
+}
+
+function Get-RunPolicySourceObligations {
+    param(
+        [Parameter(Mandatory)][string] $RunDirectory,
+        [Parameter(Mandatory)][object] $Plan
+    )
+
+    $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+    $items = [Collections.Generic.List[object]]::new()
+    foreach ($node in @($Plan.nodes | Where-Object {
+        [string]$_.kind -eq 'agent'
+    } | Sort-Object -Property id)) {
+        $legacyPath = Join-Path $runRoot (
+            "receipts/$($node.id).legacy-source-adoption.json"
+        )
+        $replacementPath = Join-Path $runRoot (
+            "receipts/$($node.id).replacement-continuity.json"
+        )
+        $legacy = $null
+        $replacement = $null
+        if (Test-Path -LiteralPath $legacyPath -PathType Leaf) {
+            $legacyRaw = Get-Content -LiteralPath $legacyPath -Raw |
+                ConvertFrom-Json -Depth 50 -DateKind String
+            $legacy = Read-LegacySourceAdoptionReceipt -Path $legacyPath `
+                -RunDirectory $runRoot -ExpectedSourceNodeId ([string]$node.id) `
+                -ExpectedOriginalThreadId (
+                    [string]$legacyRaw.original_thread_id
+                )
+        }
+        if (Test-Path -LiteralPath $replacementPath -PathType Leaf) {
+            $replacementRaw = Get-Content -LiteralPath $replacementPath -Raw |
+                ConvertFrom-Json -Depth 50 -DateKind String
+            $replacement = Read-ReplacementContinuityReceipt `
+                -Path $replacementPath -RunDirectory $runRoot `
+                -ExpectedSourceNodeId ([string]$node.id) `
+                -ExpectedReplacementThreadId (
+                    [string]$replacementRaw.replacement_thread_id
+                )
+        }
+        $items.Add([ordered]@{
+            source_node_id = [string]$node.id
+            role_id = [string]$node.role_id
+            original_thread_id = if ($legacy) {
+                [string]$legacy.original_thread_id
+            } else { $null }
+            checkpoint_hash = if ($legacy) {
+                [string]$legacy.checkpoint_hash
+            } else { $null }
+            input_material_hash = if ($legacy) {
+                [string]$legacy.input_material_hash
+            } else { $null }
+            legacy_adoption_receipt_hash = if ($legacy) {
+                [string]$legacy.receipt_hash
+            } else { $null }
+            recovery_chain_hash = if ($replacement) {
+                [string]$replacement.recovery_chain_hash
+            } else { $null }
+            replacement_thread_id = if ($replacement) {
+                [string]$replacement.replacement_thread_id
+            } else { $null }
+            replacement_continuity_receipt_hash = if ($replacement) {
+                [string]$replacement.receipt_hash
+            } else { $null }
+        })
+    }
+    return @($items)
+}
+
+function Read-RunPolicyActivationReceipt {
+    param(
+        [Parameter(Mandatory)][string] $RunDirectory,
+        [object[]] $Events
+    )
+
+    $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+    $relativeReceiptPath = (
+        'receipts/run-policy-activation.' +
+        $script:OrchestrationCurrentPolicyVersion + '.json'
+    )
+    $receiptPath = Join-Path $runRoot $relativeReceiptPath
+    if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
+        throw (
+            'This immutable run uses an older policy and has no verified ' +
+            'run-policy activation receipt.'
+        )
+    }
+    $planPath = Join-Path $runRoot 'plan.json'
+    $runPath = Join-Path $runRoot 'run.json'
+    $eventsPath = Join-Path $runRoot 'events.jsonl'
+    $planRaw = Get-Content -LiteralPath $planPath -Raw
+    $plan = $planRaw | ConvertFrom-Json -Depth 100 -DateKind String
+    $run = Get-Content -LiteralPath $runPath -Raw |
+        ConvertFrom-Json -Depth 30 -DateKind String
+    $journal = if ($null -ne $Events) {
+        @($Events)
+    } else {
+        @(Read-OrchestrationJournal $eventsPath)
+    }
+    $receipt = Get-Content -LiteralPath $receiptPath -Raw |
+        ConvertFrom-Json -Depth 100 -DateKind String
+    $required = @(
+        'schema_version', 'run_id', 'plan_hash', 'workspace_root',
+        'source_policy_version', 'target_policy_version',
+        'source_journal_head', 'source_journal_event_count',
+        'source_obligations', 'source_obligations_hash',
+        'artifact_bindings', 'artifact_bindings_hash',
+        'authorization_material_path', 'authorization_material_hash',
+        'activation_key', 'created_at_utc', 'receipt_hash'
+    )
+    foreach ($name in $required) {
+        if ($null -eq $receipt.PSObject.Properties[$name]) {
+            throw "Run-policy activation receipt is missing '$name'."
+        }
+    }
+    if ([string]$receipt.schema_version -ne '1.0' -or
+        [string]$receipt.target_policy_version -ne
+            $script:OrchestrationCurrentPolicyVersion -or
+        [string]$receipt.source_policy_version -notin
+            $script:OrchestrationMigratablePolicyVersions) {
+        throw 'Run-policy activation receipt has an unsupported policy transition.'
+    }
+    if ([string]$receipt.run_id -ne [string]$plan.run_id -or
+        [string]$receipt.run_id -ne [string]$run.run_id -or
+        [string]$receipt.plan_hash -ne [string]$run.plan_hash -or
+        [string]$receipt.plan_hash -ne (Get-TextSha256 $planRaw) -or
+        [string]$receipt.workspace_root -ne [string]$run.workspace_root -or
+        [string]$receipt.source_policy_version -ne [string]$plan.policy_version -or
+        [string]$run.policy_version -ne [string]$plan.policy_version) {
+        throw 'Run-policy activation receipt does not match the immutable run.'
+    }
+    $sourceCount = [int]$receipt.source_journal_event_count
+    if ($sourceCount -lt 1 -or $sourceCount -gt $journal.Count -or
+        [string]$journal[$sourceCount - 1].hash -ne
+            [string]$receipt.source_journal_head) {
+        throw 'Run-policy activation receipt does not match the source journal boundary.'
+    }
+    $obligations = Get-RunPolicySourceObligations `
+        -RunDirectory $runRoot -Plan $plan
+    $obligationsHash = Get-TextSha256 (
+        $obligations | ConvertTo-Json -Compress -Depth 30
+    )
+    if ([string]$receipt.source_obligations_hash -ne $obligationsHash -or
+        (Get-TextSha256 (
+            @($receipt.source_obligations) |
+                ConvertTo-Json -Compress -Depth 30
+        )) -ne $obligationsHash) {
+        throw 'Run-policy source obligations changed after activation.'
+    }
+    $verifiedBindings = [Collections.Generic.List[object]]::new()
+    $bindingPaths = @($receipt.artifact_bindings | ForEach-Object {
+        [string]$_.path
+    })
+    if (@($bindingPaths | Select-Object -Unique).Count -ne
+            $bindingPaths.Count -or
+        (@($bindingPaths) -join "`n") -ne
+            (@($bindingPaths | Sort-Object) -join "`n")) {
+        throw 'Run-policy activation artifact bindings must be unique and sorted.'
+    }
+    foreach ($binding in @($receipt.artifact_bindings)) {
+        $relative = [string]$binding.path
+        if ([string]::IsNullOrWhiteSpace($relative) -or
+            [IO.Path]::IsPathRooted($relative) -or
+            @($relative -split '[\\/]' | Where-Object {
+                $_ -in @('', '.', '..') -or $_ -match '[. ]$' -or
+                $_.Contains(':')
+            }).Count -gt 0) {
+            throw 'Run-policy activation contains an unsafe artifact path.'
+        }
+        $full = [IO.Path]::GetFullPath((Join-Path $runRoot $relative))
+        if (-not $full.StartsWith(
+            $runRoot + [IO.Path]::DirectorySeparatorChar,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or -not (Test-Path -LiteralPath $full -PathType Leaf)) {
+            throw 'Run-policy activation artifact is missing or escapes the run.'
+        }
+        $cursor = $runRoot
+        foreach ($segment in $relative -split '[\\/]') {
+            $cursor = Join-Path $cursor $segment
+            $item = Get-Item -LiteralPath $cursor -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Run-policy activation artifact crosses a reparse point.'
+            }
+        }
+        $actualHash = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.
+            ToLowerInvariant()
+        if ($actualHash -ne [string]$binding.sha256) {
+            throw "Run-policy activation artifact changed: $relative"
+        }
+        $verifiedBindings.Add([ordered]@{
+            path = $relative.Replace('\', '/')
+            sha256 = $actualHash
+        })
+    }
+    $bindingHash = Get-TextSha256 (
+        @($verifiedBindings) | ConvertTo-Json -Compress -Depth 10
+    )
+    if ([string]$receipt.artifact_bindings_hash -ne $bindingHash) {
+        throw 'Run-policy activation artifact manifest hash mismatch.'
+    }
+    $authorization = @($verifiedBindings | Where-Object {
+        [string]$_.path -eq [string]$receipt.authorization_material_path
+    }) | Select-Object -First 1
+    if ($null -eq $authorization -or
+        [string]$authorization.sha256 -ne
+            [string]$receipt.authorization_material_hash) {
+        throw 'Run-policy activation authorization is not bound to its artifacts.'
+    }
+    $payload = [ordered]@{}
+    foreach ($name in $required | Where-Object { $_ -ne 'receipt_hash' }) {
+        $payload[$name] = $receipt.$name
+    }
+    $expectedHash = Get-TextSha256 (
+        $payload | ConvertTo-Json -Compress -Depth 100
+    )
+    if ([string]$receipt.receipt_hash -ne $expectedHash) {
+        throw 'Run-policy activation receipt hash mismatch.'
+    }
+    for ($index = $sourceCount; $index -lt $journal.Count; $index++) {
+        $event = $journal[$index]
+        if ([string]$event.policy_version -ne
+                [string]$receipt.source_policy_version -or
+            [string]$event.runtime_policy_version -ne
+                [string]$receipt.target_policy_version -or
+            [string]$event.policy_activation_receipt_path -ne
+                $relativeReceiptPath -or
+            [string]$event.policy_activation_receipt_hash -ne
+                [string]$receipt.receipt_hash) {
+            throw 'Post-activation journal event lacks the exact policy binding.'
+        }
+    }
+    return $receipt
+}
+
+function Resolve-OrchestrationRunPolicy {
+    param(
+        [Parameter(Mandatory)][string] $RunDirectory,
+        [object[]] $Events
+    )
+
+    $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+    $plan = Get-Content -LiteralPath (Join-Path $runRoot 'plan.json') -Raw |
+        ConvertFrom-Json -Depth 100 -DateKind String
+    if ([string]$plan.policy_version -eq
+        $script:OrchestrationCurrentPolicyVersion) {
+        return [pscustomobject]@{
+            source_policy_version = [string]$plan.policy_version
+            effective_policy_version = [string]$plan.policy_version
+            activation_receipt_path = $null
+            activation_receipt_hash = $null
+        }
+    }
+    $receipt = Read-RunPolicyActivationReceipt -RunDirectory $runRoot `
+        -Events $Events
+    return [pscustomobject]@{
+        source_policy_version = [string]$receipt.source_policy_version
+        effective_policy_version = [string]$receipt.target_policy_version
+        activation_receipt_path = (
+            'receipts/run-policy-activation.' +
+            $script:OrchestrationCurrentPolicyVersion + '.json'
+        )
+        activation_receipt_hash = [string]$receipt.receipt_hash
+    }
 }

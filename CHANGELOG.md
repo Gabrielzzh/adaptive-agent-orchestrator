@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.7.4 - 2026-07-30
+
+Auditable immutable-run policy activation patch release.
+
+- Allow a consistent `0.7.2` or `0.7.3` run to continue under the `0.7.4`
+  runtime policy without rewriting its plan, run metadata, genesis event, or
+  existing journal.
+- Add an append-only run-policy activation receipt that binds predecessor
+  hashes, the journal head, exact artifacts and source obligations,
+  authorization material, and the target policy.
+- Preserve the source policy on post-activation events while hash-binding the
+  effective runtime policy and activation receipt.
+- Adopt an existing replacement only through its exact continuity receipt and
+  an explicit lifecycle-adoption action. If the platform did not expose the
+  actual model, record `actual_model=null / unverified` with evidence.
+- Count adopted replacements against Worker capacity and keep ordinary result,
+  disposition, source-isolation, re-review, and P0/P1 completion gates.
+- Reject missing or changed predecessor material, repeated or concurrent
+  activation, downgrade or skipped target policy, and receipt replay.
+- Preserve the boundary: this does not repair platform `systemError`, migrate
+  business artifacts, or claim measured Token savings.
+
 ## 0.7.3 - 2026-07-30
 
 Honest model materialization and replacement-recovery patch release.

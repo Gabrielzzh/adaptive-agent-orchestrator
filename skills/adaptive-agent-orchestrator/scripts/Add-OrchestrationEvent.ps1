@@ -55,7 +55,8 @@ param(
     [string] $RetryAuthorization,
     [string] $ReconciliationReceiptPath,
     [string] $RecoveryReceiptPath,
-    [string] $ReplacementContinuityReceiptPath
+    [string] $ReplacementContinuityReceiptPath,
+    [switch] $AdoptActivatedLifecycle
 )
 
 Set-StrictMode -Version Latest
@@ -108,15 +109,22 @@ if ($ModelId -and $ModelId -notin @(
 )) {
     throw "Unsupported actual model '$ModelId'."
 }
-if ($node.kind -eq 'agent' -and $Status -eq 'materialized') {
+if (($node.kind -eq 'agent' -and $Status -eq 'materialized') -or
+    ($node.kind -eq 'agent' -and $Status -eq 'replacement_pending' -and
+        $AdoptActivatedLifecycle)) {
     if ([string]::IsNullOrWhiteSpace($ModelVerificationState)) {
-        if ([string]::IsNullOrWhiteSpace($ModelId)) {
+        if ($AdoptActivatedLifecycle -or
+            [string]::IsNullOrWhiteSpace($ModelId)) {
             throw (
                 'Agent materialization without an exposed actual model requires ' +
                 "ModelVerificationState 'unverified'."
             )
         }
         $ModelVerificationState = 'verified'
+    }
+    if ($AdoptActivatedLifecycle -and
+        $ModelVerificationState -ne 'unverified') {
+        throw 'Activated existing lifecycle must record the actual model as unverified.'
     }
     if ($ModelVerificationState -eq 'verified') {
         if ([string]::IsNullOrWhiteSpace($ModelId)) {
@@ -152,6 +160,10 @@ if ($node.kind -eq 'agent' -and $Status -eq 'materialized') {
         'ModelVerificationState and ModelVerificationEvidence are only valid ' +
         'for agent materialization.'
     )
+}
+if ($AdoptActivatedLifecycle -and
+    $Status -ne 'replacement_pending') {
+    throw 'AdoptActivatedLifecycle is only valid for replacement_pending.'
 }
 $usageDelta = $InputTokensDelta + $OutputTokensDelta
 if ($CoordinationTokensDelta -gt $usageDelta) {
@@ -409,6 +421,7 @@ $requestPayload = [ordered]@{
         replacement_receipt_hash = if ($replacementReceipt) {
             [string]$replacementReceipt.receipt_hash
         } else { $null }
+        adopt_activated_lifecycle = [bool]$AdoptActivatedLifecycle
 }
 if ($ModelVerificationState -eq 'unverified') {
     $requestPayload['model_verification_state'] = $ModelVerificationState
@@ -464,9 +477,43 @@ try {
     if ($events[0].workspace_root -ne $runMetadata.workspace_root) {
         throw 'Workspace root changed after run creation.'
     }
+    $runPolicy = Resolve-OrchestrationRunPolicy -RunDirectory $RunDirectory `
+        -Events $events
 
     $history = @($events | Where-Object { $_.node_id -eq $NodeId })
     $priorState = if ($history.Count) { [string]$history[-1].status } else { 'planned' }
+    $isActivatedLifecycleAdoption = (
+        $AdoptActivatedLifecycle -and
+        $priorState -eq 'planned' -and
+        $Status -eq 'replacement_pending' -and
+        $null -ne $replacementReceipt -and
+        -not [string]::IsNullOrWhiteSpace(
+            [string]$runPolicy.activation_receipt_path
+        )
+    )
+    if ($AdoptActivatedLifecycle -and -not $isActivatedLifecycleAdoption) {
+        throw (
+            'Activated lifecycle adoption requires a planned source, a verified ' +
+            'replacement continuity receipt, and a run-policy activation receipt.'
+        )
+    }
+    if ($isActivatedLifecycleAdoption) {
+        $activation = Read-RunPolicyActivationReceipt `
+            -RunDirectory $RunDirectory -Events $events
+        $sourceBinding = @($activation.source_obligations | Where-Object {
+            [string]$_.source_node_id -eq $NodeId
+        }) | Select-Object -First 1
+        if ($null -eq $sourceBinding -or
+            [string]$sourceBinding.role_id -ne [string]$node.role_id -or
+            [string]$sourceBinding.replacement_thread_id -ne $ThreadId -or
+            [string]$sourceBinding.replacement_continuity_receipt_hash -ne
+                [string]$replacementReceipt.receipt_hash) {
+            throw (
+                'Activated lifecycle does not match the source obligation ' +
+                'captured by the policy activation receipt.'
+            )
+        }
+    }
     if ($Status -eq 'archived' -and $node.kind -eq 'agent' -and
         $node.topology -eq 'background-thread') {
         $receiptEvidence = @(
@@ -530,7 +577,8 @@ try {
         return
     }
 
-    if ($Status -notin @($transitions[$priorState])) {
+    if ($Status -notin @($transitions[$priorState]) -and
+        -not $isActivatedLifecycleAdoption) {
         throw "Illegal state transition for '$NodeId': $priorState -> $Status."
     }
 
@@ -559,7 +607,9 @@ try {
     }
 
     $kind = [string]$node.kind
-    if ($kind -eq 'agent' -and $priorState -eq 'planned' -and $Status -ne 'launch_reserved') {
+    if ($kind -eq 'agent' -and $priorState -eq 'planned' -and
+        $Status -ne 'launch_reserved' -and
+        -not $isActivatedLifecycleAdoption) {
         throw "Agent node '$NodeId' must reserve capacity before launch."
     }
     if ($kind -eq 'main' -and $priorState -eq 'planned' -and
@@ -703,7 +753,13 @@ try {
         $materializedCount = @(
             $events | Where-Object { $_.status -eq 'materialized' }
         ).Count
-        $occupiedWorkerSlots = $pendingCount + $materializedCount
+        $adoptedReplacementCount = @(
+            $latestByNode.GetEnumerator() | Where-Object {
+                $_.Value -eq 'replacement_pending'
+            }
+        ).Count
+        $occupiedWorkerSlots = $pendingCount + $materializedCount +
+            $adoptedReplacementCount
         if ($occupiedWorkerSlots -ge [int]$plan.limits.max_total_agent_nodes) {
             throw 'Total agent execution slots are exhausted.'
         }
@@ -848,6 +904,43 @@ try {
         }
         $executionSlotDelta = 1
     }
+    if ($isActivatedLifecycleAdoption) {
+        $latestByNode = @{}
+        foreach ($journalEvent in $events | Where-Object {
+            $null -ne $_.node_id
+        }) {
+            $latestByNode[[string]$journalEvent.node_id] =
+                [string]$journalEvent.status
+        }
+        $activeStates = @(
+            'launch_reserved', 'materializing', 'materialized', 'running',
+            'needs_input', 'replacement_pending', 'result_pending'
+        )
+        $activeNodeIds = @($latestByNode.GetEnumerator() | Where-Object {
+            $_.Value -in $activeStates
+        } | ForEach-Object { $_.Key })
+        if ($activeNodeIds.Count -ge
+            [int]$plan.limits.max_concurrent_nodes) {
+            throw 'Concurrent agent slots are exhausted.'
+        }
+        $activePersistentCount = @($plan.nodes | Where-Object {
+            $_.kind -eq 'agent' -and
+            $_.topology -eq 'background-thread' -and
+            $_.id -in $activeNodeIds
+        }).Count
+        if ($activePersistentCount -ge
+            [int]$plan.limits.persistent_active_limit) {
+            throw 'Persistent active Worker limit is exhausted.'
+        }
+        $occupiedNodeIds = @($events | Where-Object {
+            [int]$_.execution_slot_delta -gt 0
+        } | Select-Object -ExpandProperty node_id -Unique)
+        if ($occupiedNodeIds.Count -ge
+            [int]$plan.limits.max_total_agent_nodes) {
+            throw 'Total agent execution slots are exhausted.'
+        }
+        $executionSlotDelta = 1
+    }
 
     $event = [ordered]@{
         sequence = $events.Count
@@ -893,6 +986,14 @@ try {
         result_receipt_hash = $archiveReceiptHash
         idempotency_key = $IdempotencyKey
         request_fingerprint = $requestFingerprint
+    }
+    if ($runPolicy.activation_receipt_path) {
+        $event['runtime_policy_version'] =
+            [string]$runPolicy.effective_policy_version
+        $event['policy_activation_receipt_path'] =
+            [string]$runPolicy.activation_receipt_path
+        $event['policy_activation_receipt_hash'] =
+            [string]$runPolicy.activation_receipt_hash
     }
     if ($kind -eq 'agent' -and $Status -eq 'result_pending') {
         $priorPendingForThread = @($history | Where-Object {
