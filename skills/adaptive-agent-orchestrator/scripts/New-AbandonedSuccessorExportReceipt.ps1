@@ -6,8 +6,7 @@ param(
     [Parameter(Mandatory)][string] $CheckpointMaterialPath,
     [Parameter(Mandatory)][string] $AdditionalFindingRecordsPath,
     [Parameter(Mandatory)][string] $UnactivatedEvidenceManifestPath,
-    [Parameter(Mandatory)][string] $AuthorizationMaterialPath,
-    [Parameter(Mandatory)][string] $ActivationKey
+    [Parameter(Mandatory)][string] $AuthorizationReceiptPath
 )
 
 Set-StrictMode -Version Latest
@@ -15,21 +14,17 @@ $ErrorActionPreference = 'Stop'
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $scriptRoot 'Orchestration.Common.ps1')
 
-if ($ActivationKey -notmatch
-    '^(user|controller):[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$') {
-    throw 'Abandoned successor export requires a stable authorization key.'
-}
 $runRoot = [IO.Path]::GetFullPath($AbandonedRunDirectory).TrimEnd('\', '/')
 $planPath = [IO.Path]::GetFullPath($SuccessorPlanPath)
 $successorRun = [IO.Path]::GetFullPath(
     $SuccessorRunDirectory
 ).TrimEnd('\', '/')
+$authorizationReceipt = [IO.Path]::GetFullPath($AuthorizationReceiptPath)
 $snapshot = Get-AbandonedSuccessorSnapshot -RunDirectory $runRoot
 $materials = [ordered]@{
     checkpoint = [IO.Path]::GetFullPath($CheckpointMaterialPath)
     additional = [IO.Path]::GetFullPath($AdditionalFindingRecordsPath)
     unactivated = [IO.Path]::GetFullPath($UnactivatedEvidenceManifestPath)
-    authorization = [IO.Path]::GetFullPath($AuthorizationMaterialPath)
 }
 foreach ($entry in $materials.GetEnumerator()) {
     if (-not $entry.Value.StartsWith(
@@ -46,6 +41,10 @@ $null = & (Join-Path $scriptRoot 'Test-OrchestrationPlan.ps1') `
     -PlanPath $planPath -WorkspaceRoot ([string]$snapshot.run.workspace_root)
 $planRaw = Get-Content -LiteralPath $planPath -Raw
 $plan = $planRaw | ConvertFrom-Json -Depth 100 -DateKind String
+$authorization = Read-AbandonedSuccessorAuthorizationReceipt `
+    -Path $authorizationReceipt -AbandonedRunDirectory $runRoot `
+    -SuccessorPlanPath $planPath `
+    -ExpectedSuccessorRunDirectory $successorRun
 if ([string]$plan.run_id -eq [string]$snapshot.run.run_id -or
     $null -eq $plan.PSObject.Properties['successor_review_profile']) {
     throw 'Fresh successor plan identity is invalid.'
@@ -235,11 +234,19 @@ $payload = [ordered]@{
         $plan.durable_review_profile.milestone_ids |
             ForEach-Object { [string]$_ }
     )
-    authorization_material_path = Relative $materials.authorization
-    authorization_material_hash = (
-        Get-FileHash -LiteralPath $materials.authorization -Algorithm SHA256
+    authorization_receipt_path = [IO.Path]::GetRelativePath(
+        $runRoot, $authorizationReceipt
+    ).Replace('\', '/')
+    authorization_receipt_hash = [string]$authorization.receipt_hash
+    authorization_receipt_file_hash = (
+        Get-FileHash -LiteralPath $authorizationReceipt -Algorithm SHA256
     ).Hash.ToLowerInvariant()
-    activation_key = $ActivationKey
+    authorization_event_hash = [string]$snapshot.events[-1].hash
+    authorization_material_path =
+        [string]$authorization.authorization_material_path
+    authorization_material_hash =
+        [string]$authorization.authorization_material_hash
+    activation_key = [string]$authorization.activation_key
     created_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
 }
 $receipt = [ordered]@{}
@@ -303,7 +310,7 @@ try {
         )
         result_receipt_path = "receipts/$receiptName"
         result_receipt_hash = [string]$receipt.receipt_hash
-        idempotency_key = $ActivationKey
+        idempotency_key = [string]$authorization.activation_key
         request_fingerprint = [string]$receipt.receipt_hash
     }
     $event.hash = Get-OrchestrationEventHash ([pscustomobject]$event)

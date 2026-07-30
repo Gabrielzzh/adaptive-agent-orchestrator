@@ -2852,6 +2852,99 @@ function Get-AbandonedSuccessorSnapshot {
     }
 }
 
+function Read-AbandonedSuccessorAuthorizationReceipt {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $AbandonedRunDirectory,
+        [Parameter(Mandatory)][string] $SuccessorPlanPath,
+        [Parameter(Mandatory)][string] $ExpectedSuccessorRunDirectory
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Abandoned successor authorization does not exist: $Path"
+    }
+    $receipt = Get-Content -LiteralPath $Path -Raw |
+        ConvertFrom-Json -Depth 100 -DateKind String
+    $keys = @(
+        'schema_version', 'lineage_kind', 'abandoned_run_path',
+        'abandoned_run_id', 'abandoned_plan_hash', 'authorization_journal_head',
+        'authorization_journal_event_count', 'source_bindings_hash',
+        'checkpoint_material_path', 'checkpoint_material_hash',
+        'additional_findings_path', 'additional_findings_hash',
+        'unactivated_evidence_manifest_path',
+        'unactivated_evidence_manifest_hash', 'successor_run_id',
+        'successor_plan_hash', 'successor_run_path', 'successor_milestone_ids',
+        'authorization_material_path', 'authorization_material_hash',
+        'activation_key', 'created_at_utc'
+    )
+    $payload = [ordered]@{}
+    foreach ($name in $keys) {
+        if ($null -eq $receipt.PSObject.Properties[$name]) {
+            throw "Abandoned successor authorization is missing '$name'."
+        }
+        $payload[$name] = $receipt.$name
+    }
+    if ([string]$receipt.schema_version -ne '1.0' -or
+        [string]$receipt.lineage_kind -ne 'abandoned-successor-authorization' -or
+        [string]$receipt.receipt_hash -ne (Get-TextSha256 (
+            $payload | ConvertTo-Json -Compress -Depth 100
+        ))) {
+        throw 'Abandoned successor authorization hash or schema is invalid.'
+    }
+    $snapshot = Get-AbandonedSuccessorSnapshot `
+        -RunDirectory $AbandonedRunDirectory
+    $events = @($snapshot.events)
+    $authorizationEvents = @($events | Where-Object {
+        [string]$_.event -eq 'durable-review-abandoned-successor-authorized'
+    })
+    if ($authorizationEvents.Count -ne 1) {
+        throw 'Abandoned successor authorization event is missing or repeated.'
+    }
+    $authorizationIndex = [Array]::IndexOf($events, $authorizationEvents[0])
+    if ($authorizationIndex -ne [int]$receipt.authorization_journal_event_count) {
+        throw 'Abandoned successor authorization event position changed.'
+    }
+    $event = $authorizationEvents[0]
+    if ([string]$event.prev_hash -ne
+            [string]$receipt.authorization_journal_head -or
+        [string]$event.result_receipt_hash -ne [string]$receipt.receipt_hash -or
+        [string]$event.idempotency_key -ne [string]$receipt.activation_key -or
+        [string]$event.request_fingerprint -ne [string]$receipt.receipt_hash) {
+        throw 'Abandoned successor authorization event binding changed.'
+    }
+    $planRaw = Get-Content -LiteralPath $SuccessorPlanPath -Raw
+    $plan = $planRaw | ConvertFrom-Json -Depth 100 -DateKind String
+    if ([string]$receipt.abandoned_run_path -ne [string]$snapshot.run_root -or
+        [string]$receipt.abandoned_run_id -ne [string]$snapshot.run.run_id -or
+        [string]$receipt.abandoned_plan_hash -ne [string]$snapshot.plan_hash -or
+        [string]$receipt.source_bindings_hash -ne
+            [string]$snapshot.source_bindings_hash -or
+        [string]$receipt.successor_run_id -ne [string]$plan.run_id -or
+        [string]$receipt.successor_plan_hash -ne (Get-TextSha256 $planRaw) -or
+        [string]$receipt.successor_run_path -ne [IO.Path]::GetFullPath(
+            $ExpectedSuccessorRunDirectory
+        ).TrimEnd('\', '/') -or
+        (@($receipt.successor_milestone_ids) -join "`n") -ne
+            (@($plan.durable_review_profile.milestone_ids) -join "`n")) {
+        throw 'Abandoned successor authorization lineage changed.'
+    }
+    foreach ($property in @(
+        'checkpoint_material', 'additional_findings',
+        'unactivated_evidence_manifest', 'authorization_material'
+    )) {
+        $relative = [string]$receipt.("${property}_path")
+        $expectedHash = [string]$receipt.("${property}_hash")
+        $file = Join-Path $snapshot.run_root $relative
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or
+            $expectedHash -ne (
+                Get-FileHash -LiteralPath $file -Algorithm SHA256
+            ).Hash.ToLowerInvariant()) {
+            throw "Abandoned successor authorization material '$property' changed."
+        }
+    }
+    return $receipt
+}
+
 function Read-AbandonedSuccessorExportReceipt {
     param(
         [Parameter(Mandatory)][string] $Path,
@@ -2878,6 +2971,8 @@ function Read-AbandonedSuccessorExportReceipt {
         'unactivated_evidence_manifest_hash', 'checkpoint_material_path',
         'checkpoint_material_hash', 'successor_run_id',
         'successor_plan_hash', 'successor_run_path', 'successor_milestone_ids',
+        'authorization_receipt_path', 'authorization_receipt_hash',
+        'authorization_receipt_file_hash', 'authorization_event_hash',
         'authorization_material_path', 'authorization_material_hash',
         'activation_key', 'created_at_utc'
     )
@@ -2906,7 +3001,8 @@ function Read-AbandonedSuccessorExportReceipt {
     if ([string]$event.event -ne
             'durable-review-abandoned-successor-exported' -or
         [string]$event.result_receipt_hash -ne [string]$receipt.receipt_hash -or
-        [string]$event.prev_hash -ne [string]$receipt.abandoned_journal_head) {
+        [string]$event.prev_hash -ne [string]$receipt.abandoned_journal_head -or
+        [string]$event.idempotency_key -ne [string]$receipt.activation_key) {
         throw 'Abandoned successor export event does not bind the receipt.'
     }
     $planRaw = Get-Content -LiteralPath $SuccessorPlanPath -Raw
@@ -2934,6 +3030,29 @@ function Read-AbandonedSuccessorExportReceipt {
     )
     if (@($comparisons | Where-Object { $_[0] -ne $_[1] }).Count -gt 0) {
         throw 'Abandoned successor export no longer matches its bound runs.'
+    }
+    $authorizationPath = Join-Path $snapshot.run_root (
+        [string]$receipt.authorization_receipt_path
+    )
+    $authorization = Read-AbandonedSuccessorAuthorizationReceipt `
+        -Path $authorizationPath -AbandonedRunDirectory $snapshot.run_root `
+        -SuccessorPlanPath $SuccessorPlanPath `
+        -ExpectedSuccessorRunDirectory ([string]$receipt.successor_run_path)
+    if ([string]$receipt.authorization_receipt_hash -ne
+            [string]$authorization.receipt_hash -or
+        [string]$receipt.authorization_receipt_file_hash -ne (
+            Get-FileHash -LiteralPath $authorizationPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant() -or
+        [string]$receipt.authorization_event_hash -ne
+            [string]$events[-2].hash -or
+        [string]$events[-2].event -ne
+            'durable-review-abandoned-successor-authorized' -or
+        [string]$receipt.authorization_material_path -ne
+            [string]$authorization.authorization_material_path -or
+        [string]$receipt.authorization_material_hash -ne
+            [string]$authorization.authorization_material_hash -or
+        [string]$receipt.activation_key -ne [string]$authorization.activation_key) {
+        throw 'Abandoned successor export authorization anchor changed.'
     }
     if ((@($receipt.source_bindings) | ConvertTo-Json -Compress -Depth 100) -ne
         (@($snapshot.source_bindings) | ConvertTo-Json -Compress -Depth 100)) {

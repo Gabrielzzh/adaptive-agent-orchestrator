@@ -1228,7 +1228,7 @@ try {
         $changed | Set-Content -LiteralPath $abandonedEventsPath -Encoding utf8
         Assert-ThrowsLike {
             & (Join-Path $scriptRoot (
-                'New-AbandonedSuccessorExportReceipt.ps1'
+                'New-AbandonedSuccessorAuthorizationReceipt.ps1'
             )) -AbandonedRunDirectory $abandonedRun `
                 -SuccessorPlanPath $freshAbandonedPlanPath `
                 -SuccessorRunDirectory $freshAbandonedRun `
@@ -1269,7 +1269,7 @@ try {
         )
         Assert-ThrowsLike {
             & (Join-Path $scriptRoot (
-                'New-AbandonedSuccessorExportReceipt.ps1'
+                'New-AbandonedSuccessorAuthorizationReceipt.ps1'
             )) -AbandonedRunDirectory $abandonedRun `
                 -SuccessorPlanPath $freshAbandonedPlanPath `
                 -SuccessorRunDirectory $freshAbandonedRun `
@@ -1296,7 +1296,7 @@ try {
             Set-Content -LiteralPath $additionalPath -Encoding utf8
         Assert-ThrowsLike {
             & (Join-Path $scriptRoot (
-                'New-AbandonedSuccessorExportReceipt.ps1'
+                'New-AbandonedSuccessorAuthorizationReceipt.ps1'
             )) -AbandonedRunDirectory $abandonedRun `
                 -SuccessorPlanPath $freshAbandonedPlanPath `
                 -SuccessorRunDirectory $freshAbandonedRun `
@@ -1323,7 +1323,7 @@ try {
             Set-Content -LiteralPath $freshAbandonedPlanPath -Encoding utf8
         Assert-ThrowsLike {
             & (Join-Path $scriptRoot (
-                'New-AbandonedSuccessorExportReceipt.ps1'
+                'New-AbandonedSuccessorAuthorizationReceipt.ps1'
             )) -AbandonedRunDirectory $abandonedRun `
                 -SuccessorPlanPath $freshAbandonedPlanPath `
                 -SuccessorRunDirectory $freshAbandonedRun `
@@ -1349,7 +1349,7 @@ try {
             Set-Content -LiteralPath $freshAbandonedPlanPath -Encoding utf8
         Assert-ThrowsLike {
             & (Join-Path $scriptRoot (
-                'New-AbandonedSuccessorExportReceipt.ps1'
+                'New-AbandonedSuccessorAuthorizationReceipt.ps1'
             )) -AbandonedRunDirectory $abandonedRun `
                 -SuccessorPlanPath $freshAbandonedPlanPath `
                 -SuccessorRunDirectory $freshAbandonedRun `
@@ -1368,8 +1368,8 @@ try {
             -Encoding utf8
     }
 
-    $abandonedExport = & (Join-Path $scriptRoot (
-        'New-AbandonedSuccessorExportReceipt.ps1'
+    $authorizationAnchor = & (Join-Path $scriptRoot (
+        'New-AbandonedSuccessorAuthorizationReceipt.ps1'
     )) -AbandonedRunDirectory $abandonedRun `
         -SuccessorPlanPath $freshAbandonedPlanPath `
         -SuccessorRunDirectory $freshAbandonedRun `
@@ -1380,11 +1380,104 @@ try {
         -ActivationKey 'controller:abandon-successor-once' |
         ConvertFrom-Json -Depth 100
     Assert-True (
+        $authorizationAnchor.lineage_kind -eq
+            'abandoned-successor-authorization'
+    ) 'Abandoned successor authorization must be recorded before export.'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-AbandonedSuccessorAuthorizationReceipt.ps1'
+        )) -AbandonedRunDirectory $abandonedRun `
+            -SuccessorPlanPath $freshAbandonedPlanPath `
+            -SuccessorRunDirectory $freshAbandonedRun `
+            -CheckpointMaterialPath $abandonedCheckpoint `
+            -AdditionalFindingRecordsPath $additionalPath `
+            -UnactivatedEvidenceManifestPath $unactivatedManifestPath `
+            -AuthorizationMaterialPath $abandonmentAuthorization `
+            -ActivationKey 'controller:duplicate-authorization' | Out-Null
+    } 'already has an authorization anchor' (
+        'An abandoned successor cannot authorize two fresh runs.'
+    )
+    $authorizationReceiptPath = Join-Path $abandonedRun (
+        'receipts/durable-review-abandoned-successor.authorization.json'
+    )
+    $abandonedExport = & (Join-Path $scriptRoot (
+        'New-AbandonedSuccessorExportReceipt.ps1'
+    )) -AbandonedRunDirectory $abandonedRun `
+        -SuccessorPlanPath $freshAbandonedPlanPath `
+        -SuccessorRunDirectory $freshAbandonedRun `
+        -CheckpointMaterialPath $abandonedCheckpoint `
+        -AdditionalFindingRecordsPath $additionalPath `
+        -UnactivatedEvidenceManifestPath $unactivatedManifestPath `
+        -AuthorizationReceiptPath $authorizationReceiptPath |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
         @($abandonedExport.inherited_obligations).Count -eq 3 -and
         @($abandonedExport.source_bindings | Where-Object {
             $_.source_node_id -eq 'review'
         })[0].inherited_attempt_count -eq 1
     ) 'Abandoned export must preserve obligations and consumed attempts.'
+
+    $abandonedExportPath = Join-Path $abandonedRun (
+        'receipts/durable-review-abandoned-successor.export.json'
+    )
+    $abandonedExportRaw = Get-Content -LiteralPath $abandonedExportPath -Raw
+    $postExportLines = @(Get-Content -LiteralPath $abandonedEventsPath)
+    try {
+        $mutatedExport = $abandonedExportRaw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        $mutatedExport.activation_key = 'controller:resigned-export-key'
+        $mutatedExport.Remove('receipt_hash')
+        $mutatedExport.receipt_hash = Get-TextSha256 (
+            $mutatedExport | ConvertTo-Json -Compress -Depth 100
+        )
+        $mutatedExport | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $abandonedExportPath -Encoding utf8
+        $mutatedLines = @($postExportLines)
+        $tail = $mutatedLines[-1] |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        $tail.result_receipt_hash = $mutatedExport.receipt_hash
+        $tail.request_fingerprint = $mutatedExport.receipt_hash
+        $tail.idempotency_key = $mutatedExport.activation_key
+        $tail.Remove('hash')
+        $tail.hash = Get-OrchestrationEventHash ([pscustomobject]$tail)
+        $mutatedLines[-1] = $tail | ConvertTo-Json -Compress -Depth 100
+        $mutatedLines |
+            Set-Content -LiteralPath $abandonedEventsPath -Encoding utf8
+        Assert-ThrowsLike {
+            Read-AbandonedSuccessorExportReceipt `
+                -Path $abandonedExportPath `
+                -AbandonedRunDirectory $abandonedRun `
+                -SuccessorPlanPath $freshAbandonedPlanPath | Out-Null
+        } 'authorization anchor changed' (
+            'A re-signed export cannot replace the pre-bound activation key.'
+        )
+    }
+    finally {
+        Set-Content -LiteralPath $abandonedExportPath `
+            -Value $abandonedExportRaw -Encoding utf8
+        $postExportLines |
+            Set-Content -LiteralPath $abandonedEventsPath -Encoding utf8
+    }
+
+    $authorizationMaterialRaw = Get-Content `
+        -LiteralPath $abandonmentAuthorization -Raw
+    try {
+        Set-Content -LiteralPath $abandonmentAuthorization `
+            -Value 'changed controller authorization' -Encoding utf8
+        Assert-ThrowsLike {
+            Read-AbandonedSuccessorExportReceipt `
+                -Path $abandonedExportPath `
+                -AbandonedRunDirectory $abandonedRun `
+                -SuccessorPlanPath $freshAbandonedPlanPath | Out-Null
+        } 'authorization material' (
+            'Authorization material cannot change after its anchor event.'
+        )
+    }
+    finally {
+        Set-Content -LiteralPath $abandonmentAuthorization `
+            -Value $authorizationMaterialRaw -Encoding utf8 -NoNewline
+    }
+
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'New-AbandonedSuccessorExportReceipt.ps1') `
             -AbandonedRunDirectory $abandonedRun `
@@ -1393,8 +1486,7 @@ try {
             -CheckpointMaterialPath $abandonedCheckpoint `
             -AdditionalFindingRecordsPath $additionalPath `
             -UnactivatedEvidenceManifestPath $unactivatedManifestPath `
-            -AuthorizationMaterialPath $abandonmentAuthorization `
-            -ActivationKey 'controller:abandon-successor-twice' | Out-Null
+            -AuthorizationReceiptPath $authorizationReceiptPath | Out-Null
     } 'already has an export' (
         'An abandoned successor cannot fork or export twice.'
     )

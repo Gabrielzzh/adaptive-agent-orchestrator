@@ -403,7 +403,7 @@ same ordered source/role/thread set, declares
 each source enough `max_attempts` to preserve already consumed attempts.
 
 ```powershell
-pwsh -File scripts/New-AbandonedSuccessorExportReceipt.ps1 `
+pwsh -File scripts/New-AbandonedSuccessorAuthorizationReceipt.ps1 `
   -AbandonedRunDirectory <abandoned-run> `
   -SuccessorPlanPath <fresh-plan> -SuccessorRunDirectory <fresh-run> `
   -CheckpointMaterialPath <abandoned-run>/materials/<checkpoint>.json `
@@ -412,6 +412,15 @@ pwsh -File scripts/New-AbandonedSuccessorExportReceipt.ps1 `
   -AuthorizationMaterialPath <abandoned-run>/materials/<authorization>.md `
   -ActivationKey "controller:<stable-authority-reference>"
 
+pwsh -File scripts/New-AbandonedSuccessorExportReceipt.ps1 `
+  -AbandonedRunDirectory <abandoned-run> `
+  -SuccessorPlanPath <fresh-plan> -SuccessorRunDirectory <fresh-run> `
+  -CheckpointMaterialPath <abandoned-run>/materials/<checkpoint>.json `
+  -AdditionalFindingRecordsPath <abandoned-run>/materials/<findings>.json `
+  -UnactivatedEvidenceManifestPath <abandoned-run>/materials/<manifest>.json `
+  -AuthorizationReceiptPath `
+    <abandoned-run>/receipts/durable-review-abandoned-successor.authorization.json
+
 pwsh -File scripts/New-AbandonedSuccessorRun.ps1 `
   -PlanPath <fresh-plan> -RunDirectory <fresh-run> `
   -WorkspaceRoot <workspace> -AbandonedRunDirectory <abandoned-run> `
@@ -419,8 +428,11 @@ pwsh -File scripts/New-AbandonedSuccessorRun.ps1 `
     <abandoned-run>/receipts/durable-review-abandoned-successor.export.json
 ```
 
-The export and adoption are single-use and append-only. They bind the original
-successor adoption chain, journal head/count, cancelled event, source
+The authorization, export, and adoption are single-use and append-only. Export
+cannot generate or replace controller authorization: it consumes the earlier
+authorization receipt/event and must preserve its material hash and activation
+key. Together they bind the original successor adoption chain, journal
+head/count, cancelled event, source
 identities, checkpoint, authorization, all inherited and added P1 occurrences,
 target plan/run/milestones, and the non-completion evidence manifest. The fresh
 genesis carries consumed attempt counts in `source-attempt-carried` events.
