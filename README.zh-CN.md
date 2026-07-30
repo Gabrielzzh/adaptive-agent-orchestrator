@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[English](README.md) · [v0.7.10 正式版说明](docs/releases/v0.7.10.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+[English](README.md) · [v0.7.11 正式版说明](docs/releases/v0.7.11.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
 
 ![Adaptive Agent Orchestrator v0.7.0 发布图](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -47,6 +47,10 @@
 - **跨里程碑审核推进：** 同一个长期审核 run 可通过追加式收据激活下一条已
   声明里程碑，精确绑定来源链并要求主 Agent重新验收；无需改写 plan，也不
   会按文件时间猜测“最新结果”。
+- **分阶段问题守恒：** 当前里程碑已完成本阶段职责、但仍保留后续阶段的
+  P0/P1 时，可先固定唯一的 scope transition，再按计划进入下一里程碑。
+  每条问题必须按来源、严重度与原文继续存在或经同来源复审解决；阶段推进不
+  等于主任务最终验收。
 - **首里程碑版本复审：** 在推进下一里程碑前，可事先授权一次版本复审，
   让每个必需的只读来源重新审查，并只采用一组精确、完整的新结论；旧证据
   继续保留，但不能事后冒充本轮正式结果。
@@ -214,13 +218,13 @@ $adaptive-agent-orchestrator。共享上下文留在主 Agent，Worker 只拿引
 
 ## 验证情况
 
-v0.7.10 正式版本通过：
+v0.7.11 正式版本通过：
 
-- 47 个 PowerShell 脚本语法解析；
+- 48 个 PowerShell 脚本语法解析；
 - 66 项恢复协议专项断言；
-- 79 项 durable milestone、revision 与 successor-run 专项断言；
+- 91 项 durable milestone、revision 与 successor-run 专项断言；
 - 15 项 run policy activation 专项断言；
-- 787 项完整自测断言；
+- 799 项完整自测断言；
 - 59 份故意构造的非法负面案例均被正确拦截；
 - 8 个 reference JSON 文件严格解析；
 - 计划、元数据、日志、handoff、依赖、幂等、所有权、上下文重叠、渐进
@@ -247,6 +251,9 @@ v0.7.10 正式版本通过：
 - 真实首里程碑版本复审在授权后重新启用同一两组只读来源，取得累计复审
   结果并唯一选定 checkpoint10：11 条后续 P1 来源记录全部保留，旧的已解决
   问题没有回流，且没有发现新的 Orchestrator P0/P1；占卜研发已进入下一组。
+- 真实 37-event run 通过预授权进入计划内 Group2：11 条 P1 中 4 条经同
+  来源复审解决、7 条继续保留；completion 仍因这 7 条问题和缺少主任务最终
+  验收保持 `BLOCKED`，P1-03 至 P1-06 没有回流。
 
 ```powershell
 pwsh -NoProfile -File `

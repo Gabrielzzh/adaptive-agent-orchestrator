@@ -331,6 +331,19 @@ partially reviewed revision blocks completion, and selection does not replace
 fresh main-owner acceptance.
 The activation must also bind controller material that fixes the later
 main-owner acceptance key and evidence path/hash.
+If a reviewed milestone intentionally retains P0/P1 work assigned to the next
+declared milestone, do not falsely mark it finally accepted and do not stop the
+sequence. First append
+`New-DurableReviewScopeTransitionAuthorizationReceipt.ps1`, which pre-binds the
+exact next milestone, selection material, controller material, and scope key.
+Then consume that receipt with the activation command documented in
+[workflow-contract.md](references/workflow-contract.md). The activation must
+conserve every prior open occurrence under the same source, thread, severity,
+exact text/hash, and canonical identity; resolved occurrences need same-source
+re-review, while remaining occurrences continue to block overall completion.
+This scoped transition is not final main acceptance and cannot validate the
+main node. Replacing the scope key or controller material only in the later
+activation is rejected.
 After all active P0/P1 findings are resolved, the main integration owner must
 record a fresh `New-DurableReviewMilestoneAcceptanceReceipt.ps1` bound to that
 activation, its source bindings, checkpoint, and acceptance evidence. A main

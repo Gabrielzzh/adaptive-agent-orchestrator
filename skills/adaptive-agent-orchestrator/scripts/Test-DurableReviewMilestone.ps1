@@ -35,7 +35,10 @@ function Assert-ThrowsLike {
 }
 
 function New-ReviewPlan {
-    param([string] $Path)
+    param(
+        [string] $Path,
+        [string[]] $MilestoneIds = @('method-1', 'method-2')
+    )
     $plan = Get-Content -LiteralPath (
         Join-Path $skillRoot 'references/example-plan.json'
     ) -Raw | ConvertFrom-Json -AsHashtable -Depth 100
@@ -99,7 +102,7 @@ function New-ReviewPlan {
         main_owner_node_id = 'integrate'
         domain_node_ids = @('domain')
         dissent_node_ids = @('review')
-        milestone_ids = @('method-1', 'method-2')
+        milestone_ids = @($MilestoneIds)
         consumer_output = 'result-only'
     }
     $plan | ConvertTo-Json -Depth 100 |
@@ -248,6 +251,41 @@ function New-SourceChain {
     }
 }
 
+function Invoke-ScopeTransitionActivation {
+    param(
+        [Parameter(Mandatory)][string] $Run,
+        [Parameter(Mandatory)][string] $SelectionPath,
+        [Parameter(Mandatory)][string] $ScopeTransitionKey,
+        [Parameter(Mandatory)][string] $ActivationKey
+    )
+    & (Join-Path $scriptRoot (
+        'New-DurableReviewScopeTransitionAuthorizationReceipt.ps1'
+    )) -RunDirectory $Run -MilestoneId 'scope-3' `
+        -SelectionPath $SelectionPath `
+        -ScopeTransitionAuthorizationMaterialPath (
+            Join-Path $Run 'materials/scope-2-to-scope-3-transition.md'
+        ) -ScopeTransitionKey $ScopeTransitionKey `
+        -ActivationKey "$ActivationKey.authorization" | Out-Null
+    $scopeAuthorizationReceiptPath = Join-Path $Run (
+        'receipts/durable-review-milestone.scope-3.' +
+        'scope-transition-authorization.json'
+    )
+    & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneActivationReceipt.ps1'
+    )) -RunDirectory $Run -MilestoneId 'scope-3' `
+        -SelectionPath $SelectionPath `
+        -AuthorizationMaterialPath (
+            Join-Path $Run 'materials/scope-3-authorization.md'
+        ) -AcceptanceAuthorizationMaterialPath (
+            Join-Path $Run (
+                'materials/scope-3-acceptance-authorization.json'
+            )
+        ) -ScopeTransitionAuthorizationReceiptPath (
+            $scopeAuthorizationReceiptPath
+        ) `
+        -ActivationKey $ActivationKey
+}
+
 function Convert-SourceChainToHistoricalAlias {
     param(
         [string] $Run,
@@ -312,6 +350,58 @@ function Resign-AcceptanceTail {
         $receipt.evidence_material_hash
     $event.idempotency_key = $receipt.acceptance_key
     $event.request_fingerprint = $receipt.receipt_hash
+    $event.Remove('hash')
+    $event.hash = Get-OrchestrationEventHash ([pscustomobject]$event)
+    $eventLines[-1] = $event | ConvertTo-Json -Compress -Depth 100
+    $eventLines | Set-Content -LiteralPath $eventsPath -Encoding utf8
+}
+
+function Resign-ScopeActivationTail {
+    param(
+        [string] $Run,
+        [scriptblock] $ReceiptMutation
+    )
+    $receiptPath = Join-Path $Run (
+        'receipts/durable-review-milestone.scope-3.activation.json'
+    )
+    $receipt = Get-Content -LiteralPath $receiptPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $oldMaterialPath =
+        [string]$receipt.scope_transition_authorization_material_path
+    & $ReceiptMutation $receipt
+    $receipt.Remove('receipt_hash')
+    $receipt.receipt_hash = Get-TextSha256 (
+        $receipt | ConvertTo-Json -Compress -Depth 100
+    )
+    $receipt | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $receiptPath -Encoding utf8
+
+    $eventsPath = Join-Path $Run 'events.jsonl'
+    $eventLines = @(Get-Content -LiteralPath $eventsPath)
+    $event = $eventLines[-1] |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $event.milestone_activation_receipt_hash = $receipt.receipt_hash
+    $event.scope_transition_authorization_receipt_path =
+        $receipt.scope_transition_authorization_receipt_path
+    $event.scope_transition_authorization_receipt_hash =
+        $receipt.scope_transition_authorization_receipt_hash
+    $event.scope_transition_authorization_material_path =
+        $receipt.scope_transition_authorization_material_path
+    $event.scope_transition_authorization_material_hash =
+        $receipt.scope_transition_authorization_material_hash
+    $event.scope_transition_key = $receipt.scope_transition_key
+    $event.request_fingerprint = $receipt.receipt_hash
+    if ($oldMaterialPath -ne
+        [string]$receipt.scope_transition_authorization_material_path) {
+        $oldPointer = "artifact:$oldMaterialPath"
+        $newPointer = (
+            'artifact:' +
+            [string]$receipt.scope_transition_authorization_material_path
+        )
+        $event.evidence = @($event.evidence | ForEach-Object {
+            if ([string]$_ -eq $oldPointer) { $newPointer } else { $_ }
+        })
+    }
     $event.Remove('hash')
     $event.hash = Get-OrchestrationEventHash ([pscustomobject]$event)
     $eventLines[-1] = $event | ConvertTo-Json -Compress -Depth 100
@@ -1588,6 +1678,483 @@ try {
         )) -RunDirectory $run -MilestoneId 'method-2' | Out-Null
     } 'unresolved P0/P1' (
         'Main-owner acceptance cannot precede resolution of active blockers.'
+    )
+
+    # A later declared milestone may resolve part of the active P1 inventory
+    # while carrying the rest forward. Requiring final main acceptance before
+    # that transition would deadlock the declared milestone sequence.
+    $scopePlanPath = Join-Path $testRoot 'scope-transition-plan.json'
+    New-ReviewPlan -Path $scopePlanPath -MilestoneIds @(
+        'scope-1', 'scope-2', 'scope-3'
+    )
+    $scopeRun = Join-Path $testRoot 'scope-transition-run'
+    & (Join-Path $scriptRoot 'New-OrchestrationRun.ps1') `
+        -PlanPath $scopePlanPath -RunDirectory $scopeRun `
+        -WorkspaceRoot $testRoot | Out-Null
+    foreach ($directory in @('materials', 'thread-reads', 'receipts')) {
+        $path = Join-Path $scopeRun $directory
+        if (-not (Test-Path -LiteralPath $path)) {
+            $null = New-Item -ItemType Directory -Path $path
+        }
+    }
+    $scopeCheckpoint1 = Join-Path $scopeRun 'materials/scope-1.json'
+    Set-Content -LiteralPath $scopeCheckpoint1 -Value '{"scope":1}'
+    $scopeBaselineReview = New-SourceChain -Run $scopeRun `
+        -SourceNodeId 'review' -ThreadId 'review-thread' `
+        -MilestoneId 'scope-1' -CheckpointPath $scopeCheckpoint1 `
+        -Stem 'review' -Severity 'P1' `
+        -FindingText 'scope-baseline-review' -Resolution 'resolved'
+    $scopeBaselineDomain = New-SourceChain -Run $scopeRun `
+        -SourceNodeId 'domain' -ThreadId 'domain-thread' `
+        -MilestoneId 'scope-1' -CheckpointPath $scopeCheckpoint1 `
+        -Stem 'domain' -Severity 'P1' `
+        -FindingText 'scope-baseline-domain' -Resolution 'resolved'
+    Convert-SourceChainToHistoricalAlias -Run $scopeRun `
+        -Chain $scopeBaselineReview -Alias 'scope-1-historical'
+    Convert-SourceChainToHistoricalAlias -Run $scopeRun `
+        -Chain $scopeBaselineDomain -Alias 'scope-1-historical'
+    Complete-SourceLifecycle -Run $scopeRun -SourceNodeId 'review' `
+        -ThreadId 'review-thread' `
+        -ResultRelativePath $scopeBaselineReview.result_path
+    Complete-SourceLifecycle -Run $scopeRun -SourceNodeId 'domain' `
+        -ThreadId 'domain-thread' `
+        -ResultRelativePath $scopeBaselineDomain.result_path
+    foreach ($status in @('running', 'completed', 'validated')) {
+        $arguments = @{
+            RunDirectory = $scopeRun
+            NodeId = 'integrate'
+            Status = $status
+            Message = "scope integrate $status"
+            IdempotencyKey = "scope-integrate-$status"
+        }
+        if ($status -eq 'completed') {
+            $arguments.Evidence = @('observation:scope-baseline-integrated')
+        }
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') @arguments |
+            Out-Null
+    }
+    $scopeArtifact = Join-Path $testRoot 'artifacts/final'
+    if (-not (Test-Path -LiteralPath $scopeArtifact)) {
+        $null = New-Item -ItemType Directory -Path $scopeArtifact -Force
+    }
+    Set-Content -LiteralPath (Join-Path $scopeArtifact 'result.md') `
+        -Value 'scope transition result'
+
+    $scopeCheckpoint2 = Join-Path $scopeRun 'materials/scope-2.json'
+    Set-Content -LiteralPath $scopeCheckpoint2 -Value '{"scope":2}'
+    $scopeReview2 = New-SourceChain -Run $scopeRun `
+        -SourceNodeId 'review' -ThreadId 'review-thread' `
+        -MilestoneId 'scope-2' -CheckpointPath $scopeCheckpoint2 `
+        -Stem 'scope-2-review' -Severity 'P1' `
+        -FindingText 'scope-review-p1' -Resolution 'open' `
+        -FindingId 'scope-review-p1' `
+        -CanonicalFindingId 'scope-review-p1'
+    $scopeDomain2 = New-SourceChain -Run $scopeRun `
+        -SourceNodeId 'domain' -ThreadId 'domain-thread' `
+        -MilestoneId 'scope-2' -CheckpointPath $scopeCheckpoint2 `
+        -Stem 'scope-2-domain' -Severity 'P1' `
+        -FindingText 'scope-domain-p1' -Resolution 'open' `
+        -FindingId 'scope-domain-p1' `
+        -CanonicalFindingId 'scope-domain-p1'
+    $scopeSelection2 = Join-Path $scopeRun 'materials/scope-2-selection.json'
+    @(
+        [ordered]@{
+            source_node_id = 'review'
+            result_receipt_path = $scopeReview2.result_path
+            disposition_receipt_path = $scopeReview2.disposition_path
+        },
+        [ordered]@{
+            source_node_id = 'domain'
+            result_receipt_path = $scopeDomain2.result_path
+            disposition_receipt_path = $scopeDomain2.disposition_path
+        }
+    ) | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $scopeSelection2
+    $scopeAuthorization2 = Join-Path $scopeRun (
+        'materials/scope-2-authorization.md'
+    )
+    Set-Content -LiteralPath $scopeAuthorization2 `
+        -Value 'Controller activates scope-2.'
+    $scopeAcceptanceEvidence2 = Join-Path $scopeRun (
+        'materials/scope-2-main-acceptance.md'
+    )
+    Set-Content -LiteralPath $scopeAcceptanceEvidence2 `
+        -Value 'Main owner acceptance evidence for scope-2.'
+    $scopeAcceptanceAuthorization2 = Join-Path $scopeRun (
+        'materials/scope-2-acceptance-authorization.json'
+    )
+    [ordered]@{
+        schema_version = '1.0'
+        milestone_id = 'scope-2'
+        main_node_id = 'integrate'
+        acceptance_key = 'controller:accept-scope-2'
+        evidence_material_path = 'materials/scope-2-main-acceptance.md'
+        evidence_material_hash = (
+            Get-FileHash -LiteralPath $scopeAcceptanceEvidence2 `
+                -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+    } | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $scopeAcceptanceAuthorization2
+    & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneActivationReceipt.ps1'
+    )) -RunDirectory $scopeRun -MilestoneId 'scope-2' `
+        -SelectionPath $scopeSelection2 `
+        -AuthorizationMaterialPath $scopeAuthorization2 `
+        -AcceptanceAuthorizationMaterialPath $scopeAcceptanceAuthorization2 `
+        -ActivationKey 'controller:activate-scope-2' | Out-Null
+
+    $scopeCheckpoint3 = Join-Path $scopeRun 'materials/scope-3.json'
+    Set-Content -LiteralPath $scopeCheckpoint3 -Value '{"scope":3}'
+    $scopeReview3 = New-SourceChain -Run $scopeRun `
+        -SourceNodeId 'review' -ThreadId 'review-thread' `
+        -MilestoneId 'scope-3' -CheckpointPath $scopeCheckpoint3 `
+        -Stem 'scope-3-review' -Severity 'P1' `
+        -FindingText 'scope-review-p1' -Resolution 'resolved' `
+        -FindingId 'scope-review-p1' `
+        -CanonicalFindingId 'scope-review-p1'
+    $scopeDomain3 = New-SourceChain -Run $scopeRun `
+        -SourceNodeId 'domain' -ThreadId 'domain-thread' `
+        -MilestoneId 'scope-3' -CheckpointPath $scopeCheckpoint3 `
+        -Stem 'scope-3-domain' -Severity 'P1' `
+        -FindingText 'scope-domain-p1' -Resolution 'open' `
+        -FindingId 'scope-domain-p1' `
+        -CanonicalFindingId 'scope-domain-p1'
+    $scopeSelection3 = Join-Path $scopeRun 'materials/scope-3-selection.json'
+    @(
+        [ordered]@{
+            source_node_id = 'review'
+            result_receipt_path = $scopeReview3.result_path
+            disposition_receipt_path = $scopeReview3.disposition_path
+        },
+        [ordered]@{
+            source_node_id = 'domain'
+            result_receipt_path = $scopeDomain3.result_path
+            disposition_receipt_path = $scopeDomain3.disposition_path
+        }
+    ) | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $scopeSelection3
+    $scopeAuthorization3 = Join-Path $scopeRun (
+        'materials/scope-3-authorization.md'
+    )
+    Set-Content -LiteralPath $scopeAuthorization3 `
+        -Value 'Controller activates scope-3.'
+    $scopeTransitionAuthorization = Join-Path $scopeRun (
+        'materials/scope-2-to-scope-3-transition.md'
+    )
+    Set-Content -LiteralPath $scopeTransitionAuthorization -Value (
+        'Controller accepts the scope-2 boundary and carries unresolved ' +
+        'source occurrences into scope-3 without final acceptance.'
+    )
+    $scopeAcceptanceEvidence3 = Join-Path $scopeRun (
+        'materials/scope-3-main-acceptance.md'
+    )
+    Set-Content -LiteralPath $scopeAcceptanceEvidence3 `
+        -Value 'Main owner acceptance evidence for scope-3.'
+    $scopeAcceptanceAuthorization3 = Join-Path $scopeRun (
+        'materials/scope-3-acceptance-authorization.json'
+    )
+    [ordered]@{
+        schema_version = '1.0'
+        milestone_id = 'scope-3'
+        main_node_id = 'integrate'
+        acceptance_key = 'controller:accept-scope-3'
+        evidence_material_path = 'materials/scope-3-main-acceptance.md'
+        evidence_material_hash = (
+            Get-FileHash -LiteralPath $scopeAcceptanceEvidence3 `
+                -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+    } | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $scopeAcceptanceAuthorization3
+    $scopeReadyRun = Join-Path $testRoot 'scope-transition-ready'
+    Copy-Item -LiteralPath $scopeRun -Destination $scopeReadyRun -Recurse
+    $scopeJournalHash = (
+        Get-FileHash -LiteralPath (Join-Path $scopeRun 'events.jsonl') `
+            -Algorithm SHA256
+    ).Hash
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneActivationReceipt.ps1'
+        )) -RunDirectory $scopeRun -MilestoneId 'scope-3' `
+            -SelectionPath $scopeSelection3 `
+            -AuthorizationMaterialPath $scopeAuthorization3 `
+            -AcceptanceAuthorizationMaterialPath $scopeAcceptanceAuthorization3 `
+            -ActivationKey 'controller:scope-3-without-transition' | Out-Null
+    } 'lacks main-owner acceptance' (
+        'Ordinary activation cannot bypass the prior final acceptance gate.'
+    )
+    Assert-True (
+        $scopeJournalHash -eq (
+            Get-FileHash -LiteralPath (Join-Path $scopeRun 'events.jsonl') `
+                -Algorithm SHA256
+        ).Hash
+    ) 'Rejected ordinary activation must not mutate the journal.'
+
+    $missingCarryRun = Join-Path $testRoot 'scope-transition-missing-carry'
+    Copy-Item -LiteralPath $scopeReadyRun -Destination $missingCarryRun -Recurse
+    $missingDomain = New-SourceChain -Run $missingCarryRun `
+        -SourceNodeId 'domain' -ThreadId 'domain-thread' `
+        -MilestoneId 'scope-3' -CheckpointPath (
+            Join-Path $missingCarryRun 'materials/scope-3.json'
+        ) -Stem 'scope-3-domain-missing' -Severity 'P1' `
+        -FindingText 'replacement cannot erase the old occurrence' `
+        -Resolution 'open' -FindingId 'different-domain-p1' `
+        -CanonicalFindingId 'different-domain-p1'
+    $missingSelectionPath = Join-Path $missingCarryRun (
+        'materials/scope-3-selection.json'
+    )
+    $missingSelection = @(
+        Get-Content -LiteralPath $missingSelectionPath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 20
+    )
+    $missingSelection[1].result_receipt_path = $missingDomain.result_path
+    $missingSelection[1].disposition_receipt_path =
+        $missingDomain.disposition_path
+    $missingSelection | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $missingSelectionPath
+    Assert-ThrowsLike {
+        Invoke-ScopeTransitionActivation -Run $missingCarryRun `
+            -SelectionPath $missingSelectionPath `
+            -ScopeTransitionKey 'controller:scope-2-to-scope-3' `
+            -ActivationKey 'controller:reject-missing-carry' | Out-Null
+    } 'lost a carry-forward occurrence' (
+        'A later milestone cannot omit an open source finding occurrence.'
+    )
+
+    $downgradedCarryRun = Join-Path $testRoot (
+        'scope-transition-severity-downgrade'
+    )
+    Copy-Item -LiteralPath $scopeReadyRun `
+        -Destination $downgradedCarryRun -Recurse
+    $downgradedReview = New-SourceChain -Run $downgradedCarryRun `
+        -SourceNodeId 'review' -ThreadId 'review-thread' `
+        -MilestoneId 'scope-3' -CheckpointPath (
+            Join-Path $downgradedCarryRun 'materials/scope-3.json'
+        ) -Stem 'scope-3-review-downgraded' -Severity 'P2' `
+        -FindingText 'scope-review-p1' -Resolution 'resolved' `
+        -FindingId 'scope-review-p1' `
+        -CanonicalFindingId 'scope-review-p1'
+    $downgradedSelectionPath = Join-Path $downgradedCarryRun (
+        'materials/scope-3-selection.json'
+    )
+    $downgradedSelection = @(
+        Get-Content -LiteralPath $downgradedSelectionPath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 20
+    )
+    $downgradedSelection[0].result_receipt_path =
+        $downgradedReview.result_path
+    $downgradedSelection[0].disposition_receipt_path =
+        $downgradedReview.disposition_path
+    $downgradedSelection | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $downgradedSelectionPath
+    Assert-ThrowsLike {
+        Invoke-ScopeTransitionActivation -Run $downgradedCarryRun `
+            -SelectionPath $downgradedSelectionPath `
+            -ScopeTransitionKey 'controller:scope-2-to-scope-3' `
+            -ActivationKey 'controller:reject-carry-downgrade' | Out-Null
+    } 'changed a carry-forward occurrence' (
+        'A carried P1 cannot be downgraded to P2.'
+    )
+
+    $textDriftCarryRun = Join-Path $testRoot 'scope-transition-text-drift'
+    Copy-Item -LiteralPath $scopeReadyRun `
+        -Destination $textDriftCarryRun -Recurse
+    $textDriftReview = New-SourceChain -Run $textDriftCarryRun `
+        -SourceNodeId 'review' -ThreadId 'review-thread' `
+        -MilestoneId 'scope-3' -CheckpointPath (
+            Join-Path $textDriftCarryRun 'materials/scope-3.json'
+        ) -Stem 'scope-3-review-text-drift' -Severity 'P1' `
+        -FindingText 'scope-review-p1-rewritten' -Resolution 'resolved' `
+        -FindingId 'scope-review-p1' `
+        -CanonicalFindingId 'scope-review-p1'
+    $textDriftCarrySelectionPath = Join-Path $textDriftCarryRun (
+        'materials/scope-3-selection.json'
+    )
+    $textDriftCarrySelection = @(
+        Get-Content -LiteralPath $textDriftCarrySelectionPath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 20
+    )
+    $textDriftCarrySelection[0].result_receipt_path =
+        $textDriftReview.result_path
+    $textDriftCarrySelection[0].disposition_receipt_path =
+        $textDriftReview.disposition_path
+    $textDriftCarrySelection | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $textDriftCarrySelectionPath
+    Assert-ThrowsLike {
+        Invoke-ScopeTransitionActivation -Run $textDriftCarryRun `
+            -SelectionPath $textDriftCarrySelectionPath `
+            -ScopeTransitionKey 'controller:scope-2-to-scope-3' `
+            -ActivationKey 'controller:reject-carry-text-drift' | Out-Null
+    } 'changed a carry-forward occurrence' (
+        'A carried finding cannot change its exact text or text hash.'
+    )
+
+    $crossSourceCarryRun = Join-Path $testRoot (
+        'scope-transition-cross-source'
+    )
+    Copy-Item -LiteralPath $scopeReadyRun `
+        -Destination $crossSourceCarryRun -Recurse
+    $crossSourceReview = New-SourceChain -Run $crossSourceCarryRun `
+        -SourceNodeId 'review' -ThreadId 'review-thread' `
+        -MilestoneId 'scope-3' -CheckpointPath (
+            Join-Path $crossSourceCarryRun 'materials/scope-3.json'
+        ) -Stem 'scope-3-review-cross-source' -Severity 'P1' `
+        -FindingText 'scope-domain-p1' -Resolution 'open' `
+        -FindingId 'scope-domain-p1' `
+        -CanonicalFindingId 'scope-domain-p1'
+    $crossSourceDomain = New-SourceChain -Run $crossSourceCarryRun `
+        -SourceNodeId 'domain' -ThreadId 'domain-thread' `
+        -MilestoneId 'scope-3' -CheckpointPath (
+            Join-Path $crossSourceCarryRun 'materials/scope-3.json'
+        ) -Stem 'scope-3-domain-cross-source' -Severity 'P1' `
+        -FindingText 'scope-review-p1' -Resolution 'resolved' `
+        -FindingId 'scope-review-p1' `
+        -CanonicalFindingId 'scope-review-p1'
+    $crossSourceSelectionPath = Join-Path $crossSourceCarryRun (
+        'materials/scope-3-selection.json'
+    )
+    @(
+        [ordered]@{
+            source_node_id = 'review'
+            result_receipt_path = $crossSourceReview.result_path
+            disposition_receipt_path = $crossSourceReview.disposition_path
+        },
+        [ordered]@{
+            source_node_id = 'domain'
+            result_receipt_path = $crossSourceDomain.result_path
+            disposition_receipt_path = $crossSourceDomain.disposition_path
+        }
+    ) | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $crossSourceSelectionPath
+    Assert-ThrowsLike {
+        Invoke-ScopeTransitionActivation -Run $crossSourceCarryRun `
+            -SelectionPath $crossSourceSelectionPath `
+            -ScopeTransitionKey 'controller:scope-2-to-scope-3' `
+            -ActivationKey 'controller:reject-cross-source-carry' | Out-Null
+    } 'lost a carry-forward occurrence' (
+        'Canonical overlap cannot move a source occurrence to another source.'
+    )
+
+    $fullyResolvedCarryRun = Join-Path $testRoot (
+        'scope-transition-fully-resolved'
+    )
+    Copy-Item -LiteralPath $scopeReadyRun `
+        -Destination $fullyResolvedCarryRun -Recurse
+    $resolvedDomain = New-SourceChain -Run $fullyResolvedCarryRun `
+        -SourceNodeId 'domain' -ThreadId 'domain-thread' `
+        -MilestoneId 'scope-3' -CheckpointPath (
+            Join-Path $fullyResolvedCarryRun 'materials/scope-3.json'
+        ) -Stem 'scope-3-domain-resolved' -Severity 'P1' `
+        -FindingText 'scope-domain-p1' -Resolution 'resolved' `
+        -FindingId 'scope-domain-p1' `
+        -CanonicalFindingId 'scope-domain-p1'
+    $fullyResolvedSelectionPath = Join-Path $fullyResolvedCarryRun (
+        'materials/scope-3-selection.json'
+    )
+    $fullyResolvedSelection = @(
+        Get-Content -LiteralPath $fullyResolvedSelectionPath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 20
+    )
+    $fullyResolvedSelection[1].result_receipt_path = $resolvedDomain.result_path
+    $fullyResolvedSelection[1].disposition_receipt_path =
+        $resolvedDomain.disposition_path
+    $fullyResolvedSelection | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $fullyResolvedSelectionPath
+    Assert-ThrowsLike {
+        Invoke-ScopeTransitionActivation -Run $fullyResolvedCarryRun `
+            -SelectionPath $fullyResolvedSelectionPath `
+            -ScopeTransitionKey 'controller:scope-2-to-scope-3' `
+            -ActivationKey 'controller:reject-final-acceptance-bypass' |
+            Out-Null
+    } 'cannot bypass final main acceptance' (
+        'Once every prior blocker is resolved, final main acceptance is required.'
+    )
+
+    Assert-ThrowsLike {
+        Invoke-ScopeTransitionActivation -Run $scopeReadyRun `
+            -SelectionPath (
+                Join-Path $scopeReadyRun 'materials/scope-3-selection.json'
+            ) -ScopeTransitionKey 'Controller:scope-2-to-scope-3' `
+            -ActivationKey 'controller:reject-scope-key-case' | Out-Null
+    } 'stable, exact user: or controller: keys' (
+        'Scope transition keys are exact and cannot use a case variant.'
+    )
+
+    $scopeActivation = Invoke-ScopeTransitionActivation `
+        -Run $scopeReadyRun -SelectionPath (
+            Join-Path $scopeReadyRun 'materials/scope-3-selection.json'
+        ) -ScopeTransitionKey 'controller:scope-2-to-scope-3' `
+        -ActivationKey 'controller:activate-scope-3' |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$scopeActivation.schema_version -eq '1.2' -and
+        [string]$scopeActivation.previous_milestone_gate -eq
+            'scoped-carry-forward' -and
+        [int]$scopeActivation.previous_open_occurrence_count -eq 2 -and
+        [int]$scopeActivation.remaining_open_occurrence_count -eq 1
+    ) (
+        'Scoped activation must record exact prior and remaining occurrence ' +
+        'counts without claiming final acceptance.'
+    )
+    $scopeCompletionError = ''
+    try {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $scopeReadyRun | Out-Null
+    } catch { $scopeCompletionError = $_.Exception.Message }
+    Assert-True (
+        $scopeCompletionError -like '*scope-domain-p1*' -and
+        $scopeCompletionError -like '*lacks main-owner acceptance*' -and
+        $scopeCompletionError -notlike '*scope-review-p1*'
+    ) (
+        'Completion must select the next milestone, keep only its unresolved ' +
+        'occurrences, and still require independent final main acceptance.'
+    )
+
+    $resignedScopeKeyRun = Join-Path $testRoot (
+        'scope-transition-resigned-key'
+    )
+    Copy-Item -LiteralPath $scopeReadyRun `
+        -Destination $resignedScopeKeyRun -Recurse
+    Resign-ScopeActivationTail -Run $resignedScopeKeyRun `
+        -ReceiptMutation {
+            param($receipt)
+            $receipt.scope_transition_key =
+                'user:replacement-scope-authority'
+        }
+    Assert-ThrowsLike {
+        Read-DurableReviewMilestoneActivationChain `
+            -RunDirectory $resignedScopeKeyRun | Out-Null
+    } 'pre-existing authorization' (
+        'Changing the scope key in the activation receipt and journal tail ' +
+        'cannot replace the earlier authorization.'
+    )
+
+    $resignedScopePathRun = Join-Path $testRoot (
+        'scope-transition-resigned-material'
+    )
+    Copy-Item -LiteralPath $scopeReadyRun `
+        -Destination $resignedScopePathRun -Recurse
+    $alternateScopeMaterial = Join-Path $resignedScopePathRun (
+        'materials/alternate-scope-transition.md'
+    )
+    Set-Content -LiteralPath $alternateScopeMaterial `
+        -Value 'A different scope transition authority.'
+    $alternateScopeMaterialHash = (
+        Get-FileHash -LiteralPath $alternateScopeMaterial -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    Resign-ScopeActivationTail -Run $resignedScopePathRun `
+        -ReceiptMutation {
+            param($receipt)
+            $receipt.scope_transition_authorization_material_path =
+                'materials/alternate-scope-transition.md'
+            $receipt.scope_transition_authorization_material_hash =
+                $alternateScopeMaterialHash
+        }
+    Assert-ThrowsLike {
+        Read-DurableReviewMilestoneActivationChain `
+            -RunDirectory $resignedScopePathRun | Out-Null
+    } 'pre-existing authorization' (
+        'Changing the scope material path and hash in the activation tail ' +
+        'cannot replace the earlier authorization.'
     )
 
     Assert-ThrowsLike {

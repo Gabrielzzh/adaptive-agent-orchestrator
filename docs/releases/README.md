@@ -7,6 +7,7 @@ release records.
 
 | Version | Channel | Focus | Details |
 | --- | --- | --- | --- |
+| `v0.7.11` | Stable | Scoped durable-review milestone progression | [Notes](v0.7.11.md) |
 | `v0.7.10` | Stable | First-milestone review revisions and verified recovery re-entry | [Notes](v0.7.10.md) |
 | `v0.7.9` | Stable | Per-review-cycle durable-source recovery | [Notes](v0.7.9.md) |
 | `v0.7.8` | Stable | Append-only abandoned-successor recovery | [Notes](v0.7.8.md) |

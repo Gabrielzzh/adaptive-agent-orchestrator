@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory)][string] $SelectionPath,
     [Parameter(Mandatory)][string] $AuthorizationMaterialPath,
     [Parameter(Mandatory)][string] $AcceptanceAuthorizationMaterialPath,
+    [string] $ScopeTransitionAuthorizationReceiptPath = '',
     [Parameter(Mandatory)][string] $ActivationKey
 )
 
@@ -46,11 +47,36 @@ if ([string]$chain.next_milestone_id -ne $MilestoneId) {
         "'$($chain.active_milestone_id)'."
     )
 }
+$scopeAuthorizationProvided = -not [string]::IsNullOrWhiteSpace(
+    $ScopeTransitionAuthorizationReceiptPath
+)
+$previousMilestoneGate = 'baseline'
 if (-not [string]::IsNullOrWhiteSpace(
     [string]$chain.activation_receipt_hash
 )) {
-    $null = Read-DurableReviewMilestoneAcceptance `
-        -RunDirectory $runRoot -MilestoneChain $chain
+    try {
+        $null = Read-DurableReviewMilestoneAcceptance `
+            -RunDirectory $runRoot -MilestoneChain $chain
+        $previousMilestoneGate = 'main-owner-acceptance'
+    } catch {
+        if ($_.Exception.Message -notlike
+            '*lacks main-owner acceptance.') {
+            throw
+        }
+        if (-not $scopeAuthorizationProvided) {
+            throw
+        }
+        $previousMilestoneGate = 'scoped-carry-forward'
+    }
+} elseif ($scopeAuthorizationProvided) {
+    throw 'Baseline milestone activation cannot claim a scoped transition.'
+}
+if ($scopeAuthorizationProvided -and
+    $previousMilestoneGate -ne 'scoped-carry-forward') {
+    throw (
+        'Scoped milestone transition is only valid when unresolved P0/P1 ' +
+        'prevent prior final main acceptance.'
+    )
 }
 $milestoneIds = @(
     $plan.durable_review_profile.milestone_ids | ForEach-Object { [string]$_ }
@@ -160,6 +186,114 @@ $checkpointHashes = @($bindings |
 if ($checkpointPaths.Count -ne 1 -or $checkpointHashes.Count -ne 1) {
     throw 'All milestone sources must bind the same checkpoint material.'
 }
+$scopeTransitionRelativePath = ''
+$scopeTransitionHash = ''
+$scopeTransitionKey = ''
+$scopeAuthorizationReceiptRelativePath = ''
+$scopeAuthorizationReceiptHash = ''
+$carryForward = $null
+if ($previousMilestoneGate -eq 'scoped-carry-forward') {
+    $scopeAuthorizationReceiptFullPath = Resolve-RunFile (
+        $ScopeTransitionAuthorizationReceiptPath
+    ) 'Scoped milestone transition authorization receipt'
+    $scopeAuthorizationReceipt =
+        Read-DurableReviewScopeTransitionAuthorization `
+            -Path $scopeAuthorizationReceiptFullPath -RunDirectory $runRoot
+    $scopeAuthorizationReceiptRelativePath = [IO.Path]::GetRelativePath(
+        $runRoot, $scopeAuthorizationReceiptFullPath
+    ).Replace('\', '/')
+    $scopeAuthorizationReceiptHash =
+        [string]$scopeAuthorizationReceipt.receipt_hash
+    $scopeTransitionFullPath = Resolve-RunFile (
+        Join-Path $runRoot (
+            [string]$scopeAuthorizationReceipt.
+                scope_transition_authorization_material_path
+        )
+    ) 'Scoped milestone transition authorization'
+    $scopeTransitionKey =
+        [string]$scopeAuthorizationReceipt.scope_transition_key
+    $scopeTransitionRelativePath = [IO.Path]::GetRelativePath(
+        $runRoot, $scopeTransitionFullPath
+    ).Replace('\', '/')
+    $scopeTransitionHash = (
+        Get-FileHash -LiteralPath $scopeTransitionFullPath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    $selectionRelativePathForAuthorization = [IO.Path]::GetRelativePath(
+        $runRoot, $selectionFullPath
+    ).Replace('\', '/')
+    $selectionHashForAuthorization = (
+        Get-FileHash -LiteralPath $selectionFullPath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    $expectedPreviousBindingsHash = Get-TextSha256 (
+        @($chain.active_source_bindings) |
+            ConvertTo-Json -Compress -Depth 30
+    )
+    $authorizationEventCount =
+        [int]$scopeAuthorizationReceipt.source_journal_event_count
+    if ([string]$scopeAuthorizationReceipt.previous_milestone_id -ne
+            [string]$chain.active_milestone_id -or
+        [string]$scopeAuthorizationReceipt.previous_activation_receipt_path -ne
+            [string]$chain.activation_receipt_path -or
+        [string]$scopeAuthorizationReceipt.previous_activation_receipt_hash -ne
+            [string]$chain.activation_receipt_hash -or
+        [string]$scopeAuthorizationReceipt.previous_source_bindings_hash -ne
+            $expectedPreviousBindingsHash -or
+        [string]$scopeAuthorizationReceipt.milestone_id -ne $MilestoneId -or
+        [int]$scopeAuthorizationReceipt.milestone_index -ne $milestoneIndex -or
+        [string]$scopeAuthorizationReceipt.selection_material_path -ne
+            $selectionRelativePathForAuthorization -or
+        [string]$scopeAuthorizationReceipt.selection_material_hash -ne
+            $selectionHashForAuthorization -or
+        [string]$scopeAuthorizationReceipt.checkpoint_material_path -ne
+            [string]$checkpointPaths[0] -or
+        [string]$scopeAuthorizationReceipt.checkpoint_material_hash -ne
+            [string]$checkpointHashes[0] -or
+        $events.Count -ne ($authorizationEventCount + 1) -or
+        [string]$events[-1].event -ne
+            'milestone-scope-transition-authorized' -or
+        [string]$events[-1].scope_transition_authorization_receipt_path -ne
+            $scopeAuthorizationReceiptRelativePath -or
+        [string]$events[-1].scope_transition_authorization_receipt_hash -ne
+            $scopeAuthorizationReceiptHash) {
+        throw (
+            'Scoped milestone transition activation does not match its ' +
+            'pre-existing authorization.'
+        )
+    }
+    $carryForward = Get-DurableReviewScopedCarryForward `
+        -RunDirectory $runRoot `
+        -PreviousSourceBindings @($chain.active_source_bindings) `
+        -NextSourceBindings @($bindings)
+    if ([int]$carryForward.previous_open_count -lt 1) {
+        throw (
+            'Scoped milestone transition requires at least one prior open ' +
+            'P0/P1 occurrence; use final main acceptance otherwise.'
+        )
+    }
+    if ([int]$carryForward.remaining_open_count -lt 1) {
+        throw (
+            'Scoped milestone transition cannot bypass final main acceptance ' +
+            'after every prior P0/P1 occurrence is resolved.'
+        )
+    }
+    $carryHash = Get-TextSha256 (
+        @($carryForward.occurrences) |
+            ConvertTo-Json -Compress -Depth 50
+    )
+    if ([string]$scopeAuthorizationReceipt.carry_forward_occurrences_hash -ne
+            $carryHash -or
+        [int]$scopeAuthorizationReceipt.previous_open_occurrence_count -ne
+            [int]$carryForward.previous_open_count -or
+        [int]$scopeAuthorizationReceipt.resolved_occurrence_count -ne
+            [int]$carryForward.resolved_count -or
+        [int]$scopeAuthorizationReceipt.remaining_open_occurrence_count -ne
+            [int]$carryForward.remaining_open_count) {
+        throw (
+            'Scoped milestone transition carry-forward changed after ' +
+            'authorization.'
+        )
+    }
+}
 
 $receiptDirectory = Join-Path $runRoot 'receipts'
 $receiptName = "durable-review-milestone.$MilestoneId.activation.json"
@@ -177,7 +311,9 @@ $acceptanceAuthorizationRelativePath = [IO.Path]::GetRelativePath(
     $runRoot, $acceptanceAuthorizationFullPath
 ).Replace('\', '/')
 $payload = [ordered]@{
-    schema_version = '1.1'
+    schema_version = if (
+        $previousMilestoneGate -eq 'scoped-carry-forward'
+    ) { '1.2' } else { '1.1' }
     run_id = [string]$run.run_id
     plan_hash = [string]$run.plan_hash
     milestone_id = $MilestoneId
@@ -226,6 +362,28 @@ $payload = [ordered]@{
     activation_key = $ActivationKey
     created_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
 }
+if ($previousMilestoneGate -eq 'scoped-carry-forward') {
+    $payload.previous_milestone_gate = $previousMilestoneGate
+    $payload.scope_transition_authorization_receipt_path =
+        $scopeAuthorizationReceiptRelativePath
+    $payload.scope_transition_authorization_receipt_hash =
+        $scopeAuthorizationReceiptHash
+    $payload.scope_transition_authorization_material_path =
+        $scopeTransitionRelativePath
+    $payload.scope_transition_authorization_material_hash =
+        $scopeTransitionHash
+    $payload.scope_transition_key = $ScopeTransitionKey
+    $payload.carry_forward_occurrences = @($carryForward.occurrences)
+    $payload.carry_forward_occurrences_hash = Get-TextSha256 (
+        @($carryForward.occurrences) |
+            ConvertTo-Json -Compress -Depth 50
+    )
+    $payload.previous_open_occurrence_count =
+        [int]$carryForward.previous_open_count
+    $payload.resolved_occurrence_count = [int]$carryForward.resolved_count
+    $payload.remaining_open_occurrence_count =
+        [int]$carryForward.remaining_open_count
+}
 $receipt = [ordered]@{}
 foreach ($key in $payload.Keys) { $receipt[$key] = $payload[$key] }
 $receipt.receipt_hash = Get-TextSha256 (
@@ -253,6 +411,15 @@ try {
     Move-Item -LiteralPath $tempReceiptPath -Destination $receiptPath
     $runPolicy = Resolve-OrchestrationRunPolicy -RunDirectory $runRoot `
         -Events $currentEvents
+    $eventEvidence = @(
+        "artifact:receipts/$receiptName",
+        "artifact:$authorizationRelativePath",
+        "artifact:$acceptanceAuthorizationRelativePath"
+    )
+    if ($previousMilestoneGate -eq 'scoped-carry-forward') {
+        $eventEvidence += "artifact:$scopeAuthorizationReceiptRelativePath"
+        $eventEvidence += "artifact:$scopeTransitionRelativePath"
+    }
     $event = [ordered]@{
         sequence = $currentEvents.Count
         prev_hash = [string]$currentEvents[-1].hash
@@ -285,13 +452,29 @@ try {
         coordination_tokens_delta = 0
         usage_source = 'none'
         error_class = $null
-        evidence = @(
-            "artifact:receipts/$receiptName",
-            "artifact:$authorizationRelativePath",
-            "artifact:$acceptanceAuthorizationRelativePath"
-        )
+        evidence = $eventEvidence
         idempotency_key = $ActivationKey
         request_fingerprint = [string]$receipt.receipt_hash
+    }
+    if ($previousMilestoneGate -eq 'scoped-carry-forward') {
+        $event.previous_milestone_gate = $previousMilestoneGate
+        $event.scope_transition_authorization_receipt_path =
+            $scopeAuthorizationReceiptRelativePath
+        $event.scope_transition_authorization_receipt_hash =
+            $scopeAuthorizationReceiptHash
+        $event.scope_transition_authorization_material_path =
+            $scopeTransitionRelativePath
+        $event.scope_transition_authorization_material_hash =
+            $scopeTransitionHash
+        $event.scope_transition_key = $ScopeTransitionKey
+        $event.carry_forward_occurrences_hash =
+            [string]$receipt.carry_forward_occurrences_hash
+        $event.previous_open_occurrence_count =
+            [int]$receipt.previous_open_occurrence_count
+        $event.resolved_occurrence_count =
+            [int]$receipt.resolved_occurrence_count
+        $event.remaining_open_occurrence_count =
+            [int]$receipt.remaining_open_occurrence_count
     }
     if (-not [string]::IsNullOrWhiteSpace(
         [string]$runPolicy.activation_receipt_path

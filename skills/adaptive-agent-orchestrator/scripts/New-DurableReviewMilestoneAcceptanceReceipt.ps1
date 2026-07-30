@@ -19,7 +19,7 @@ $events = @(Read-OrchestrationJournal $eventsPath)
 $chain = Read-DurableReviewMilestoneActivationChain -RunDirectory $runRoot
 if ([string]$chain.active_milestone_id -ne $MilestoneId -or
     [string]::IsNullOrWhiteSpace([string]$chain.activation_receipt_hash) -or
-    [string]$chain.activation_receipt.schema_version -ne '1.1') {
+    [string]$chain.activation_receipt.schema_version -notin @('1.1', '1.2')) {
     throw 'Main-owner acceptance requires the active non-baseline milestone.'
 }
 $AcceptanceKey = [string]$chain.activation_receipt.acceptance_key
