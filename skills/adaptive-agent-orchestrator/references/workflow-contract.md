@@ -362,4 +362,8 @@ Every agent or main node completion event includes at least one typed evidence
 pointer using `artifact:`, `test:`, `source:`, or `observation:`. A generic
 success claim without a type is rejected. Typed pointers improve auditability
 but do not prove provenance; the main agent still verifies the referenced
-material before marking the node `validated`.
+material before marking the node `validated`. Pass each pointer as a separate
+`Evidence` array item. A shell-collapsed value such as
+`artifact:path,observation:note` is rejected before journal append; an ordinary
+comma inside one value remains valid when it does not introduce another typed
+pointer.

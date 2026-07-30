@@ -3566,6 +3566,44 @@ try {
     Assert-True $emptyEvidenceCaught (
         'Completion evidence must use a typed evidence pointer.'
     )
+    $joinedJournalPath = Join-Path $questionRun 'events.jsonl'
+    $joinedJournalHashBefore = (
+        Get-FileHash -LiteralPath $joinedJournalPath -Algorithm SHA256
+    ).Hash
+    $joinedEvidenceCaught = $false
+    try {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $questionRun -NodeId 'draft' -Status 'completed' `
+            -Message 'joined evidence must fail before journal append' `
+            -Evidence @(
+                'artifact:artifacts/draft/output.md,' +
+                'observation:joined-by-cli'
+            ) -IdempotencyKey 'question-joined-evidence' | Out-Null
+    }
+    catch {
+        $joinedEvidenceCaught = (
+            $_.Exception.Message -like '*multiple typed pointers*'
+        )
+    }
+    Assert-True $joinedEvidenceCaught (
+        'A comma-joined typed Evidence value must fail before journal append.'
+    )
+    Assert-True (
+        (Get-FileHash -LiteralPath $joinedJournalPath -Algorithm SHA256).Hash -eq
+            $joinedJournalHashBefore
+    ) 'Rejected joined Evidence must not change the immutable journal.'
+    $commaObservationEvent = & (
+        Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1'
+    ) -RunDirectory $questionRun -NodeId 'draft' -Status 'completed' `
+        -Message 'ordinary comma remains valid inside one observation' `
+        -Evidence @(
+            'artifact:artifacts/draft/output.md',
+            'observation:summary,with-comma'
+        ) -IdempotencyKey 'question-valid-comma-evidence' |
+        ConvertFrom-Json -Depth 50
+    Assert-True (
+        @($commaObservationEvent.evidence).Count -eq 2
+    ) 'A comma without another typed prefix must remain valid evidence text.'
 
     $metadataRun = Join-Path $testRoot 'metadata-run'
     & (Join-Path $scriptRoot 'New-OrchestrationRun.ps1') `
