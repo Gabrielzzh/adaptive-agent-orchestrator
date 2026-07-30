@@ -1249,7 +1249,8 @@ try {
     $draftReceiptPath = Join-Path $runDirectory $draftReceiptRelative
     $draftReceipt = & (
         Join-Path $scriptRoot 'New-ThreadResultReceipt.ps1'
-    ) -RunDirectory $runDirectory -ThreadId 'test-thread-draft' `
+    ) -RunDirectory $runDirectory -SourceNodeId 'draft' `
+        -ThreadId 'test-thread-draft' `
         -HostId 'opaque-host-1' -ThreadReadPath $draftReadPath `
         -OutputPath $draftReceiptPath `
         -PendingFindingRecordsPath $draftFindingsPath |
@@ -1290,7 +1291,8 @@ try {
     $legacyReceipt | ConvertTo-Json -Depth 20 |
         Set-Content -LiteralPath $legacyReceiptPath
     $legacyVerified = Read-ThreadResultReceipt -Path $legacyReceiptPath `
-        -ExpectedThreadId 'test-thread-draft' -RunDirectory $runDirectory
+        -ExpectedThreadId 'test-thread-draft' -ExpectedSourceNodeId 'draft' `
+        -RunDirectory $runDirectory
     Assert-True ($legacyVerified.schema_version -eq '1.1') (
         'The pending-findings schema must preserve legacy receipt readability.'
     )
@@ -1321,7 +1323,8 @@ try {
     $legacy12Receipt | ConvertTo-Json -Depth 20 |
         Set-Content -LiteralPath $legacy12ReceiptPath
     $legacy12Verified = Read-ThreadResultReceipt -Path $legacy12ReceiptPath `
-        -ExpectedThreadId 'test-thread-draft' -RunDirectory $runDirectory
+        -ExpectedThreadId 'test-thread-draft' -ExpectedSourceNodeId 'draft' `
+        -RunDirectory $runDirectory
     Assert-True ($legacy12Verified.schema_version -eq '1.2') (
         'Schema 1.2 receipts should remain readable as historical evidence.'
     )
@@ -1564,7 +1567,8 @@ try {
         Set-Content -LiteralPath $runningReadPath
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'New-ThreadResultReceipt.ps1') `
-            -RunDirectory $runDirectory -ThreadId 'test-thread-draft' `
+            -RunDirectory $runDirectory -SourceNodeId 'draft' `
+            -ThreadId 'test-thread-draft' `
             -HostId 'opaque-host-1' -ThreadReadPath $runningReadPath `
             -OutputPath (
                 Join-Path $runDirectory 'receipts/running.thread-result-receipt.json'
@@ -3639,6 +3643,14 @@ try {
     }
     Assert-True $tamperCaught 'Tampered journal should be rejected.'
 
+    $recoveryProtocol = & (
+        Join-Path $scriptRoot 'Test-RecoveryProtocol.ps1'
+    ) | ConvertFrom-Json -Depth 20
+    Assert-True $recoveryProtocol.passed (
+        'Durable missing-final recovery protocol should pass its attack suite.'
+    )
+    $script:assertionCount += [int]$recoveryProtocol.assertions
+
     [pscustomobject]@{
         passed = $true
         assertions = $script:assertionCount
@@ -3671,6 +3683,7 @@ try {
         queued_setup_verified = $true
         task_completion_receipt_verified = $true
         durable_review_profile_verified = $true
+        durable_result_recovery_verified = $true
     } | ConvertTo-Json -Depth 5
 }
 finally {

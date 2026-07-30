@@ -148,6 +148,32 @@ the handoff; limit the complete serialized payload and do not copy raw
 reasoning or unrelated chat history. A failed fresh attempt must receive a new
 thread ID on retry.
 
+### Missing final answer and bounded replacement
+
+A turn reported as completed but lacking a final answer is
+`result_pending`, not completed, failed, or timed out. Use
+`final_missing_with_progress_evidence` when commentary or tool activity is
+visible. Capture only immutable hashes of that progress for audit; never expose
+internal traces as consumer output or treat them as the source result.
+
+Recovery stays on the same source node, role, original thread, checkpoint, and
+input. Append one immutable recovery receipt per attempt, at most three. After
+attempt 3, the source becomes `replacement_eligible`; it does not pass.
+A replacement requires controller authorization captured as real material and
+hashed, the complete 3/3 recovery chain, the same role contract and checkpoint,
+a distinct replacement thread, and a read-only non-delegating source node.
+The replacement may satisfy only that source obligation and must be labeled as
+a replacement. It cannot substitute for another durable role or claim that the
+original thread passed.
+
+Legacy durable sources may lack machine identifiers and immutable captures that
+the current protocol requires. Never synthesize those values. A one-time legacy
+adoption receipt assigns a new stable source/role identity while binding the
+actual role material, checkpoint/input material, four observed turn states,
+explicit unknown fields, and controller authorization. Legacy adoption alone
+never satisfies completion; only a valid replacement result followed by the
+normal disposition and re-review gates can do so.
+
 ## Worker contract
 
 Every task packet must say:
@@ -170,6 +196,8 @@ Use:
 
 ```text
 planned -> launch_reserved -> materializing -> materialized -> running -> needs_input
+        -> result_pending -> running
+        -> result_pending -> replacement_pending -> running
         -> completed -> validated -> adopted -> archived
         -> failed | cancelled | rejected | unknown
 ```

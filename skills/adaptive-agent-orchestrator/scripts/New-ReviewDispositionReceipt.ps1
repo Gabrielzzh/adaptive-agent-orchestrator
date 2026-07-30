@@ -39,7 +39,8 @@ if (-not (Test-Path -LiteralPath $decisionsFullPath -PathType Leaf)) {
     throw "Review decisions do not exist: $decisionsFullPath"
 }
 $source = Read-ThreadResultReceipt -Path $sourcePath `
-    -ExpectedThreadId $SourceThreadId -RunDirectory $runRoot
+    -ExpectedThreadId $SourceThreadId -ExpectedSourceNodeId $SourceNodeId `
+    -RunDirectory $runRoot
 if ([string]$source.schema_version -ne '1.3') {
     throw (
         'Durable review disposition requires a schema 1.3 source receipt ' +

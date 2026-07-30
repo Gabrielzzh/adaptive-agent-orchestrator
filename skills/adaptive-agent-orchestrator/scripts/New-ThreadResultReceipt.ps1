@@ -1,10 +1,12 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string] $RunDirectory,
+    [Parameter(Mandatory)][string] $SourceNodeId,
     [Parameter(Mandatory)][string] $ThreadId,
     [Parameter(Mandatory)][string] $HostId,
     [Parameter(Mandatory)][string] $ThreadReadPath,
     [Parameter(Mandatory)][string] $OutputPath,
+    [string] $ReplacementContinuityReceiptPath,
     [string] $PendingFindingRecordsPath,
     [string[]] $PendingFindings = @(),
     [string[]] $AdoptedFindings = @(),
@@ -34,6 +36,14 @@ if ([IO.Path]::GetFileName($OutputPath) -notlike '*.thread-result-receipt.json')
     throw 'OutputPath must end with .thread-result-receipt.json.'
 }
 $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+$plan = Get-Content -LiteralPath (Join-Path $runRoot 'plan.json') -Raw |
+    ConvertFrom-Json -Depth 100 -DateKind String
+$sourceNode = @($plan.nodes | Where-Object {
+    [string]$_.id -eq $SourceNodeId
+}) | Select-Object -First 1
+if ($null -eq $sourceNode) {
+    throw 'Thread result source node does not exist in the run plan.'
+}
 $captureFullPath = [IO.Path]::GetFullPath($ThreadReadPath)
 $outputFullPath = [IO.Path]::GetFullPath($OutputPath)
 foreach ($candidate in @($captureFullPath, $outputFullPath)) {
@@ -53,6 +63,29 @@ if (@($captureSegments | Where-Object {
 }
 $final = Read-ThreadReadCapture -Path $captureFullPath `
     -ExpectedThreadId $ThreadId
+$sourceKind = 'original'
+$replacementRelativePath = ''
+$replacementHash = ''
+if (-not [string]::IsNullOrWhiteSpace($ReplacementContinuityReceiptPath)) {
+    $replacementFullPath = [IO.Path]::GetFullPath(
+        $ReplacementContinuityReceiptPath
+    )
+    if (-not $replacementFullPath.StartsWith(
+        $runRoot + [IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'Replacement continuity receipt must remain inside the run.'
+    }
+    $replacement = Read-ReplacementContinuityReceipt `
+        -Path $replacementFullPath -RunDirectory $runRoot `
+        -ExpectedSourceNodeId $SourceNodeId `
+        -ExpectedReplacementThreadId $ThreadId
+    $sourceKind = 'replacement'
+    $replacementRelativePath = [IO.Path]::GetRelativePath(
+        $runRoot, $replacementFullPath
+    ).Replace('\', '/')
+    $replacementHash = [string]$replacement.receipt_hash
+}
 $structuredPending = @()
 if (-not [string]::IsNullOrWhiteSpace($PendingFindingRecordsPath)) {
     if (@($PendingFindings + $AdoptedFindings + $RejectedFindings).Count -gt 0) {
@@ -136,6 +169,8 @@ if ($structuredPending.Count -gt 0) {
 }
 $receipt = [ordered]@{
     schema_version = if ($structuredPending.Count -gt 0) { '1.3' } else { '1.2' }
+    source_node_id = $SourceNodeId
+    source_kind = $sourceKind
     thread_id = $ThreadId
     host_id = $HostId
     collection_method = 'read_thread'
@@ -144,6 +179,8 @@ $receipt = [ordered]@{
     final_turn_id = $final.final_turn_id
     final_status = 'completed'
     final_content_hash = $final.final_content_hash
+    replacement_continuity_receipt_path = $replacementRelativePath
+    replacement_continuity_receipt_hash = $replacementHash
     adopted_findings = $receiptAdopted
     rejected_findings = $receiptRejected
     pending_findings = $receiptPending

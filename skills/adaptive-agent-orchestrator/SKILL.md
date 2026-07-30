@@ -322,6 +322,24 @@ finding remains unresolved. P2 may be deferred only with rationale and
 evidence. Consumer-facing output remains result-only unless an unresolved risk
 or user decision must be disclosed.
 
+If a durable source turn completes without a final answer, record
+`result_pending` with
+`failure_class=final_missing_with_progress_evidence`; visible commentary or
+tool traffic is hash-bound progress evidence, never a result. Make at most
+three same-thread, same-role, same-checkpoint recovery attempts using
+`New-ThreadResultRecoveryReceipt.ps1`. Only a complete 3/3 chain may authorize
+one same-role read-only replacement through
+`New-ReplacementContinuityReceipt.ps1`. A replacement result remains bound to
+the original logical source, is labeled `replacement`, and never claims the
+original task passed.
+
+For an older durable task that lacks machine source IDs or original input/read
+hashes, do not invent them. With controller authorization, capture the real
+role text, checkpoint/input material, four turn-status records, unknown fields,
+and authorization text in `New-LegacySourceAdoptionReceipt.ps1`. That receipt
+only establishes replacement eligibility; it is never a result receipt or a
+completion signal.
+
 For durable runs:
 
 ```powershell

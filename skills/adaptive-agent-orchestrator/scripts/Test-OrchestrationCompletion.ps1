@@ -68,6 +68,7 @@ foreach ($nodeId in @($plan.completion.required_nodes)) {
         try {
             $null = Read-ThreadResultReceipt `
                 -Path $receiptPath -ExpectedThreadId $nodeState.thread_id `
+                -ExpectedSourceNodeId $nodeId `
                 -RunDirectory $RunDirectory
         } catch {
             $errors.Add(

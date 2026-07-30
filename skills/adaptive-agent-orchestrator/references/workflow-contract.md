@@ -209,6 +209,20 @@ source identity before adding its canonical cross-source ID. Schema 1.1 and
 1.2 receipts remain readable as history but fail closed for durable
 disposition and completion. Durable completion always blocks both P0 and P1;
 the plan may add P2 but cannot narrow the required set.
+
+When a durable source has no final answer, its node enters `result_pending`.
+The only legal continuations are a bounded same-source recovery or, after a
+verified 3/3 recovery chain, `replacement_pending` followed by the bound
+replacement thread. Neither pending state satisfies a dependency or completion
+gate. A replacement result uses the same logical `source_node_id`, declares
+`source_kind=replacement`, and binds its replacement-continuity receipt.
+
+For legacy sources, `New-LegacySourceAdoptionReceipt.ps1` captures observable
+material and explicitly lists unavailable machine fields. This migration path
+does not backfill or infer old hashes. The adoption receipt is single-use and
+only permits a replacement at the captured checkpoint; a checkpoint change
+requires new authorization and a new source contract.
+
 - `session_policy`: `fresh` by default, or explicitly justified `reuse`;
 - `continuity_key`: stable workstream identity;
 - optional `selection_reason`: controller-only diagnostic justification for
