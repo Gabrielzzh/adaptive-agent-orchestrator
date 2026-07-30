@@ -1,0 +1,43 @@
+{
+  "schema_version": "1.0",
+  "purpose": "Sanitized real-adoption summaries for missing-final recovery tests. These are protocol fixtures, not source results.",
+  "cases": [
+    {
+      "case_id": "multi-divination-traditional-review",
+      "original_thread_id": "019faee2-33b5-7cd2-b1d3-8884fba1c9ae",
+      "checkpoint_hash": "d254e4476c682a7762136061e1f54453282b719d8c26798619ac0b323eeb334f",
+      "original_attempts": 1,
+      "bounded_recovery_attempts": 3,
+      "final_answer_state": "missing",
+      "progress_evidence_state": "commentary-hash-only",
+      "completion_state": "blocked",
+      "next_state": "replacement-eligible"
+    },
+    {
+      "case_id": "multi-divination-adversarial-review",
+      "original_thread_id": "019faee2-78ec-7c40-831a-787eede7cde3",
+      "checkpoint_hash": "d254e4476c682a7762136061e1f54453282b719d8c26798619ac0b323eeb334f",
+      "original_attempts": 1,
+      "bounded_recovery_attempts": 3,
+      "final_answer_state": "missing",
+      "progress_evidence_state": "none",
+      "completion_state": "blocked",
+      "next_state": "replacement-eligible"
+    },
+    {
+      "case_id": "orchestrator-protocol-review",
+      "original_thread_id": null,
+      "checkpoint_hash": null,
+      "original_attempts": 1,
+      "bounded_recovery_attempts": 1,
+      "final_answer_state": "missing",
+      "progress_evidence_state": "progress-hash-only",
+      "completion_state": "blocked",
+      "next_state": "same-source-recovery",
+      "unknown_fields": [
+        "original_thread_id",
+        "checkpoint_hash"
+      ]
+    }
+  ]
+}

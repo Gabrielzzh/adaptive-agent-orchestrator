@@ -312,6 +312,51 @@ try {
         'A successful create call with a returned task ID must never be ' +
         'converted into no_match merely because list visibility is delayed.'
     )
+    $queuedSetup = Get-Content -LiteralPath $doubleEmptyPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 20
+    $queuedSetup.create_call.status = 'success'
+    $queuedSetup.create_call.returned_thread_id = $null
+    $queuedSetup.create_call.client_thread_id = 'queued-worktree-client-1'
+    $queuedSetupPath = Join-Path $reconcileRun (
+        'thread-reconcile-queued-setup.json'
+    )
+    $queuedSetup | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $queuedSetupPath
+    $queuedSetupResult = & (
+        Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1'
+    ) -InputPath $queuedSetupPath -OutputPath (
+        Join-Path $reconcileRun (
+            'receipts/queued-setup.thread-reconciliation.json'
+        )
+    ) | ConvertFrom-Json -Depth 20
+    Assert-True (
+        $queuedSetupResult.decision -eq 'setup_pending' -and
+        $queuedSetupResult.returned_thread_id -eq $null -and
+        $queuedSetupResult.returned_client_thread_id -eq
+            'queued-worktree-client-1'
+    ) 'A clientThreadId alone must remain setup_pending, not materialized.'
+    $queuedEnded = Get-Content -LiteralPath $queuedSetupPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 20
+    $queuedEnded.snapshots[1].captured_at = '2026-07-20T00:02:00Z'
+    $queuedEndedPath = Join-Path $reconcileRun (
+        'thread-reconcile-queued-setup-ended.json'
+    )
+    $queuedEnded | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $queuedEndedPath
+    $queuedEndedResult = & (
+        Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1'
+    ) -InputPath $queuedEndedPath -OutputPath (
+        Join-Path $reconcileRun (
+            'receipts/queued-setup-ended.thread-reconciliation.json'
+        )
+    ) | ConvertFrom-Json -Depth 20
+    Assert-True (
+        $queuedEndedResult.decision -eq 'setup_failed_or_unresolved' -and
+        $queuedEndedResult.decision -ne 'no_match'
+    ) (
+        'A queued worktree that never materializes must not authorize a ' +
+        'blind replacement task.'
+    )
     $tooFastEmpty = Get-Content -LiteralPath $doubleEmptyPath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 20
     $tooFastEmpty.snapshots[1].captured_at = '2026-07-20T00:00:10.001Z'
@@ -334,13 +379,21 @@ try {
                 Join-Path $reconcileRun 'receipts/unsafe-delay.thread-reconciliation.json'
             ) -MinVisibilityDelaySeconds 1 | Out-Null
     } 'MinVisibilityDelaySeconds' (
-        'The visibility delay may be increased but must never be reduced below five seconds.'
+        'The visibility delay may be increased but must never be reduced below forty seconds.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1') `
+            -InputPath $endedEmptyPath -OutputPath (
+                Join-Path $reconcileRun 'receipts/long-delay.thread-reconciliation.json'
+            ) -MinVisibilityDelaySeconds 15 | Out-Null
+    } 'MinVisibilityDelaySeconds' (
+        'A fifteen-second no-match window must not override the Codex safety floor.'
     )
     $longDelayResult = & (
         Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1'
     ) -InputPath $endedEmptyPath -OutputPath (
         Join-Path $reconcileRun 'receipts/long-delay.thread-reconciliation.json'
-    ) -MinVisibilityDelaySeconds 15 | ConvertFrom-Json -Depth 20
+    ) -MinVisibilityDelaySeconds 60 | ConvertFrom-Json -Depth 20
     Assert-True ($longDelayResult.decision -eq 'no_match') (
         'A longer platform visibility delay should remain supported.'
     )
@@ -401,7 +454,7 @@ try {
     $calibrationAdd = & $calibrationScript -Action Add `
         -ProjectRoot $calibrationProject -RunDirectory $reconcileRun `
         -MinWindowUsed 20 -AppVersion '26.7.26' -HostKind 'desktop' `
-        -ExecutionMode local -PolicyVersion '0.7.0' |
+        -ExecutionMode local -PolicyVersion '0.7.2' |
         ConvertFrom-Json -Depth 30
     Assert-True (
         $verifiedReceiptCount -gt 0 -and
@@ -424,7 +477,7 @@ try {
     $calibrationRepeat = & $calibrationScript -Action Add `
         -ProjectRoot $calibrationProject -RunDirectory $reconcileRun `
         -MinWindowUsed 20 -AppVersion '26.7.26' -HostKind 'desktop' `
-        -ExecutionMode local -PolicyVersion '0.7.0' |
+        -ExecutionMode local -PolicyVersion '0.7.2' |
         ConvertFrom-Json -Depth 30
     Assert-True (
         $calibrationRepeat.added -eq 0 -and
@@ -443,7 +496,7 @@ try {
         & $calibrationScript -Action Add -ProjectRoot $calibrationProject `
             -RunDirectory $reconcileRun -AppVersion '26.7.26' `
             -HostKind 'desktop' -ExecutionMode local `
-            -PolicyVersion '0.7.0' | Out-Null
+            -PolicyVersion '0.7.2' | Out-Null
     } 'hash mismatch' 'Calibration must reject a tampered receipt.'
     Set-Content -LiteralPath $adoptedReceiptPath -Value $adoptedReceiptRaw
 
@@ -465,7 +518,7 @@ try {
             app_version = '26.7.26'
             host_kind = 'desktop'
             execution_mode = 'local'
-            policy_version = '0.7.0'
+            policy_version = '0.7.2'
         } | ConvertTo-Json -Compress))
     }
     $seedCalibrationLines.Add(([ordered]@{
@@ -678,20 +731,124 @@ try {
         $workflowPreset.limits.transient_reserved_slots -eq 2
     ) 'Runtime capacity should clamp the 4+2 target without hiding transient reserve.'
 
+    $surfaceScript = Join-Path $scriptRoot 'Resolve-CodexExecutionSurface.ps1'
+    $durableProposal = & $surfaceScript -Independent -Bounded `
+        -IndependentlyCheckable -MateriallySmallerContext -ReadOnly |
+        ConvertFrom-Json
+    Assert-True (
+        $durableProposal.surface -eq 'durable-task-proposal' -and
+        $durableProposal.requires_user_confirmation
+    ) (
+        'An independent cost-beneficial workstream should proactively propose ' +
+        'a durable task instead of silently staying in the main agent.'
+    )
+    $lowerCostProposal = & $surfaceScript -Independent -Bounded `
+        -IndependentlyCheckable -LowerCostModelAvailable -ReadOnly |
+        ConvertFrom-Json
+    Assert-True (
+        $lowerCostProposal.surface -eq 'durable-task-proposal'
+    ) (
+        'A lower-cost independently checkable lane should qualify even when ' +
+        'context size alone is not the benefit.'
+    )
+    $explicitLocalThread = & $surfaceScript -Independent -Bounded `
+        -IndependentlyCheckable -MateriallySmallerContext -ReadOnly `
+        -ExplicitThreadRequest | ConvertFrom-Json
+    Assert-True (
+        $explicitLocalThread.surface -eq 'durable-local-task' -and
+        $explicitLocalThread.action -eq 'create-durable-local'
+    ) 'An explicit read-only thread request must not become a native subagent.'
+    $temporaryNative = & $surfaceScript -Independent -Bounded `
+        -IndependentlyCheckable -MateriallySmallerContext -ReadOnly `
+        -TemporaryOnly | ConvertFrom-Json
+    Assert-True ($temporaryNative.surface -eq 'native-subagent') (
+        'Temporary read-only work may use a native subagent when durable ' +
+        'history is not useful.'
+    )
+    $explicitWriterNeedsPreflight = & $surfaceScript -Independent -Bounded `
+        -IndependentlyCheckable -MateriallySmallerContext `
+        -ExplicitThreadRequest | ConvertFrom-Json
+    Assert-True (
+        $explicitWriterNeedsPreflight.surface -eq 'worktree-preflight-required'
+    ) 'An independent durable writer must require worktree preflight.'
+
+    $unbornRepo = Join-Path $testRoot 'unborn-repo'
+    $null = New-Item -ItemType Directory -Path $unbornRepo
+    & git -C $unbornRepo init --quiet
+    if ($LASTEXITCODE -ne 0) { throw 'Unable to initialize unborn Git fixture.' }
+    'untracked' | Set-Content -LiteralPath (Join-Path $unbornRepo 'draft.txt')
+    $unbornPreflight = & (
+        Join-Path $scriptRoot 'Test-CodexWorktreePreflight.ps1'
+    ) -WorkspaceRoot $unbornRepo -RequiresIndependentWrite | ConvertFrom-Json
+    Assert-True (
+        $unbornPreflight.is_git_repository -and
+        -not $unbornPreflight.has_usable_head -and
+        -not $unbornPreflight.worktree_eligible -and
+        $unbornPreflight.recommended_environment -eq 'main-agent'
+    ) 'An unborn Git branch must be rejected for worktree creation.'
+    $readOnlyPreflight = & (
+        Join-Path $scriptRoot 'Test-CodexWorktreePreflight.ps1'
+    ) -WorkspaceRoot $unbornRepo | ConvertFrom-Json
+    Assert-True (
+        $readOnlyPreflight.recommended_environment -eq 'local'
+    ) 'Read-only durable work may fall back to the saved local project.'
+
+    & git -C $unbornRepo config user.email 'test@example.invalid'
+    & git -C $unbornRepo config user.name 'AAO Test'
+    & git -C $unbornRepo add -- draft.txt
+    & git -C $unbornRepo commit --quiet -m baseline
+    if ($LASTEXITCODE -ne 0) { throw 'Unable to commit Git preflight fixture.' }
+    $eligiblePreflight = & (
+        Join-Path $scriptRoot 'Test-CodexWorktreePreflight.ps1'
+    ) -WorkspaceRoot $unbornRepo -RequiresIndependentWrite | ConvertFrom-Json
+    Assert-True (
+        $eligiblePreflight.has_usable_head -and
+        $eligiblePreflight.worktree_eligible -and
+        $eligiblePreflight.recommended_environment -eq 'worktree' -and
+        $eligiblePreflight.preflight_hash -match '^[0-9a-f]{64}$'
+    ) 'A committed Git repository should pass writer worktree preflight.'
+
     $modelIds = @('gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra')
+    $platformBindingPath = Join-Path $skillRoot (
+        'references/platform-codex.md'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+            -Capability standard -RequestedModel 'gpt-5.6-terra' `
+            -AllowExperimentalTerra `
+            -AuthorizationEvidence 'user:not-a-real-request-without-binding' `
+            -AvailableModelIds $modelIds | Out-Null
+    } 'requires PlatformBindingPath' (
+        'Loading routing-policy without the platform binding must not ' +
+        'authorize any concrete model, including Terra.'
+    )
     $economyModel = & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
         -Capability economy -AvailableModelIds $modelIds | ConvertFrom-Json
     Assert-True (
         $economyModel.model -eq 'gpt-5.6-luna' -and
-        $economyModel.effort -eq 'medium'
-    ) 'Economy should resolve to Luna medium.'
+        $economyModel.effort -eq 'medium' -and
+        -not $economyModel.inherits_main_agent_model -and
+        $economyModel.platform_binding_sha256 -match '^[0-9a-f]{64}$'
+    ) 'Economy should resolve to Luna medium through a hashed platform binding.'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
+            -Capability economy -AvailableModelIds @('gpt-5.6-sol') |
+            Out-Null
+    } 'never inherit the main-agent model silently' (
+        'An unavailable economy model must fall back to main or user choice, ' +
+        'not silently inherit the expensive main model.'
+    )
     $standardModel = & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
         -Capability standard -AvailableModelIds $modelIds | ConvertFrom-Json
     Assert-True ($standardModel.model -eq 'gpt-5.6-sol') (
         'Standard judgment should resolve to Sol, not Terra.'
     )
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
             -Capability standard -RequestedModel 'gpt-5.6-terra' `
             -AvailableModelIds $modelIds | Out-Null
     } 'Terra requires an explicit request' (
@@ -699,6 +856,7 @@ try {
     )
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
             -Capability standard -RequestedModel 'gpt-5.6-terra' `
             -AllowExperimentalTerra -AvailableModelIds $modelIds | Out-Null
     } 'user: authorization evidence' (
@@ -706,12 +864,14 @@ try {
     )
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
             -Capability ultra -AvailableModelIds $modelIds | Out-Null
     } 'user: confirmation evidence' (
         'Ultra must require explicit per-node confirmation.'
     )
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
             -Capability economy -RequestedModel 'gpt-5.6-sol' `
             -AvailableModelIds $modelIds | Out-Null
     } 'requires explicit user confirmation' (
@@ -719,6 +879,7 @@ try {
     )
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
             -Capability strong -PriorRunDirectory $testRoot `
             -AvailableModelIds $modelIds | Out-Null
     } 'must be provided together' (
@@ -726,6 +887,7 @@ try {
     )
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
             -Capability economy -RequestedModel 'gpt-5.6-sol' `
             -UserConfirmedEscalation `
             -AuthorizationEvidence 'policy:path:missing-policy.md' `
@@ -734,6 +896,7 @@ try {
         'A policy pointer must identify a real project file.'
     )
     $confirmedTerra = & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
         -Capability standard -RequestedModel 'gpt-5.6-terra' `
         -AllowExperimentalTerra `
         -AuthorizationEvidence 'user:explicit-terra-test-request' `
@@ -781,12 +944,14 @@ try {
         -IdempotencyKey 'luna-routing-failed' | Out-Null
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
             -Capability strong -PriorRunDirectory $lunaRetryRun `
             -PriorNodeId 'draft' -AvailableModelIds $modelIds | Out-Null
     } 'requires explicit user confirmation' (
         'A journal-derived Luna-to-Sol escalation must require confirmation.'
     )
     $confirmedRetry = & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
         -Capability strong -PriorRunDirectory $lunaRetryRun `
         -PriorNodeId 'draft' `
         -UserConfirmedEscalation `
@@ -1013,6 +1178,13 @@ try {
     $handoffPlan.nodes[0].context.handoff_path =
         'artifacts/handoffs/draft.json'
     $handoffPlan.nodes[0].context.handoff_max_chars = 4000
+    $handoffPlan.completion.review_disposition_checks = @(
+        @{
+            source_node_id = 'draft'
+            path = 'receipts/draft.review-disposition.json'
+            blocking_severities = @('P0', 'P1')
+        }
+    )
     $handoffPlanPath = Join-Path $testRoot 'handoff-plan.json'
     $handoffPlan | ConvertTo-Json -Depth 100 |
         Set-Content -LiteralPath $handoffPlanPath
@@ -1062,14 +1234,26 @@ try {
             }
         )
     } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $draftReadPath
+    $draftFindingText = 'Draft satisfies the bounded section contract.'
+    $draftFindingHash = Get-TextSha256 $draftFindingText
+    $draftFindingId = 'draft-contract-001'
+    $draftFindingsPath = Join-Path $runDirectory 'draft-findings.json'
+    @(
+        [ordered]@{
+            finding_id = $draftFindingId
+            severity = 'P1'
+            text = $draftFindingText
+        }
+    ) | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $draftFindingsPath
     $draftReceiptRelative = 'receipts/draft.thread-result-receipt.json'
     $draftReceiptPath = Join-Path $runDirectory $draftReceiptRelative
     $draftReceipt = & (
         Join-Path $scriptRoot 'New-ThreadResultReceipt.ps1'
-    ) -RunDirectory $runDirectory -ThreadId 'test-thread-draft' `
+    ) -RunDirectory $runDirectory -SourceNodeId 'draft' `
+        -ThreadId 'test-thread-draft' `
         -HostId 'opaque-host-1' -ThreadReadPath $draftReadPath `
         -OutputPath $draftReceiptPath `
-        -AdoptedFindings @('Draft satisfies the bounded section contract.') |
+        -PendingFindingRecordsPath $draftFindingsPath |
         ConvertFrom-Json -Depth 20
     Assert-True ($draftReceipt.receipt_hash -match '^[0-9a-f]{64}$') (
         'Thread result collection must produce an immutable receipt.'
@@ -1077,6 +1261,304 @@ try {
     Assert-True ($draftReceipt.final_turn_id -eq 'draft-final-turn') (
         'Result collection must select the newest completed turn.'
     )
+    Assert-True (
+        @($draftReceipt.pending_findings).Count -eq 1 -and
+        @($draftReceipt.adopted_findings).Count -eq 0
+    ) 'Initial result collection may bind findings before adoption decisions.'
+    $legacyReceiptPath = Join-Path $runDirectory (
+        'receipts/legacy.thread-result-receipt.json'
+    )
+    $legacyPayload = [ordered]@{
+        schema_version = '1.1'
+        thread_id = [string]$draftReceipt.thread_id
+        host_id = [string]$draftReceipt.host_id
+        collection_method = [string]$draftReceipt.collection_method
+        thread_read_path = [string]$draftReceipt.thread_read_path
+        thread_read_hash = [string]$draftReceipt.thread_read_hash
+        final_turn_id = [string]$draftReceipt.final_turn_id
+        final_status = [string]$draftReceipt.final_status
+        final_content_hash = [string]$draftReceipt.final_content_hash
+        adopted_findings = @($draftFindingText)
+        rejected_findings = @()
+    }
+    $legacyReceipt = [ordered]@{}
+    foreach ($key in $legacyPayload.Keys) {
+        $legacyReceipt[$key] = $legacyPayload[$key]
+    }
+    $legacyReceipt.receipt_hash = Get-TextSha256 (
+        $legacyPayload | ConvertTo-Json -Compress -Depth 20
+    )
+    $legacyReceipt | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $legacyReceiptPath
+    $legacyVerified = Read-ThreadResultReceipt -Path $legacyReceiptPath `
+        -ExpectedThreadId 'test-thread-draft' -ExpectedSourceNodeId 'draft' `
+        -RunDirectory $runDirectory
+    Assert-True ($legacyVerified.schema_version -eq '1.1') (
+        'The pending-findings schema must preserve legacy receipt readability.'
+    )
+    $legacy12ReceiptPath = Join-Path $runDirectory (
+        'receipts/legacy-1.2.thread-result-receipt.json'
+    )
+    $legacy12Payload = [ordered]@{
+        schema_version = '1.2'
+        thread_id = [string]$draftReceipt.thread_id
+        host_id = [string]$draftReceipt.host_id
+        collection_method = [string]$draftReceipt.collection_method
+        thread_read_path = [string]$draftReceipt.thread_read_path
+        thread_read_hash = [string]$draftReceipt.thread_read_hash
+        final_turn_id = [string]$draftReceipt.final_turn_id
+        final_status = [string]$draftReceipt.final_status
+        final_content_hash = [string]$draftReceipt.final_content_hash
+        adopted_findings = @()
+        rejected_findings = @()
+        pending_findings = @($draftFindingText)
+    }
+    $legacy12Receipt = [ordered]@{}
+    foreach ($key in $legacy12Payload.Keys) {
+        $legacy12Receipt[$key] = $legacy12Payload[$key]
+    }
+    $legacy12Receipt.receipt_hash = Get-TextSha256 (
+        $legacy12Payload | ConvertTo-Json -Compress -Depth 20
+    )
+    $legacy12Receipt | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $legacy12ReceiptPath
+    $legacy12Verified = Read-ThreadResultReceipt -Path $legacy12ReceiptPath `
+        -ExpectedThreadId 'test-thread-draft' -ExpectedSourceNodeId 'draft' `
+        -RunDirectory $runDirectory
+    Assert-True ($legacy12Verified.schema_version -eq '1.2') (
+        'Schema 1.2 receipts should remain readable as historical evidence.'
+    )
+    $resolvedDecisionsPath = Join-Path $runDirectory (
+        'draft-review-decisions-resolved.json'
+    )
+    @(
+        [ordered]@{
+            source_finding_id = $draftFindingId
+            finding = $draftFindingText
+            finding_hash = $draftFindingHash
+            canonical_finding_id = 'draft.bounded-section-contract'
+            severity = 'P1'
+            disposition = 'adopted'
+            rationale = 'The main owner incorporated the bounded contract.'
+            resolution_status = 'resolved'
+            evidence = @('test:self-test-draft-contract')
+            re_review_status = 'completed'
+            re_review_source_node_id = 'draft'
+            re_review_evidence = @('observation:source-role-accepted-revision')
+        }
+    ) | ConvertTo-Json -Depth 10 |
+        Set-Content -LiteralPath $resolvedDecisionsPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ReviewDispositionReceipt.ps1') `
+            -RunDirectory $runDirectory -MilestoneId 'self-test-legacy-source' `
+            -SourceNodeId 'draft' -SourceThreadId 'test-thread-draft' `
+            -SourceResultReceiptPath $legacyReceiptPath `
+            -DecisionsPath $resolvedDecisionsPath -OutputPath (
+                Join-Path $runDirectory (
+                    'receipts/draft.review-disposition.legacy-source.json'
+                )
+            ) | Out-Null
+    } 'requires a schema 1.3 source receipt' (
+        'Legacy result receipts must fail closed for durable disposition.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ReviewDispositionReceipt.ps1') `
+            -RunDirectory $runDirectory -MilestoneId 'self-test-legacy-1.2' `
+            -SourceNodeId 'draft' -SourceThreadId 'test-thread-draft' `
+            -SourceResultReceiptPath $legacy12ReceiptPath `
+            -DecisionsPath $resolvedDecisionsPath -OutputPath (
+                Join-Path $runDirectory (
+                    'receipts/draft.review-disposition.legacy-1.2.json'
+                )
+            ) | Out-Null
+    } 'requires a schema 1.3 source receipt' (
+        'Schema 1.2 must fail closed for durable disposition.'
+    )
+    $resolvedDispositionPath = Join-Path $runDirectory (
+        'receipts/draft.review-disposition.json'
+    )
+    $resolvedDisposition = & (
+        Join-Path $scriptRoot 'New-ReviewDispositionReceipt.ps1'
+    ) -RunDirectory $runDirectory -MilestoneId 'self-test' `
+        -SourceNodeId 'draft' -SourceThreadId 'test-thread-draft' `
+        -SourceResultReceiptPath $draftReceiptPath `
+        -DecisionsPath $resolvedDecisionsPath `
+        -OutputPath $resolvedDispositionPath | ConvertFrom-Json -Depth 30
+    Assert-True (
+        $resolvedDisposition.blocking_open.Count -eq 0 -and
+        $resolvedDisposition.receipt_hash -match '^[0-9a-f]{64}$'
+    ) 'Resolved review findings should produce a bound immutable receipt.'
+    $wrongSourceHashReceiptPath = Join-Path $runDirectory (
+        'receipts/draft.review-disposition.wrong-source-hash.json'
+    )
+    $wrongSourceHashReceipt = Get-Content -LiteralPath (
+        $resolvedDispositionPath
+    ) -Raw | ConvertFrom-Json -AsHashtable -Depth 30
+    $wrongSourceHashReceipt.source_result_receipt_hash = '0' * 64
+    $wrongSourceHashReceipt | ConvertTo-Json -Depth 30 |
+        Set-Content -LiteralPath $wrongSourceHashReceiptPath
+    Assert-ThrowsLike {
+        Read-ReviewDispositionReceipt -Path $wrongSourceHashReceiptPath `
+            -RunDirectory $runDirectory -ExpectedSourceNodeId 'draft' `
+            -ExpectedThreadId 'test-thread-draft' | Out-Null
+    } 'not bound to its source result receipt' (
+        'Disposition must reject a changed source receipt hash.'
+    )
+    $wrongSourceNodeReceiptPath = Join-Path $runDirectory (
+        'receipts/draft.review-disposition.wrong-node.json'
+    )
+    $wrongSourceNodeReceipt = Get-Content -LiteralPath (
+        $resolvedDispositionPath
+    ) -Raw | ConvertFrom-Json -AsHashtable -Depth 30
+    $wrongSourceNodeReceipt.source_node_id = 'another-source'
+    $wrongSourceNodeReceipt | ConvertTo-Json -Depth 30 |
+        Set-Content -LiteralPath $wrongSourceNodeReceiptPath
+    Assert-ThrowsLike {
+        Read-ReviewDispositionReceipt -Path $wrongSourceNodeReceiptPath `
+            -RunDirectory $runDirectory -ExpectedSourceNodeId 'draft' `
+            -ExpectedThreadId 'test-thread-draft' | Out-Null
+    } 'current run or source node' (
+        'Disposition must reject a changed source node binding.'
+    )
+
+    $openDecisionsPath = Join-Path $runDirectory (
+        'draft-review-decisions-open.json'
+    )
+    @(
+        [ordered]@{
+            source_finding_id = $draftFindingId
+            finding = $draftFindingText
+            finding_hash = $draftFindingHash
+            canonical_finding_id = 'draft.bounded-section-contract'
+            severity = 'P1'
+            disposition = 'deferred'
+            rationale = 'The finding is intentionally left open for the gate test.'
+            resolution_status = 'open'
+            evidence = @('observation:self-test-open-finding')
+            re_review_status = 'requested'
+            re_review_source_node_id = 'draft'
+            re_review_evidence = @('observation:re-review-request-sent')
+        }
+    ) | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $openDecisionsPath
+    $openDispositionPath = Join-Path $runDirectory (
+        'receipts/draft.review-disposition.open.json'
+    )
+    $openDisposition = & (
+        Join-Path $scriptRoot 'New-ReviewDispositionReceipt.ps1'
+    ) -RunDirectory $runDirectory -MilestoneId 'self-test-open' `
+        -SourceNodeId 'draft' -SourceThreadId 'test-thread-draft' `
+        -SourceResultReceiptPath $draftReceiptPath `
+        -DecisionsPath $openDecisionsPath -OutputPath $openDispositionPath |
+        ConvertFrom-Json -Depth 30
+    Assert-True (
+        @($openDisposition.blocking_open).Count -eq 1
+    ) 'Open P1 findings must be identified as completion blockers.'
+
+    $missingReReviewPath = Join-Path $runDirectory (
+        'draft-review-decisions-missing-rereview.json'
+    )
+    @(
+        [ordered]@{
+            source_finding_id = $draftFindingId
+            finding = $draftFindingText
+            finding_hash = $draftFindingHash
+            canonical_finding_id = 'draft.bounded-section-contract'
+            severity = 'P1'
+            disposition = 'partially-adopted'
+            rationale = 'The main owner claims the revision is complete.'
+            resolution_status = 'resolved'
+            evidence = @('test:self-test-unreviewed-revision')
+            re_review_status = 'requested'
+            re_review_source_node_id = 'draft'
+            re_review_evidence = @('observation:re-review-request-sent')
+        }
+    ) | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $missingReReviewPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ReviewDispositionReceipt.ps1') `
+            -RunDirectory $runDirectory -MilestoneId 'self-test-no-rereview' `
+            -SourceNodeId 'draft' -SourceThreadId 'test-thread-draft' `
+            -SourceResultReceiptPath $draftReceiptPath `
+            -DecisionsPath $missingReReviewPath -OutputPath (
+                Join-Path $runDirectory (
+                    'receipts/draft.review-disposition.no-rereview.json'
+                )
+            ) | Out-Null
+    } 'require completed re-review' (
+        'Resolved adopted P0/P1 findings must return to the source role.'
+    )
+
+    $wrongReviewSourcePath = Join-Path $runDirectory (
+        'draft-review-decisions-wrong-source.json'
+    )
+    $wrongReviewSource = Get-Content -LiteralPath $openDecisionsPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 20
+    $wrongReviewSource.re_review_source_node_id = 'another-reviewer'
+    $wrongReviewSource | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $wrongReviewSourcePath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ReviewDispositionReceipt.ps1') `
+            -RunDirectory $runDirectory -MilestoneId 'self-test-wrong-source' `
+            -SourceNodeId 'draft' -SourceThreadId 'test-thread-draft' `
+            -SourceResultReceiptPath $draftReceiptPath `
+            -DecisionsPath $wrongReviewSourcePath -OutputPath (
+                Join-Path $runDirectory (
+                    'receipts/draft.review-disposition.wrong-source.json'
+                )
+            ) | Out-Null
+    } 'original source node' (
+        'One durable role cannot satisfy another role re-review requirement.'
+    )
+    $sourceBindingMutations = @(
+        @{
+            name = 'finding-id'
+            property = 'source_finding_id'
+            value = 'unknown-source-finding'
+            expected = 'duplicate or unknown finding'
+        },
+        @{
+            name = 'text'
+            property = 'finding'
+            value = 'Changed finding text.'
+            expected = 'must exactly match source'
+        },
+        @{
+            name = 'text-hash'
+            property = 'finding_hash'
+            value = '0' * 64
+            expected = 'must exactly match source'
+        },
+        @{
+            name = 'severity'
+            property = 'severity'
+            value = 'P2'
+            expected = 'must exactly match source'
+        }
+    )
+    foreach ($mutation in $sourceBindingMutations) {
+        $mutationPath = Join-Path $runDirectory (
+            'draft-review-decisions-mutated-' + $mutation.name + '.json'
+        )
+        $mutatedDecision = Get-Content -LiteralPath $openDecisionsPath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 20
+        $mutatedDecision[$mutation.property] = $mutation.value
+        $mutatedDecision | ConvertTo-Json -Depth 20 |
+            Set-Content -LiteralPath $mutationPath
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot 'New-ReviewDispositionReceipt.ps1') `
+                -RunDirectory $runDirectory `
+                -MilestoneId ('self-test-mutated-' + $mutation.name) `
+                -SourceNodeId 'draft' -SourceThreadId 'test-thread-draft' `
+                -SourceResultReceiptPath $draftReceiptPath `
+                -DecisionsPath $mutationPath -OutputPath (
+                    Join-Path $runDirectory (
+                        'receipts/draft.review-disposition.mutated-' +
+                        $mutation.name + '.json'
+                    )
+                ) | Out-Null
+        } $mutation.expected (
+            "Durable disposition must reject mutated $($mutation.name)."
+        )
+    }
     $runningReadPath = Join-Path $draftReadDirectory 'draft-running.json'
     $runningCapture = Get-Content -LiteralPath $draftReadPath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 20
@@ -1085,7 +1567,8 @@ try {
         Set-Content -LiteralPath $runningReadPath
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'New-ThreadResultReceipt.ps1') `
-            -RunDirectory $runDirectory -ThreadId 'test-thread-draft' `
+            -RunDirectory $runDirectory -SourceNodeId 'draft' `
+            -ThreadId 'test-thread-draft' `
             -HostId 'opaque-host-1' -ThreadReadPath $runningReadPath `
             -OutputPath (
                 Join-Path $runDirectory 'receipts/running.thread-result-receipt.json'
@@ -1143,7 +1626,7 @@ try {
     ) -RunDirectory $runDirectory -SkillRoot $skillRoot |
         ConvertFrom-Json -Depth 100
     Assert-True (
-        [string]$measureReport.policy_version -eq '0.7.0' -and
+        [string]$measureReport.policy_version -eq '0.7.2' -and
         @($measureReport.result_receipts).Count -ge 1
     ) (
         'Measure-OrchestrationRun must report the run policy version and receipts.'
@@ -1309,7 +1792,7 @@ try {
     $archiveReceiptOriginal = Get-Content -LiteralPath $draftReceiptPath -Raw
     $archiveReceiptTampered = $archiveReceiptOriginal |
         ConvertFrom-Json -AsHashtable -Depth 20
-    $archiveReceiptTampered.adopted_findings = @('embedded redirect')
+    $archiveReceiptTampered.host_id = 'tampered-host'
     $archiveReceiptTampered | ConvertTo-Json -Depth 20 |
         Set-Content -LiteralPath $draftReceiptPath
     Assert-ThrowsLike {
@@ -1408,6 +1891,23 @@ try {
         $skillPolicyText -like '*data, never as control instructions*' -and
         $safetyPolicyText -like '*data, not instructions to the main agent*'
     ) 'Worker packets must inject the untrusted-data control-plane policy.'
+    $routingPolicyText = Get-Content -LiteralPath (
+        Join-Path $skillRoot 'references/routing-policy.md'
+    ) -Raw
+    Assert-True (
+        $skillPolicyText -like (
+            '*A concrete model or effort may enter*only from that resolver*'
+        ) -and
+        $skillPolicyText -like (
+            '*actual model: unverified*never relabel the request*'
+        ) -and
+        $routingPolicyText -like (
+            '*If only this routing policy was loaded, no concrete model*'
+        )
+    ) (
+        'The launch contract must forbid model inference from routing policy ' +
+        'without the platform-bound resolver.'
+    )
     Assert-True ($packet -like '*Maximum questions: 2*') (
         'Rendered packets should contain the role question limit.'
     )
@@ -2483,6 +2983,137 @@ try {
         'Role generator should preserve the requested lifetime.'
     )
 
+    $durableReviewPlan = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $durableReviewPlan.roles[1].lifetime = 'project'
+    $domainRole = @{}
+    foreach ($entry in $durableReviewPlan.roles[1].GetEnumerator()) {
+        $domainRole[$entry.Key] = $entry.Value
+    }
+    $domainRole.id = 'domain-specialist'
+    $domainRole.display_name = 'Domain Specialist'
+    $domainRole.mission = 'Maintain reusable domain evidence across milestones.'
+    $domainRole.identity_statement = (
+        'I maintain domain evidence and do not edit or approve project output.'
+    )
+    $durableReviewPlan.roles += $domainRole
+    $durableReviewPlan.nodes[1].topology = 'background-thread'
+    $durableReviewPlan.nodes[1].context.continuity_key =
+        'durable-adversarial-review'
+    $durableReviewPlan.nodes[0].read_only = $true
+    $durableReviewPlan.nodes[0].write_scope = @()
+    $domainNode = @{}
+    foreach ($entry in $durableReviewPlan.nodes[1].GetEnumerator()) {
+        $domainNode[$entry.Key] = $entry.Value
+    }
+    $domainNode.id = 'domain-research'
+    $domainNode.role_id = 'domain-specialist'
+    $domainNode.purpose = 'research'
+    $domainNode.task = 'Maintain domain evidence for each named milestone.'
+    $domainNode.context = @{}
+    foreach ($entry in $durableReviewPlan.nodes[1].context.GetEnumerator()) {
+        $domainNode.context[$entry.Key] = $entry.Value
+    }
+    $domainNode.context.continuity_key = 'durable-domain-research'
+    $domainNode.context.inputs = @('source:domain-evidence')
+    $domainNode.context.excluded = @('Implementation reasoning')
+    $durableReviewPlan.nodes += $domainNode
+    $durableReviewPlan.nodes[2].depends_on = @('review', 'domain-research')
+    $durableReviewPlan.completion.required_nodes += 'domain-research'
+    $durableReviewPlan.completion.review_disposition_checks = @(
+        @{
+            source_node_id = 'review'
+            path = 'receipts/review.disposition.json'
+            blocking_severities = @('P0', 'P1')
+        },
+        @{
+            source_node_id = 'domain-research'
+            path = 'receipts/domain-research.disposition.json'
+            blocking_severities = @('P0', 'P1')
+        }
+    )
+    $durableReviewPlan.durable_review_profile = @{
+        mode = 'domain-dissent'
+        main_owner_node_id = 'integrate'
+        domain_node_ids = @('domain-research')
+        dissent_node_ids = @('review')
+        milestone_ids = @('method-1', 'method-2')
+        consumer_output = 'result-only'
+    }
+    $durableReviewPlanPath = Join-Path $testRoot 'durable-review-plan.json'
+    $durableReviewPlan | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $durableReviewPlanPath
+    $durableReviewValidation = & (
+        Join-Path $scriptRoot 'Test-OrchestrationPlan.ps1'
+    ) -PlanPath $durableReviewPlanPath -WorkspaceRoot $testRoot |
+        ConvertFrom-Json
+    Assert-True $durableReviewValidation.valid (
+        'A bounded durable domain-and-dissent profile should validate.'
+    )
+
+    $missingDurableDisposition = Get-Content `
+        -LiteralPath $durableReviewPlanPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $missingDurableDisposition.completion.review_disposition_checks = @(
+        $missingDurableDisposition.completion.review_disposition_checks[0]
+    )
+    Assert-InvalidPlan $missingDurableDisposition (
+        'durable-review-missing-disposition'
+    ) 'requires a completion review disposition check'
+
+    $sharedDurableDisposition = Get-Content `
+        -LiteralPath $durableReviewPlanPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $sharedDurableDisposition.completion.review_disposition_checks[1].path =
+        $sharedDurableDisposition.completion.review_disposition_checks[0].path
+    Assert-InvalidPlan $sharedDurableDisposition (
+        'durable-review-shared-disposition'
+    ) 'Each source role requires its own receipt'
+
+    $narrowDurableBlocking = Get-Content `
+        -LiteralPath $durableReviewPlanPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $narrowDurableBlocking.completion.review_disposition_checks[0].blocking_severities =
+        @('P0')
+    Assert-InvalidPlan $narrowDurableBlocking (
+        'durable-review-narrow-blocking'
+    ) 'must always block P0 and P1'
+
+    $writableDurableProducer = Get-Content `
+        -LiteralPath $durableReviewPlanPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $writableDurableProducer.nodes[0].read_only = $false
+    $writableDurableProducer.nodes[0].write_scope = @('artifacts/draft')
+    Assert-InvalidPlan $writableDurableProducer (
+        'durable-review-writable-producer'
+    ) 'only its main owner may write'
+
+    $writableDurableReviewer = Get-Content -LiteralPath (
+        $durableReviewPlanPath
+    ) -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+    $writableDurableReviewer.nodes[1].read_only = $false
+    $writableDurableReviewer.nodes[1].write_scope = @('review-output')
+    Assert-InvalidPlan $writableDurableReviewer (
+        'durable-review-writable-worker'
+    ) 'must be a read-only background-thread agent'
+
+    $shortLivedDurableReviewer = Get-Content -LiteralPath (
+        $durableReviewPlanPath
+    ) -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+    $shortLivedDurableReviewer.roles[1].lifetime = 'task'
+    Assert-InvalidPlan $shortLivedDurableReviewer (
+        'durable-review-task-lifetime'
+    ) 'requires a project or user-owned role lifetime'
+
+    $internalDebateOutput = Get-Content -LiteralPath (
+        $durableReviewPlanPath
+    ) -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+    $internalDebateOutput.durable_review_profile.consumer_output =
+        'include-internal-debate'
+    Assert-InvalidPlan $internalDebateOutput (
+        'durable-review-consumer-output'
+    ) 'consumer_output must be result-only'
+
     $illegalTransitionCaught = $false
     try {
         & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
@@ -2608,7 +3239,7 @@ try {
     $receiptOriginal = Get-Content -LiteralPath $draftReceiptPath -Raw
     $receiptTampered = $receiptOriginal |
         ConvertFrom-Json -AsHashtable -Depth 20
-    $receiptTampered.adopted_findings = @('silently replaced disposition')
+    $receiptTampered.host_id = 'silently-replaced-host'
     $receiptTampered | ConvertTo-Json -Depth 20 |
         Set-Content -LiteralPath $draftReceiptPath
     Assert-ThrowsLike {
@@ -2631,11 +3262,100 @@ try {
         'Completion must reject a result capture changed after receipt creation.'
     )
     Set-Content -LiteralPath $draftReadPath -Value $captureOriginal -NoNewline
+    $resolvedDispositionBackup = "$resolvedDispositionPath.resolved"
+    Move-Item -LiteralPath $resolvedDispositionPath `
+        -Destination $resolvedDispositionBackup
+    Move-Item -LiteralPath $openDispositionPath `
+        -Destination $resolvedDispositionPath
+    $openReviewGateError = ''
+    try {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $runDirectory | Out-Null
+    } catch {
+        $openReviewGateError = $_.Exception.Message
+    }
+    Assert-True ($openReviewGateError -like '*unresolved P1:*') (
+        'Completion must block an unresolved P0/P1 review finding. Actual: ' +
+        $openReviewGateError
+    )
+    Move-Item -LiteralPath $resolvedDispositionPath `
+        -Destination $openDispositionPath
+    Move-Item -LiteralPath $resolvedDispositionBackup `
+        -Destination $resolvedDispositionPath
     $completion = & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
         -RunDirectory $runDirectory | ConvertFrom-Json
     Assert-True $completion.complete (
         'Completion gate should pass only after nodes, artifacts, and evidence pass.'
     )
+    $taskReceiptPath = Join-Path $runDirectory (
+        'receipts/final.task-completion-receipt.json'
+    )
+    $taskReceipt = & (
+        Join-Path $scriptRoot 'New-OrchestrationTaskReceipt.ps1'
+    ) -RunDirectory $runDirectory -Outcome completed `
+        -Summary 'All required nodes and artifacts passed acceptance.' `
+        -OutputPath $taskReceiptPath | ConvertFrom-Json -Depth 20
+    $verifiedTaskReceipt = Read-OrchestrationTaskReceipt `
+        -Path $taskReceiptPath -RunDirectory $runDirectory
+    Assert-True (
+        $taskReceipt.outcome -eq 'completed' -and
+        $verifiedTaskReceipt.receipt_hash -eq $taskReceipt.receipt_hash
+    ) 'A completed durable run must produce a verifiable task-level receipt.'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-OrchestrationTaskReceipt.ps1') `
+            -RunDirectory $runDirectory -Outcome completed `
+            -Summary 'duplicate outcome' -OutputPath (
+                Join-Path $runDirectory (
+                    'receipts/duplicate.task-completion-receipt.json'
+                )
+            ) | Out-Null
+    } 'already exists for this run' (
+        'A durable run must not produce multiple competing task-level outcomes.'
+    )
+    $taskReceiptOriginal = Get-Content -LiteralPath $taskReceiptPath -Raw
+    $taskReceiptTampered = $taskReceiptOriginal |
+        ConvertFrom-Json -AsHashtable -Depth 20
+    $taskReceiptTampered.summary = 'silently changed outcome'
+    $taskReceiptTampered | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $taskReceiptPath
+    Assert-ThrowsLike {
+        Read-OrchestrationTaskReceipt -Path $taskReceiptPath `
+            -RunDirectory $runDirectory | Out-Null
+    } 'receipt hash mismatch' (
+        'A changed task-level outcome receipt must be rejected.'
+    )
+    Set-Content -LiteralPath $taskReceiptPath `
+        -Value $taskReceiptOriginal -NoNewline
+
+    $fallbackClasses = @(
+        'creation-failed', 'model-unavailable', 'worktree-preflight-failed',
+        'write-conflict', 'timeout-no-result', 'independent-review-failed'
+    )
+    foreach ($failureClass in $fallbackClasses) {
+        $fallbackRun = Join-Path $testRoot (
+            'fallback-run-' + $failureClass
+        )
+        & (Join-Path $scriptRoot 'New-OrchestrationRun.ps1') `
+            -PlanPath $examplePath -RunDirectory $fallbackRun `
+            -WorkspaceRoot $skillRoot | Out-Null
+        $fallbackReceiptPath = Join-Path $fallbackRun (
+            "receipts/$failureClass.task-completion-receipt.json"
+        )
+        $fallbackReceipt = & (
+            Join-Path $scriptRoot 'New-OrchestrationTaskReceipt.ps1'
+        ) -RunDirectory $fallbackRun -Outcome fallback-main `
+            -FailureClass $failureClass `
+            -FallbackAction 'Main agent retains ownership and reports the boundary.' `
+            -Summary "Fallback recorded for $failureClass." `
+            -Evidence @("observation:$failureClass") `
+            -OutputPath $fallbackReceiptPath | ConvertFrom-Json -Depth 20
+        $verifiedFallback = Read-OrchestrationTaskReceipt `
+            -Path $fallbackReceiptPath -RunDirectory $fallbackRun
+        Assert-True (
+            $fallbackReceipt.failure_class -eq $failureClass -and
+            $verifiedFallback.outcome -eq 'fallback-main'
+        ) "Failure class '$failureClass' must produce a verifiable fallback receipt."
+    }
 
     $tamperedPlanRun = Join-Path $testRoot 'tampered-plan-run'
     & (Join-Path $scriptRoot 'New-OrchestrationRun.ps1') `
@@ -2923,6 +3643,14 @@ try {
     }
     Assert-True $tamperCaught 'Tampered journal should be rejected.'
 
+    $recoveryProtocol = & (
+        Join-Path $scriptRoot 'Test-RecoveryProtocol.ps1'
+    ) | ConvertFrom-Json -Depth 20
+    Assert-True $recoveryProtocol.passed (
+        'Durable missing-final recovery protocol should pass its attack suite.'
+    )
+    $script:assertionCount += [int]$recoveryProtocol.assertions
+
     [pscustomobject]@{
         passed = $true
         assertions = $script:assertionCount
@@ -2950,6 +3678,12 @@ try {
         industry_role_packs_verified = $true
         calibration_ledger_verified = $true
         dispatch_preview_verified = $true
+        execution_surface_verified = $true
+        worktree_preflight_verified = $true
+        queued_setup_verified = $true
+        task_completion_receipt_verified = $true
+        durable_review_profile_verified = $true
+        durable_result_recovery_verified = $true
     } | ConvertTo-Json -Depth 5
 }
 finally {

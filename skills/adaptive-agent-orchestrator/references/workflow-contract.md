@@ -5,7 +5,7 @@
 A durable plan is a JSON object with:
 
 - `schema_version`: currently `"1.0"`;
-- `policy_version`: currently `"0.7.0"`, used to validate and replay the run;
+- `policy_version`: currently `"0.7.2"`, used to validate and replay the run;
 - `run_id`: unique, stable identifier;
 - `orchestrator`: the single controller identity and delegation authority;
 - `goal`: concrete outcome;
@@ -158,6 +158,71 @@ exact `section_scope` and uses a `proposal-only` or `scoped-write` role. An
 independent reviewer is read-only with `purpose: verification`. `coauthoring`
 requires at least one co-author; use `review-only` when specialists truly are
 only an independent quality gate.
+
+## Optional durable review profile
+
+Use `durable_review_profile` only for long-running research or Skill
+development where domain evidence and independent dissent recur across at
+least two named milestones. Omit it for one-off work, ordinary implementation,
+or a single final review.
+
+```json
+{
+  "durable_review_profile": {
+    "mode": "domain-dissent",
+    "main_owner_node_id": "integrate",
+    "domain_node_ids": ["domain-research"],
+    "dissent_node_ids": ["adversarial-review"],
+    "milestone_ids": ["method-1", "method-2"],
+    "consumer_output": "result-only"
+  }
+}
+```
+
+Every listed domain or dissent node must be a read-only
+`background-thread` agent with delegation disabled, and its role lifetime must
+be `project` or `user-owned`. Domain and dissent node sets must be distinct.
+The profile does not authorize automatic seat filling: each role still needs
+the normal activation explanation and user authorization.
+
+The main owner collects results and answers findings one by one. It creates an
+immutable thread-result receipt whose `pending_findings` binds extracted
+findings to the complete captured report before adoption decisions. It then
+uses `New-ReviewDispositionReceipt.ps1` to bind each decision to that source
+receipt. Every decision records the exact finding, P0/P1/P2 severity,
+adopted/partially-adopted/rejected/deferred disposition, rationale,
+open/resolved status, typed evidence, a stable `canonical_finding_id`, and
+re-review status bound to the original source node. Adopted or
+partially adopted P0/P1 revisions require completed re-review by the original
+role before resolution. Workers do not message one another or write project
+files; the main owner routes accepted changes and requests re-review.
+
+For multiple durable review roles, keep separate capture, result, disposition,
+and re-review evidence chains. The same `canonical_finding_id` may appear once
+in each source receipt to group overlap while preserving both source records.
+Unique findings use new IDs. Receipt paths must be unique per source, and every
+profile node requires its own completion check; another role's PASS cannot
+satisfy it.
+Schema 1.3 durable source findings bind `finding_id`, original `severity`,
+exact `text`, and `text_hash`. A disposition repeats and exactly matches that
+source identity before adding its canonical cross-source ID. Schema 1.1 and
+1.2 receipts remain readable as history but fail closed for durable
+disposition and completion. Durable completion always blocks both P0 and P1;
+the plan may add P2 but cannot narrow the required set.
+
+When a durable source has no final answer, its node enters `result_pending`.
+The only legal continuations are a bounded same-source recovery or, after a
+verified 3/3 recovery chain, `replacement_pending` followed by the bound
+replacement thread. Neither pending state satisfies a dependency or completion
+gate. A replacement result uses the same logical `source_node_id`, declares
+`source_kind=replacement`, and binds its replacement-continuity receipt.
+
+For legacy sources, `New-LegacySourceAdoptionReceipt.ps1` captures observable
+material and explicitly lists unavailable machine fields. This migration path
+does not backfill or infer old hashes. The adoption receipt is single-use and
+only permits a replacement at the captured checkpoint; a checkpoint change
+requires new authorization and a new source contract.
+
 - `session_policy`: `fresh` by default, or explicitly justified `reuse`;
 - `continuity_key`: stable workstream identity;
 - optional `selection_reason`: controller-only diagnostic justification for
@@ -238,6 +303,26 @@ Global completion must define:
 - unresolved-risk threshold;
 - termination conditions for exhausted execution slots, repeated failure, unavailable tools, and
   rejected approvals.
+
+When `durable_review_profile` is present, completion also defines one
+`review_disposition_checks` entry for every listed domain and dissent node:
+
+```json
+{
+  "source_node_id": "adversarial-review",
+  "path": "receipts/adversarial-review.disposition.json",
+  "blocking_severities": ["P0", "P1"]
+}
+```
+
+The disposition receipt must answer every finding in the bound thread-result
+receipt exactly once. Completion fails when a configured blocking severity is
+still open, when a finding is omitted, when the source result changes, or when
+the receipt hash is invalid. P2 may remain open or deferred with rationale and
+evidence. A resolved adopted or partially adopted P0/P1 decision also requires
+typed evidence that the original role completed re-review.
+Completion reports both source-decision count and canonical-finding count so
+the controller can deduplicate overlap without losing source provenance.
 
 Finishing all nodes is not success if acceptance checks fail.
 Every agent or main node completion event includes at least one typed evidence

@@ -6,7 +6,7 @@ param(
     [Parameter(Mandatory)]
     [string] $OutputPath,
 
-    [ValidateRange(5, 300)]
+    [ValidateRange(40, 300)]
     [int] $MinVisibilityDelaySeconds = 40
 )
 
@@ -230,12 +230,22 @@ $returnedThreadId = if (
 ) {
     [string]$input.create_call.returned_thread_id
 } else { '' }
+$returnedClientThreadId = if (
+    $null -ne $input.create_call.PSObject.Properties['client_thread_id']
+) {
+    [string]$input.create_call.client_thread_id
+} else { '' }
 $decision = 'unknown'
 $adoptedThread = $null
 $duplicateIds = @()
 $createReturnedStableId = (
     [string]$input.create_call.status -eq 'success' -and
     -not [string]::IsNullOrWhiteSpace($returnedThreadId)
+)
+$createReturnedQueuedId = (
+    [string]$input.create_call.status -eq 'success' -and
+    [string]::IsNullOrWhiteSpace($returnedThreadId) -and
+    -not [string]::IsNullOrWhiteSpace($returnedClientThreadId)
 )
 $visibilityDelaySeconds = if ($snapshotTimes.Count -ge 2) {
     (
@@ -265,6 +275,14 @@ if ($uniqueMatches.Count -eq 1) {
                 Select-Object -ExpandProperty thread_id
         )
     }
+} elseif ($createReturnedQueuedId) {
+    if ($snapshots.Count -ge 2 -and
+        $visibilityDelaySeconds -ge $MinVisibilityDelaySeconds -and
+        $snapshotTimes[$snapshotTimes.Count - 1] -ge $windowEnd) {
+        $decision = 'setup_failed_or_unresolved'
+    } else {
+        $decision = 'setup_pending'
+    }
 } elseif (-not $createReturnedStableId -and
     $snapshots.Count -ge 2 -and
     $visibilityDelaySeconds -ge $MinVisibilityDelaySeconds -and
@@ -283,6 +301,9 @@ $receipt = [ordered]@{
     window_end_utc = $windowEnd.ToString('o')
     create_call_status = [string]$input.create_call.status
     returned_thread_id = if ($returnedThreadId) { $returnedThreadId } else { $null }
+    returned_client_thread_id = if ($returnedClientThreadId) {
+        $returnedClientThreadId
+    } else { $null }
     snapshot_count = $snapshots.Count
     visibility_delay_seconds = $visibilityDelaySeconds
     snapshot_captured_at = @($snapshotTimes | ForEach-Object {

@@ -28,6 +28,13 @@ checkable result, and either runs alongside useful main-agent work or provides
 a necessary independent view. Do not use a scoring model or create a Router
 Agent for this decision.
 
+When those conditions hold, do not default to keeping the expensive main model
+on every workstream. Proactively recommend a user-owned durable task when its
+separate history, lower-cost model, or reusable context is valuable. Creation
+still requires the user's explicit thread request or confirmation because a
+durable Codex task is visible and user-owned. Use
+`Resolve-CodexExecutionSurface.ps1` to keep this decision consistent.
+
 Reconsider ownership only when scope changes, a new independent workstream
 appears, an adopted result opens a dependency, a Worker fails or blocks,
 context must rotate, or a high-risk quality gate begins. Choose one action:
@@ -43,6 +50,11 @@ write ownership, cross-turn reuse, or an approval gate actually needs it.
 The direct worker has no persistent role ID, project attachment, or pin. If the
 user asks for a named, reusable, project, or persistent role, use the durable
 role path instead.
+
+Treat `thread` as a product term when the user asks for a sidebar-visible task,
+independent history, direct follow-up, or long-lived ownership. Do not replace
+that request with a native subagent. If `thread` may only mean internal
+parallelism, explain the two execution surfaces before creating either one.
 
 Load references only when their path is active:
 
@@ -105,8 +117,10 @@ Show its Worker list when it changes the dispatch decision. Treat
 use or monetary cost.
 
 After materialization, report the role, actual execution form, actual Worker or
-thread ID, actual model, status, and any deviation from the preview. Repeat
-permissions or dependencies only when they changed. A failed health probe is
+thread ID, actual model, status, and any deviation from the preview. If the
+platform creation result does not expose the actual model, report the requested
+route and `actual model: unverified`; never relabel the request as observed
+runtime fact. Repeat permissions or dependencies only when they changed. A failed health probe is
 not proof of absence; it consumes no seat only after task-list reconciliation
 confirms that nothing materialized. Target at most six active Workers: four
 active background threads plus two reserved native-subagent slots. Clamp this
@@ -124,6 +138,13 @@ record it with `New-ThreadResultReceipt.ps1` before integration. Follow the
 exact tool, marker, collection, and failure rules in
 [platform-codex.md](references/platform-codex.md) and
 [safety-and-lifecycle.md](references/safety-and-lifecycle.md).
+
+A worktree task requires a verified Git repository and usable `HEAD`. Run
+`Test-CodexWorktreePreflight.ps1` before the creation call. An unborn branch or
+non-Git directory cannot support a worktree writer. Read-only durable research
+may use the saved local project; independent writers need one owner per write
+scope and must stop for a user-approved Git baseline when worktree isolation is
+unavailable.
 
 Use industry role packs only when a professional responsibility would improve
 the result. First list the compact catalog, then load only the selected
@@ -219,15 +240,30 @@ context-overlap, progressive-dispatch, or delta-retry rules to force a team.
 
 Resolve `auto`, capacity, and verification profile with
 `Resolve-OrchestrationPreset.ps1`. Resolve the dispatch model with
-`Resolve-WorkerModel.ps1`. Before every launch, use
+`Resolve-WorkerModel.ps1`. A concrete model or effort may enter
+`spawn_agent`, `create_thread`, or a durable plan only from that resolver's
+current output after loading [platform-codex.md](references/platform-codex.md)
+and passing its path as `PlatformBindingPath`. Never infer a concrete model
+from capability names, cost descriptions, `routing-policy.md`, or the main
+agent's model. If the platform binding was not loaded, the resolver was not
+run, or resolution fails, do not launch; keep the work in the main agent.
+Before every launch, use
 `Resolve-WorkerCapacity.ps1` with observed active persistent and transient
 counts; registered but idle agents do not count. Automatically use the
 `economy` class only for bounded mechanical work and `standard` for ordinary
 judgment, implementation, writing, or review. Resolve concrete model IDs with
 [platform-codex.md](references/platform-codex.md). Treat experimental models as
-explicit-request-only. Before any model or effort escalation, explain the
+explicit-request-only. Terra additionally requires a concrete `user:` request
+pointer in the resolver call; a role description, cost rationale, or automatic
+teaming policy is not authorization. Before any model or effort escalation,
+explain the
 change and obtain user confirmation unless a bounded policy already authorizes
 it. Ultra always needs explicit per-node confirmation.
+
+Never silently inherit the main agent's model. Resolve only models exposed by
+the destination runtime. If the capability default is unavailable, keep the
+work in the main agent or ask the user to authorize an exposed substitute;
+record `model-unavailable` in the final task receipt.
 
 ## Execute progressively
 
@@ -253,6 +289,56 @@ global spine and final integration; a Worker may own a bounded section,
 module, investigation, dataset, design surface, or other independently
 verifiable artifact. Return defects to the original owner. Use an independent
 reviewer only for a material risk, not as a default stage.
+
+For a long-running research or Skill-development project, do not reduce all
+specialist involvement to one final review when the same domain evidence and
+adversarial checks must recur across milestones. With explicit user approval,
+declare the optional `durable_review_profile` from
+[workflow-contract.md](references/workflow-contract.md). It keeps one or more
+project-lifetime domain roles and at least one project-lifetime dissent role as
+read-only background tasks while the main agent remains the only integration
+owner. Use it only when there are at least two named milestones and the roles
+have distinct reusable responsibilities; never create it to fill available
+Worker slots.
+
+At each milestone, first bind the complete report and its extracted
+`pending_findings` with `New-ThreadResultReceipt.ps1`. Then answer every finding
+with `New-ReviewDispositionReceipt.ps1` and send adopted changes or reasoned
+rejections back through the main agent. Adopted or partially adopted P0/P1
+changes are not resolved until the original role completes a re-review.
+When multiple durable roles report, keep one capture and disposition receipt
+per source. Use a stable `canonical_finding_id` to group overlapping findings
+without discarding either source's evidence; append unique findings under new
+IDs. One role's PASS never substitutes for another role's required receipt or
+re-review.
+Durable source receipts use schema 1.3 findings bound to a source finding ID,
+original P0/P1/P2 severity, exact text, and text hash. Disposition must match
+all four values. Older receipts remain readable for history but cannot satisfy
+durable completion. P0 and P1 are non-configurable blockers; callers may add
+P2 but cannot remove either required severity.
+Workers do not debate or message each other directly.
+`Test-OrchestrationCompletion.ps1` blocks delivery while any configured P0/P1
+finding remains unresolved. P2 may be deferred only with rationale and
+evidence. Consumer-facing output remains result-only unless an unresolved risk
+or user decision must be disclosed.
+
+If a durable source turn completes without a final answer, record
+`result_pending` with
+`failure_class=final_missing_with_progress_evidence`; visible commentary or
+tool traffic is hash-bound progress evidence, never a result. Make at most
+three same-thread, same-role, same-checkpoint recovery attempts using
+`New-ThreadResultRecoveryReceipt.ps1`. Only a complete 3/3 chain may authorize
+one same-role read-only replacement through
+`New-ReplacementContinuityReceipt.ps1`. A replacement result remains bound to
+the original logical source, is labeled `replacement`, and never claims the
+original task passed.
+
+For an older durable task that lacks machine source IDs or original input/read
+hashes, do not invent them. With controller authorization, capture the real
+role text, checkpoint/input material, four turn-status records, unknown fields,
+and authorization text in `New-LegacySourceAdoptionReceipt.ps1`. That receipt
+only establishes replacement eligibility; it is never a result receipt or a
+completion signal.
 
 For durable runs:
 
@@ -281,6 +367,13 @@ the task result, not internal orchestration traffic. Expose adopted/rejected
 findings, retries, thread disposition, or measured usage only when the user
 asks, they affect confidence, an unresolved risk remains, or user action is
 required.
+
+For a durable run, write one immutable task-level outcome with
+`New-OrchestrationTaskReceipt.ps1`. A successful receipt is allowed only after
+the completion gate passes. A fallback or blocked receipt records the failure
+class, evidence, and next action for creation failure, model unavailability,
+worktree preflight failure, write conflict, timeout/no result, or failed
+independent review.
 
 Use [evaluation.md](references/evaluation.md) only while developing or
 benchmarking this Skill. Do not load it during ordinary user work.

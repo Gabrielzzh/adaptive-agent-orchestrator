@@ -14,6 +14,7 @@ param(
 
     [string[]] $AvailableModelIds,
     [string] $ModelsCachePath,
+    [string] $PlatformBindingPath,
 
     [switch] $AllowExperimentalTerra,
     [switch] $UserConfirmedEscalation,
@@ -24,6 +25,37 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+$expectedPlatformBindingPath = Join-Path $PSScriptRoot (
+    '../references/platform-codex.md'
+)
+if (-not $PlatformBindingPath) {
+    throw (
+        'Concrete worker model selection requires PlatformBindingPath. ' +
+        'Load platform-codex.md and use this resolver before launch.'
+    )
+}
+if (-not (Test-Path -LiteralPath $PlatformBindingPath -PathType Leaf)) {
+    throw "Platform binding not found: $PlatformBindingPath"
+}
+$resolvedPlatformBindingPath = (Resolve-Path -LiteralPath (
+    $PlatformBindingPath
+)).Path
+$resolvedExpectedPlatformBindingPath = (Resolve-Path -LiteralPath (
+    $expectedPlatformBindingPath
+)).Path
+if (-not $resolvedPlatformBindingPath.Equals(
+    $resolvedExpectedPlatformBindingPath,
+    [StringComparison]::OrdinalIgnoreCase
+)) {
+    throw (
+        'PlatformBindingPath must reference the bundled ' +
+        'references/platform-codex.md contract.'
+    )
+}
+$platformBindingHash = (
+    Get-FileHash -LiteralPath $resolvedPlatformBindingPath -Algorithm SHA256
+).Hash.ToLowerInvariant()
 
 $defaultModel = if ($Capability -eq 'economy') {
     'gpt-5.6-luna'
@@ -156,7 +188,11 @@ if (-not $AvailableModelIds) {
     }
 }
 if ($model -notin $AvailableModelIds) {
-    throw "Selected model '$model' is unavailable in the current runtime."
+    throw (
+        "Selected model '$model' is unavailable in the current runtime. " +
+        'Keep the node in the main agent or ask the user to authorize an ' +
+        'available model; never inherit the main-agent model silently.'
+    )
 }
 if ($supportedEfforts -and $resolvedEffort -notin $supportedEfforts) {
     throw "Model '$model' does not support effort '$resolvedEffort'."
@@ -198,6 +234,15 @@ if (($UserConfirmedEscalation -or $UserConfirmedUltra) -and
     authorization_evidence = if ($AuthorizationEvidence) {
         $AuthorizationEvidence
     } else { $null }
+    platform_binding_path = $resolvedPlatformBindingPath
+    platform_binding_sha256 = $platformBindingHash
+    selection_source = if ($RequestedModel) {
+        'explicit-request'
+    } else {
+        'capability-default-verified-available'
+    }
+    inherits_main_agent_model = $false
+    unavailable_model_fallback = 'main-agent-or-user-authorized-available-model'
     reason = switch ($Capability) {
         'economy' { 'bounded mechanical work' }
         'standard' { 'ordinary judgment, drafting, implementation, or testing' }

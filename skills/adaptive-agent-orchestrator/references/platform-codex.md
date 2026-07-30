@@ -20,6 +20,14 @@ automatic selection or fallback. `Resolve-WorkerModel.ps1`,
 contract and must be updated together if the supported pool changes. Never
 invent a model ID that the runtime does not expose.
 
+Every concrete native-subagent or durable-task launch route must come from a
+current `Resolve-WorkerModel.ps1` invocation that binds this exact file through
+`PlatformBindingPath`. Loading `routing-policy.md`, describing a node as
+bounded, or preferring lower cost does not authorize a model. If this binding
+or resolver output is missing, do not launch. Terra additionally requires the
+user to request Terra explicitly and the resolver call to carry the matching
+`user:` evidence; policy authorization is insufficient.
+
 This binding is the current conservative runtime contract, not an inference
 from tier names. Select directly from this table during user work: do not run a
 benchmark, A/B test, or model-selection Worker first. Public benchmarks are
@@ -36,6 +44,11 @@ Use a native subagent for a subtask of the current request:
 - collect with `wait_agent`;
 - keep it temporary, non-recursive, and bounded by the current task.
 
+If native-subagent creation reports only the requested route and agent ID,
+record `actual model: unverified`. Do not claim the requested model was
+observed. A later platform result may replace this label only when it exposes
+the actual model explicitly.
+
 An independent Codex task/thread is user-owned and appears separately in the
 application. Create one only when the user explicitly asks for, or explicitly
 confirms, that separate task lifecycle after seeing the activation preview.
@@ -46,6 +59,26 @@ When thread tools are available:
 - create with `create_thread`;
 - collect primarily with `read_thread`;
 - use `wait_threads` only as an optional bounded wait optimization.
+
+If the user says `thread`, first resolve whether they mean this user-owned,
+sidebar-visible task or merely an internal temporary worker. A request for
+independent history, direct follow-up, long-lived role ownership, or a visible
+task is unambiguously a user-owned Codex task and must not be downgraded to a
+native subagent.
+
+For a project task, choose the environment in this order:
+
+1. independent writer or branch delivery: worktree, after
+   `Test-CodexWorktreePreflight.ps1` confirms a Git repository and usable HEAD;
+2. read-only durable research over a shared saved snapshot: local project;
+3. temporary read-only work without useful independent history: native
+   subagent;
+4. non-Git or unborn-branch writer: main agent, or stop for a user-approved Git
+   baseline.
+
+`startingState=working-tree` may include uncommitted state but cannot replace a
+base commit. One writer owns each path. If multiple local tasks would write the
+same or overlapping paths, stop or switch to isolated worktrees.
 
 If thread tools are unavailable, do not simulate a durable task with repeated
 native subagents. Keep durable state in project artifacts and continue in the
@@ -102,6 +135,13 @@ miss is normal and never authorizes a retry.
 A confirmed no-match retry uses a new attempt activation key. Never retry by
 switching project scope or by editing Codex internal state stores.
 
+A queued worktree response with only `clientThreadId` is `setup_pending`, not a
+materialized task. It cannot be passed to `read_thread` or `wait_threads` and
+does not count as a live Worker. Reconcile `list_threads` for the eventual real
+task ID. Because the current platform exposes no client-ID setup-status reader,
+a bounded observation window with no matching task becomes
+`setup_failed_or_unresolved`; it never authorizes blind duplicate creation.
+
 ## Result collection
 
 Background tasks do not push results into the parent automatically. Register
@@ -117,3 +157,8 @@ intervals unless the node declares another cadence. Prefer `wait_threads` when
 its handler is available, but collect final evidence with `read_thread`. Do not
 stream unchanged snapshots into the parent context, and do not interpret
 silence as completion.
+
+At durable-run termination, use `New-OrchestrationTaskReceipt.ps1`. Record
+`completed` only after the deterministic completion gate passes. Otherwise
+record `fallback-main`, `blocked`, or `cancelled` with a supported failure class
+and a concrete fallback action.

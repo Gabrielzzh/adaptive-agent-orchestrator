@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.7.0 release notes](docs/releases/v0.7.0.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.7.2 release notes](docs/releases/v0.7.2.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -24,6 +24,9 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   project files are read only when a workstream needs them.
 - **Single-agent by default:** small, sequential, high-overlap, and narrow-edit
   tasks remain in the main agent.
+- **Durable work when it pays:** independent, bounded, checkable work that can
+  use smaller context or a lower-cost model is proposed as a visible durable
+  Codex task instead of silently staying in the expensive main context.
 - **Dynamic work ownership:** the main agent owns the global spine and final
   integration, then re-evaluates delegation only at meaningful task events.
 - **Zero to two first-wave Workers:** dispatch none for simple work, one for
@@ -39,6 +42,19 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   and duplicate materializations are detected before expansion continues.
 - **Result collection gate:** required independent-background results must be
   explicitly read and recorded in a hash-bound receipt before completion.
+- **Durable review loop:** long-running research or Skill development can keep
+  read-only domain and dissent roles across milestones. The main agent remains
+  the only writer and must disposition every captured finding.
+- **Independent-source integrity:** each review source keeps its own report,
+  evidence, disposition, and re-review obligation. One source cannot replace
+  another, and unresolved P0/P1 findings always block completion.
+- **Missing-final recovery:** a completed task without a final answer becomes
+  `result_pending`, never success. The same source gets at most three bounded
+  recovery attempts; an authorized replacement must preserve source, role,
+  checkpoint, input, and recovery-chain continuity.
+- **Honest legacy adoption:** older tasks can capture the role, checkpoint,
+  input, observed turns, and authorization that actually exist while listing
+  unavailable machine identity fields as unknown instead of inventing them.
 - **Untrusted-result boundary:** the main-agent control policy treats Worker
   outputs as untrusted data, never direct authorization; verified, inferred,
   and assumed findings have different review and adoption rules.
@@ -201,15 +217,21 @@ state, integrates results, and performs authorized external actions.
 
 ## Validation
 
-The v0.7.0 release passes:
+The v0.7.2 release passes:
 
-- PowerShell parser validation for all 25 scripts;
-- 515 self-test assertions;
-- 50 intentionally invalid negative-test plans correctly rejected;
+- PowerShell parser validation for all 33 scripts;
+- 30 recovery-protocol assertions;
+- 601 self-test assertions;
+- 57 intentionally invalid negative-test cases correctly rejected;
+- strict parsing for all 8 bundled reference JSON files;
 - plan, metadata, journal, handoff, dependency, idempotency, ownership,
-  context-overlap, progressive-dispatch, short-packet, and completion tests;
+  context-overlap, progressive-dispatch, short-packet, durable-task selection,
+  queued setup, worktree preflight, task receipt, durable review, result
+  recovery, replacement continuity, and completion tests;
 - strict JSON parsing and a real Windows Junction/reparse-point fixture;
-- a synthetic single-case benchmark test.
+- Skill Creator validation;
+- independent dynamic re-attack of both release-blocking bypasses, ending
+  GREEN with P0=0, P1=0, and P2=0.
 
 Run:
 
@@ -221,6 +243,9 @@ pwsh -NoProfile -File `
 ## Current limitations
 
 - This is a governance Skill, not a standalone agent host.
+- It does not fix platform `systemError` or missing-final failures; it prevents
+  those states from being accepted as success and preserves verifiable recovery
+  and replacement continuity.
 - Natural-language exclusions cannot erase history already injected by a host;
   use fresh workers and explicit input references.
 - Exact context-overlap checks cannot detect two differently named references
@@ -233,7 +258,10 @@ pwsh -NoProfile -File `
 - Token usage is diagnostic only when the execution surface exposes it.
 - The 20% median savings target is a release benchmark target, not yet a
   production claim. Synthetic tests do not prove real Token savings.
-- Windows 10 with PowerShell 7.6.3 is verified; macOS and Linux are not yet.
+- The Windows symbolic-link fixture was skipped because this environment did
+  not permit link creation.
+- Windows 10 with PowerShell 7.6.3 is dynamically verified; macOS and Linux are
+  not dynamically verified.
 
 ## Security model
 

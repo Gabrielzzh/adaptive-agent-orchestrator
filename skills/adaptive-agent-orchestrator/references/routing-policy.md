@@ -87,7 +87,15 @@ Choose `background-thread` when any are true:
 
 - independent history, pinning, or recovery matters;
 - the task is long-running or has a separate workspace;
-- explicit per-worker routing or lifecycle inspection is required.
+- explicit per-worker routing or lifecycle inspection is required;
+- a bounded, independently checkable workstream can use materially smaller
+  context or a lower-cost model and the user authorizes a visible durable task.
+
+When the last condition holds, proactively recommend the durable task instead
+of silently retaining every workstream in the main agent. A recommendation is
+not creation authority: user-owned tasks still require an explicit thread
+request or confirmation. Use a native subagent only when the work is temporary,
+read-only, and a separately visible history is not useful.
 
 A persistent role alone does not justify a persistent thread. Preserve role
 identity in its contract; choose a background thread only when the workstream
@@ -119,6 +127,18 @@ not cryptographic proof. A `policy:path:` pointer must resolve to an existing,
 safe project-relative file. Retry resolution reads the prior failed node's
 actual model from its validated immutable journal and its effort from the
 sealed plan; callers cannot supply either value directly.
+
+A capability decision is not a concrete model decision. Before putting any
+model or effort into a launch tool, load `platform-codex.md` and call the
+resolver with that bundled file as `PlatformBindingPath`. The resolver output
+is the launch route. If only this routing policy was loaded, no concrete model
+is authorized and the Worker must not launch. Cost or boundedness may select a
+capability class; neither can authorize Terra.
+
+Do not inherit the main agent's model as a default. If the selected capability
+model is unavailable, keep the work in the main agent or request confirmation
+for a model actually exposed by the destination. Do not silently escalate a
+mechanical node to a high-cost model.
 
 `ultra` requires all of the following:
 

@@ -8,7 +8,8 @@ param(
 
     [Parameter(Mandatory)]
     [ValidateSet('launch_reserved', 'materializing', 'materialized', 'running',
-        'needs_input', 'completed', 'validated', 'adopted', 'archived',
+        'needs_input', 'result_pending', 'replacement_pending',
+        'completed', 'validated', 'adopted', 'archived',
         'failed', 'cancelled', 'rejected', 'unknown')]
     [string] $Status,
 
@@ -41,14 +42,17 @@ param(
 
     [ValidateSet('startup_unmaterialized', 'runtime_transient',
         'model_incompatible', 'permission_denied', 'task_invalid',
-        'output_invalid', 'ownership_conflict', 'unknown')]
+        'output_invalid', 'ownership_conflict',
+        'final_missing_with_progress_evidence', 'unknown')]
     [string] $ErrorClass,
 
     [string] $ActionKey,
     [string] $PremiseManifestPath,
     [string] $FailureCode,
     [string] $RetryAuthorization,
-    [string] $ReconciliationReceiptPath
+    [string] $ReconciliationReceiptPath,
+    [string] $RecoveryReceiptPath,
+    [string] $ReplacementContinuityReceiptPath
 )
 
 Set-StrictMode -Version Latest
@@ -74,11 +78,27 @@ $effectiveWave = if ($node.kind -eq 'agent') {
 } else {
     $Wave
 }
-if ($Status -in @('failed', 'unknown') -and [string]::IsNullOrWhiteSpace($ErrorClass)) {
+if ($Status -in @('failed', 'unknown', 'result_pending') -and
+    [string]::IsNullOrWhiteSpace($ErrorClass)) {
     throw "Status '$Status' requires ErrorClass."
 }
-if ($Status -notin @('failed', 'unknown') -and -not [string]::IsNullOrWhiteSpace($ErrorClass)) {
-    throw "ErrorClass is only valid for failed or unknown status."
+if ($Status -notin @('failed', 'unknown', 'result_pending') -and
+    -not [string]::IsNullOrWhiteSpace($ErrorClass)) {
+    throw 'ErrorClass is only valid for failed, unknown, or result_pending.'
+}
+if ($Status -eq 'result_pending' -and
+    $ErrorClass -ne 'final_missing_with_progress_evidence') {
+    throw (
+        'result_pending requires ' +
+        'final_missing_with_progress_evidence.'
+    )
+}
+if ($Status -ne 'result_pending' -and
+    $ErrorClass -eq 'final_missing_with_progress_evidence') {
+    throw (
+        'final_missing_with_progress_evidence is only valid for ' +
+        'result_pending.'
+    )
 }
 if ($ModelId -and $ModelId -notin @(
     'gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra'
@@ -255,6 +275,67 @@ if (-not [string]::IsNullOrWhiteSpace($ReconciliationReceiptPath)) {
     )
     $cleanEvidence += 'observation:task-list-reconciled-no-match'
 }
+$recoveryReceipt = $null
+$normalizedRecoveryPath = $null
+if (-not [string]::IsNullOrWhiteSpace($RecoveryReceiptPath)) {
+    if ([IO.Path]::IsPathRooted($RecoveryReceiptPath)) {
+        throw 'RecoveryReceiptPath must be relative to the run directory.'
+    }
+    $normalizedRecoveryPath = $RecoveryReceiptPath.Replace('\', '/')
+    $recoveryReceipt = Read-ThreadResultRecoveryReceipt `
+        -Path (Join-Path $RunDirectory $normalizedRecoveryPath) `
+        -RunDirectory $RunDirectory -ExpectedSourceNodeId $NodeId `
+        -ExpectedOriginalThreadId $ThreadId
+    $cleanEvidence += "artifact:result-recovery:$normalizedRecoveryPath"
+    $cleanEvidence += (
+        'observation:result-recovery-hash:' +
+        [string]$recoveryReceipt.receipt_hash
+    )
+}
+$replacementReceipt = $null
+$normalizedReplacementPath = $null
+if (-not [string]::IsNullOrWhiteSpace(
+    $ReplacementContinuityReceiptPath
+)) {
+    if ([IO.Path]::IsPathRooted($ReplacementContinuityReceiptPath)) {
+        throw (
+            'ReplacementContinuityReceiptPath must be relative to the run ' +
+            'directory.'
+        )
+    }
+    $normalizedReplacementPath = (
+        $ReplacementContinuityReceiptPath.Replace('\', '/')
+    )
+    $replacementReceipt = Read-ReplacementContinuityReceipt `
+        -Path (Join-Path $RunDirectory $normalizedReplacementPath) `
+        -RunDirectory $RunDirectory -ExpectedSourceNodeId $NodeId `
+        -ExpectedReplacementThreadId $ThreadId
+    $cleanEvidence += (
+        "artifact:replacement-continuity:$normalizedReplacementPath"
+    )
+    $cleanEvidence += (
+        'observation:replacement-continuity-hash:' +
+        [string]$replacementReceipt.receipt_hash
+    )
+}
+if ($Status -eq 'result_pending' -and $null -eq $recoveryReceipt) {
+    throw 'result_pending requires a verified RecoveryReceiptPath.'
+}
+if ($Status -ne 'result_pending' -and $null -ne $recoveryReceipt) {
+    throw 'RecoveryReceiptPath is only valid for result_pending.'
+}
+if ($Status -eq 'replacement_pending' -and $null -eq $replacementReceipt) {
+    throw (
+        'replacement_pending requires a verified ' +
+        'ReplacementContinuityReceiptPath.'
+    )
+}
+if ($Status -ne 'replacement_pending' -and $null -ne $replacementReceipt) {
+    throw (
+        'ReplacementContinuityReceiptPath is only valid for ' +
+        'replacement_pending.'
+    )
+}
 foreach ($entry in $cleanEvidence) {
     if ($entry -notmatch '^(artifact|test|source|observation):\S.+$') {
         throw "Evidence must use kind:value format: artifact, test, source, or observation."
@@ -284,6 +365,14 @@ $requestFingerprint = Get-TextSha256 (
         output_tokens_delta = $OutputTokensDelta
         coordination_tokens_delta = $CoordinationTokensDelta
         usage_source = $UsageSource
+        recovery_receipt_path = $normalizedRecoveryPath
+        recovery_receipt_hash = if ($recoveryReceipt) {
+            [string]$recoveryReceipt.receipt_hash
+        } else { $null }
+        replacement_receipt_path = $normalizedReplacementPath
+        replacement_receipt_hash = if ($replacementReceipt) {
+            [string]$replacementReceipt.receipt_hash
+        } else { $null }
     } | ConvertTo-Json -Compress -Depth 10
 )
 $archiveReceiptHash = $null
@@ -294,7 +383,12 @@ $transitions = @{
     launch_reserved = @('materializing', 'failed', 'cancelled', 'unknown')
     materializing = @('materialized', 'failed', 'cancelled', 'unknown')
     materialized = @('running', 'failed', 'cancelled')
-    running = @('needs_input', 'completed', 'failed', 'cancelled', 'unknown')
+    running = @(
+        'needs_input', 'result_pending', 'completed', 'failed',
+        'cancelled', 'unknown'
+    )
+    result_pending = @('running', 'completed', 'replacement_pending')
+    replacement_pending = @('running')
     needs_input = @('running', 'completed', 'failed', 'cancelled', 'unknown')
     completed = @('validated', 'rejected')
     validated = @('adopted', 'rejected')
@@ -360,18 +454,19 @@ try {
         )) {
             throw 'Archive result receipt escapes the run.'
         }
-        $materializedEvent = @(
+        $resultThreadEvent = @(
             $history | Where-Object {
-                $_.status -eq 'materialized' -and
+                $_.status -in @('completed', 'materialized') -and
                 -not [string]::IsNullOrWhiteSpace([string]$_.thread_id)
             }
         ) | Select-Object -Last 1
-        if ($null -eq $materializedEvent) {
-            throw 'Archive result receipt has no materialized thread binding.'
+        if ($null -eq $resultThreadEvent) {
+            throw 'Archive result receipt has no result thread binding.'
         }
         $archiveReceipt = Read-ThreadResultReceipt `
             -Path $archiveReceiptPath `
-            -ExpectedThreadId ([string]$materializedEvent.thread_id) `
+            -ExpectedThreadId ([string]$resultThreadEvent.thread_id) `
+            -ExpectedSourceNodeId $NodeId `
             -RunDirectory $RunDirectory
         $archiveReceiptHash = [string]$archiveReceipt.receipt_hash
     }
@@ -445,6 +540,30 @@ try {
     if ($kind -eq 'agent' -and $Status -eq 'materialized' -and
         [string]::IsNullOrWhiteSpace($ThreadId)) {
         throw "Materialized agent node '$NodeId' requires ThreadId."
+    }
+    if ($Status -in @('result_pending', 'replacement_pending') -and
+        ($kind -ne 'agent' -or
+            [string]$node.topology -ne 'background-thread' -or
+            [string]::IsNullOrWhiteSpace($ThreadId))) {
+        throw (
+            \"$Status requires a durable background agent and a concrete thread.\"
+        )
+    }
+    if ($priorState -eq 'result_pending' -and $Status -eq 'running') {
+        $lastPending = @($history | Where-Object {
+            [string]$_.status -eq 'result_pending'
+        }) | Select-Object -Last 1
+        if ([string]$lastPending.thread_id -ne $ThreadId) {
+            throw 'Same-source recovery must keep the original thread.'
+        }
+    }
+    if ($priorState -eq 'replacement_pending' -and $Status -eq 'running') {
+        $lastReplacement = @($history | Where-Object {
+            [string]$_.status -eq 'replacement_pending'
+        }) | Select-Object -Last 1
+        if ([string]$lastReplacement.thread_id -ne $ThreadId) {
+            throw 'Replacement execution must keep the bound replacement thread.'
+        }
     }
     if ($kind -eq 'agent' -and $Status -eq 'materialized') {
         if ($node.context.session_policy -eq 'fresh') {
@@ -682,6 +801,14 @@ try {
         decision = if ($Decision) { $Decision } else { $null }
         human_actor = if ($HumanActor) { $HumanActor } else { $null }
         evidence = $cleanEvidence
+        recovery_receipt_path = $normalizedRecoveryPath
+        recovery_receipt_hash = if ($recoveryReceipt) {
+            [string]$recoveryReceipt.receipt_hash
+        } else { $null }
+        replacement_receipt_path = $normalizedReplacementPath
+        replacement_receipt_hash = if ($replacementReceipt) {
+            [string]$replacementReceipt.receipt_hash
+        } else { $null }
         result_receipt_path = $archiveReceiptRelativePath
         result_receipt_hash = $archiveReceiptHash
         idempotency_key = $IdempotencyKey

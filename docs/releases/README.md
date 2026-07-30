@@ -7,6 +7,8 @@ release records.
 
 | Version | Channel | Focus | Details |
 | --- | --- | --- | --- |
+| `v0.7.2` | Stable | Durable domain/dissent review, finding disposition, bounded missing-final recovery, authorized replacement continuity | [Notes](v0.7.2.md) |
+| `v0.7.1` | Engineering milestone included in v0.7.2 | Durable-task intent, worktree preflight, queued setup, model availability, task-level receipts | [Notes](v0.7.1.md) |
 | `v0.7.0` | Stable | Context-efficient delegation, reliable task materialization, static model routing, release diagnostics | [Notes](v0.7.0.md) |
 | `v0.6.0` | Stable | General work ownership, isolated context, lightweight project knowledge | [Notes](v0.6.0.md) |
 | `v0.5.1` | Stable | Thread reconciliation, result receipts, deterministic retry guard | [Notes](v0.5.1.md) |
@@ -24,6 +26,8 @@ release records.
   prerelease validation.
 - Every release keeps a Git tag, GitHub Release, changelog entry, and retained
   release note.
+- Engineering milestones document validated development baselines folded into a
+  later release; they do not claim a separate tag or GitHub Release.
 - README files describe the current product and link here; they are not the
   version archive.
 
@@ -31,4 +35,6 @@ release records.
 - 不带后缀的版本属于正式稳定通道。
 - `-alpha`、`-beta`、`-rc` 只用于仍需预发布验证的版本。
 - 每个版本保留 Git 标签、GitHub Release、CHANGELOG 条目和独立版本说明。
+- 工程里程碑记录已验证、随后并入正式版的开发基线，不代表单独发布了标签或
+  GitHub Release。
 - README 介绍当前产品并链接到这里，不承担版本档案功能。
