@@ -392,6 +392,19 @@ one same-role read-only replacement through
 the original logical source, is labeled `replacement`, and never claims the
 original task passed.
 
+A replacement continuity is checkpoint-scoped; never reuse it as silent
+authorization for later work. If the same adopted replacement task must review
+the immediate next declared milestone, first create
+`New-ReplacementCheckpointRollForwardReceipt.ps1`. The append-only receipt
+binds the same logical source, role and replacement task, its parent
+continuity, prior result/disposition/adopted event, active milestone epoch, new
+checkpoint/input, actual-model verification state, and controller
+authorization. Only that unused receipt permits the narrow
+`adopted -> running` transition. New results use schema 1.4 and any missing-final
+recovery uses its own schema 1.3 replacement cycle. This is not a new Worker or
+a replacement-of-replacement; missing bindings, replay, fork, or identity
+changes remain blocked.
+
 For an older durable task that lacks machine source IDs or original input/read
 hashes, do not invent them. With controller authorization, capture the real
 role text, checkpoint/input material, four turn-status records, unknown fields,

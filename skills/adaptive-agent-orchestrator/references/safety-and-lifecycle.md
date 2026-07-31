@@ -173,6 +173,17 @@ continuity receipt, replacement thread, source role, checkpoint, and input, and
 allows at most three same-thread attempts. Exhausting it leaves completion
 blocked; it never authorizes a replacement-of-replacement.
 
+Replacement continuity is not a durable permission to review every future
+checkpoint. An adopted replacement may continue only through a single-use
+checkpoint roll-forward that binds the same run/source/role/thread, parent
+continuity, prior result/disposition/adopted event, active milestone epoch,
+immediate next declared milestone, new checkpoint/input, actual-model evidence,
+and controller authorization. That receipt permits only the narrow
+`adopted -> running` transition and does not create or consume another Worker.
+The subsequent result/disposition and any missing-final recovery must bind the
+same roll-forward. Reuse, fork, identity changes, an old original task, or a
+replacement-of-replacement fail closed.
+
 Legacy durable sources may lack machine identifiers and immutable captures that
 the current protocol requires. Never synthesize those values. A one-time legacy
 adoption receipt assigns a new stable source/role identity while binding the

@@ -56,6 +56,7 @@ param(
     [string] $ReconciliationReceiptPath,
     [string] $RecoveryReceiptPath,
     [string] $ReplacementContinuityReceiptPath,
+    [string] $ReplacementCheckpointRollForwardReceiptPath,
     [string] $MilestoneRevisionAuthorizationReceiptPath,
     [switch] $AdoptActivatedLifecycle
 )
@@ -368,6 +369,35 @@ if (-not [string]::IsNullOrWhiteSpace(
         [string]$replacementReceipt.receipt_hash
     )
 }
+$replacementRollForwardReceipt = $null
+$normalizedReplacementRollForwardPath = $null
+if (-not [string]::IsNullOrWhiteSpace(
+    $ReplacementCheckpointRollForwardReceiptPath
+)) {
+    if ([IO.Path]::IsPathRooted(
+        $ReplacementCheckpointRollForwardReceiptPath
+    )) {
+        throw (
+            'ReplacementCheckpointRollForwardReceiptPath must be relative to ' +
+            'the run directory.'
+        )
+    }
+    $normalizedReplacementRollForwardPath = (
+        $ReplacementCheckpointRollForwardReceiptPath.Replace('\', '/')
+    )
+    $replacementRollForwardReceipt =
+        Read-ReplacementCheckpointRollForwardReceipt `
+            -Path (Join-Path $RunDirectory (
+                $normalizedReplacementRollForwardPath
+            )) -RunDirectory $RunDirectory `
+            -ExpectedSourceNodeId $NodeId `
+            -ExpectedReplacementThreadId $ThreadId
+    $cleanEvidence += "artifact:$normalizedReplacementRollForwardPath"
+    $cleanEvidence += (
+        'observation:replacement-checkpoint-roll-forward-hash:' +
+        [string]$replacementRollForwardReceipt.receipt_hash
+    )
+}
 if ($Status -eq 'result_pending' -and $null -eq $recoveryReceipt) {
     throw 'result_pending requires a verified RecoveryReceiptPath.'
 }
@@ -384,6 +414,13 @@ if ($Status -ne 'replacement_pending' -and $null -ne $replacementReceipt) {
     throw (
         'ReplacementContinuityReceiptPath is only valid for ' +
         'replacement_pending.'
+    )
+}
+if ($Status -ne 'running' -and
+    $null -ne $replacementRollForwardReceipt) {
+    throw (
+        'ReplacementCheckpointRollForwardReceiptPath is only valid for the ' +
+        'narrow adopted-to-running replacement checkpoint roll-forward.'
     )
 }
 foreach ($entry in $cleanEvidence) {
@@ -448,6 +485,12 @@ $requestPayload = [ordered]@{
         replacement_receipt_hash = if ($replacementReceipt) {
             [string]$replacementReceipt.receipt_hash
         } else { $null }
+        replacement_roll_forward_receipt_path =
+            $normalizedReplacementRollForwardPath
+        replacement_roll_forward_receipt_hash =
+            if ($replacementRollForwardReceipt) {
+                [string]$replacementRollForwardReceipt.receipt_hash
+            } else { $null }
         adopt_activated_lifecycle = [bool]$AdoptActivatedLifecycle
 }
 if ($revisionAuthorization) {
@@ -517,6 +560,7 @@ try {
     $priorState = if ($history.Count) { [string]$history[-1].status } else { 'planned' }
     $isRecoveryCycleReentry = $false
     $isMilestoneRevisionRearm = $false
+    $isReplacementCheckpointRollForward = $false
     $previousAdoptedEvent = $null
     $previousReviewBindingKind = ''
     $previousResultRelativePath = ''
@@ -713,46 +757,92 @@ try {
         $isRecoveryCycleReentry = $true
     }
     if ($priorState -eq 'adopted' -and $Status -eq 'running') {
-        if ($null -eq $revisionAuthorization) {
+        if ($null -ne $replacementRollForwardReceipt) {
+            if ($null -ne $revisionAuthorization) {
+                throw (
+                    'Replacement checkpoint roll-forward and milestone revision ' +
+                    're-arm cannot be combined.'
+                )
+            }
+            $previousAdoptedEvent = $history[-1]
+            if ([string]$node.role_id -ne
+                    [string]$replacementRollForwardReceipt.role_id -or
+                [string]$previousAdoptedEvent.thread_id -ne $ThreadId -or
+                [int]$previousAdoptedEvent.sequence -ne
+                    [int]$replacementRollForwardReceipt.
+                        previous_adopted_event_sequence -or
+                [string]$previousAdoptedEvent.hash -ne
+                    [string]$replacementRollForwardReceipt.
+                        previous_adopted_event_hash) {
+                throw (
+                    'Replacement checkpoint roll-forward does not match the ' +
+                    'current adopted source, role, thread, or prior result.'
+                )
+            }
+            $priorRollForwardUses = @($events | Where-Object {
+                $null -ne $_.PSObject.Properties[
+                    'replacement_roll_forward_receipt_hash'
+                ] -and
+                [string]$_.replacement_roll_forward_receipt_hash -eq
+                    [string]$replacementRollForwardReceipt.receipt_hash
+            })
+            if ($priorRollForwardUses.Count -gt 0) {
+                throw 'Replacement checkpoint roll-forward was already consumed.'
+            }
+            $isReplacementCheckpointRollForward = $true
+        } elseif ($null -eq $revisionAuthorization) {
             throw (
                 'An adopted durable source remains terminal unless a pending ' +
-                'first-milestone revision authorization explicitly re-arms it.'
+                'first-milestone revision authorization or replacement ' +
+                'checkpoint roll-forward explicitly re-arms it.'
             )
+        } else {
+            $sourceBinding = @($revisionAuthorization.required_sources |
+                Where-Object { [string]$_.source_node_id -eq $NodeId })
+            if ($sourceBinding.Count -ne 1 -or
+                [string]$sourceBinding[0].role_id -ne [string]$node.role_id -or
+                [string]$sourceBinding[0].thread_id -ne $ThreadId -or
+                -not [bool]$node.read_only -or [bool]$node.allow_delegation -or
+                @($node.write_scope).Count -gt 0) {
+                throw (
+                    'Milestone revision re-arm changed source identity or ' +
+                    'permissions.'
+                )
+            }
+            $authorizationEvents = @($events | Where-Object {
+                [string]$_.event -eq 'milestone-revision-authorized' -and
+                [string]$_.milestone_revision_id -eq
+                    [string]$revisionAuthorization.revision_id
+            })
+            $selectionEvents = @($events | Where-Object {
+                [string]$_.event -eq 'milestone-revision-selected' -and
+                [string]$_.milestone_revision_id -eq
+                    [string]$revisionAuthorization.revision_id
+            })
+            $priorRearms = @($history | Where-Object {
+                $null -ne $_.PSObject.Properties['milestone_revision_id'] -and
+                $null -ne $_.PSObject.Properties[
+                    'milestone_revision_authorization_receipt_hash'
+                ] -and
+                [string]$_.milestone_revision_id -eq
+                    [string]$revisionAuthorization.revision_id -and
+                [string]$_.milestone_revision_authorization_receipt_hash -eq
+                    [string]$revisionAuthorization.receipt_hash
+            })
+            if ($authorizationEvents.Count -ne 1 -or
+                $selectionEvents.Count -ne 0 -or $priorRearms.Count -ne 0) {
+                throw (
+                    'Milestone revision authorization is not pending or was ' +
+                    'already used.'
+                )
+            }
+            $isMilestoneRevisionRearm = $true
         }
-        $sourceBinding = @($revisionAuthorization.required_sources |
-            Where-Object { [string]$_.source_node_id -eq $NodeId })
-        if ($sourceBinding.Count -ne 1 -or
-            [string]$sourceBinding[0].role_id -ne [string]$node.role_id -or
-            [string]$sourceBinding[0].thread_id -ne $ThreadId -or
-            -not [bool]$node.read_only -or [bool]$node.allow_delegation -or
-            @($node.write_scope).Count -gt 0) {
-            throw 'Milestone revision re-arm changed source identity or permissions.'
-        }
-        $authorizationEvents = @($events | Where-Object {
-            [string]$_.event -eq 'milestone-revision-authorized' -and
-            [string]$_.milestone_revision_id -eq
-                [string]$revisionAuthorization.revision_id
-        })
-        $selectionEvents = @($events | Where-Object {
-            [string]$_.event -eq 'milestone-revision-selected' -and
-            [string]$_.milestone_revision_id -eq
-                [string]$revisionAuthorization.revision_id
-        })
-        $priorRearms = @($history | Where-Object {
-            $null -ne $_.PSObject.Properties['milestone_revision_id'] -and
-            $null -ne $_.PSObject.Properties[
-                'milestone_revision_authorization_receipt_hash'
-            ] -and
-            [string]$_.milestone_revision_id -eq
-                [string]$revisionAuthorization.revision_id -and
-            [string]$_.milestone_revision_authorization_receipt_hash -eq
-                [string]$revisionAuthorization.receipt_hash
-        })
-        if ($authorizationEvents.Count -ne 1 -or
-            $selectionEvents.Count -ne 0 -or $priorRearms.Count -ne 0) {
-            throw 'Milestone revision authorization is not pending or was already used.'
-        }
-        $isMilestoneRevisionRearm = $true
+    } elseif ($null -ne $replacementRollForwardReceipt) {
+        throw (
+            'Replacement checkpoint roll-forward is only valid for ' +
+            'adopted-to-running.'
+        )
     } elseif ($null -ne $revisionAuthorization) {
         throw (
             'MilestoneRevisionAuthorizationReceiptPath is only valid for the ' +
@@ -857,7 +947,8 @@ try {
     if ($Status -notin @($transitions[$priorState]) -and
         -not $isActivatedLifecycleAdoption -and
         -not $isRecoveryCycleReentry -and
-        -not $isMilestoneRevisionRearm) {
+        -not $isMilestoneRevisionRearm -and
+        -not $isReplacementCheckpointRollForward) {
         throw "Illegal state transition for '$NodeId': $priorState -> $Status."
     }
 
@@ -890,7 +981,8 @@ try {
         $Status -ne 'launch_reserved' -and
         -not $isActivatedLifecycleAdoption -and
         -not $isRecoveryCycleReentry -and
-        -not $isMilestoneRevisionRearm) {
+        -not $isMilestoneRevisionRearm -and
+        -not $isReplacementCheckpointRollForward) {
         throw "Agent node '$NodeId' must reserve capacity before launch."
     }
     if ($kind -eq 'main' -and $priorState -eq 'planned' -and
@@ -1229,6 +1321,35 @@ try {
         }
         $executionSlotDelta = 1
     }
+    if ($isReplacementCheckpointRollForward) {
+        $latestByNode = @{}
+        foreach ($journalEvent in $events | Where-Object {
+            $null -ne $_.node_id
+        }) {
+            $latestByNode[[string]$journalEvent.node_id] =
+                [string]$journalEvent.status
+        }
+        $activeStates = @(
+            'launch_reserved', 'materializing', 'materialized', 'running',
+            'needs_input', 'replacement_pending', 'result_pending'
+        )
+        $activeNodeIds = @($latestByNode.GetEnumerator() | Where-Object {
+            $_.Value -in $activeStates
+        } | ForEach-Object { $_.Key })
+        if ($activeNodeIds.Count -ge
+            [int]$plan.limits.max_concurrent_nodes) {
+            throw 'Concurrent agent slots are exhausted.'
+        }
+        $activePersistentCount = @($plan.nodes | Where-Object {
+            $_.kind -eq 'agent' -and
+            $_.topology -eq 'background-thread' -and
+            $_.id -in $activeNodeIds
+        }).Count
+        if ($activePersistentCount -ge
+            [int]$plan.limits.persistent_active_limit) {
+            throw 'Persistent active Worker limit is exhausted.'
+        }
+    }
 
     $event = [ordered]@{
         sequence = $events.Count
@@ -1300,13 +1421,40 @@ try {
         $event['milestone_revision_input_hash'] =
             [string]$revisionAuthorization.input_manifest_hash
     }
+    if ($isReplacementCheckpointRollForward) {
+        $event['source_kind'] = 'replacement'
+        $event['replacement_roll_forward_receipt_path'] =
+            $normalizedReplacementRollForwardPath
+        $event['replacement_roll_forward_receipt_hash'] =
+            [string]$replacementRollForwardReceipt.receipt_hash
+        $event['replacement_roll_forward_id'] =
+            [string]$replacementRollForwardReceipt.roll_forward_id
+        $event['replacement_roll_forward_active_milestone_id'] =
+            [string]$replacementRollForwardReceipt.active_milestone_id
+        $event['replacement_roll_forward_active_milestone_activation_hash'] =
+            [string]$replacementRollForwardReceipt.
+                active_milestone_activation_receipt_hash
+        $event['replacement_roll_forward_target_milestone_id'] =
+            [string]$replacementRollForwardReceipt.target_milestone_id
+        $event['replacement_checkpoint_hash'] =
+            [string]$replacementRollForwardReceipt.checkpoint_hash
+        $event['replacement_input_manifest_hash'] =
+            [string]$replacementRollForwardReceipt.input_manifest_hash
+        $event['previous_adopted_event_sequence'] =
+            [int]$replacementRollForwardReceipt.previous_adopted_event_sequence
+        $event['previous_adopted_event_hash'] =
+            [string]$replacementRollForwardReceipt.previous_adopted_event_hash
+    }
     if ($kind -eq 'agent' -and $Status -eq 'result_pending') {
         $priorPendingForThread = @($history | Where-Object {
             [string]$_.status -eq 'result_pending' -and
             [string]$_.thread_id -eq $ThreadId
         })
-        if ([string]$recoveryReceipt.schema_version -eq '1.2') {
+        if ([string]$recoveryReceipt.schema_version -in @('1.2', '1.3')) {
             $sameCyclePending = [Collections.Generic.List[object]]::new()
+            $cycleStage = if (
+                [string]$recoveryReceipt.schema_version -eq '1.3'
+            ) { 'replacement' } else { 'original' }
             foreach ($pendingEvent in $priorPendingForThread) {
                 if ([string]::IsNullOrWhiteSpace(
                     [string]$pendingEvent.recovery_receipt_path
@@ -1321,8 +1469,9 @@ try {
                     -Path $pendingPath -RunDirectory $RunDirectory `
                     -ExpectedSourceNodeId $NodeId `
                     -ExpectedOriginalThreadId $ThreadId `
-                    -ExpectedRecoveryStage original
-                if ([string]$pendingReceipt.schema_version -eq '1.2' -and
+                    -ExpectedRecoveryStage $cycleStage
+                if ([string]$pendingReceipt.schema_version -eq
+                        [string]$recoveryReceipt.schema_version -and
                     [string]$pendingReceipt.recovery_cycle_id -eq
                         [string]$recoveryReceipt.recovery_cycle_id) {
                     $sameCyclePending.Add($pendingEvent)
@@ -1340,13 +1489,20 @@ try {
             ($priorPendingForThread.Count + 1)) {
             throw 'Recovery attempts must be recorded once in sequential order.'
         }
-        if ([string]$recoveryReceipt.schema_version -eq '1.2') {
+        if ([string]$recoveryReceipt.schema_version -in @('1.2', '1.3')) {
             $event['recovery_cycle_id'] =
                 [string]$recoveryReceipt.recovery_cycle_id
             $event['recovery_milestone_id'] =
                 [string]$recoveryReceipt.milestone_id
-            $event['recovery_milestone_activation_receipt_hash'] =
-                [string]$recoveryReceipt.milestone_activation_receipt_hash
+            if ([string]$recoveryReceipt.schema_version -eq '1.2') {
+                $event['recovery_milestone_activation_receipt_hash'] =
+                    [string]$recoveryReceipt.
+                        milestone_activation_receipt_hash
+            } else {
+                $event['replacement_roll_forward_receipt_hash'] =
+                    [string]$recoveryReceipt.
+                        replacement_checkpoint_roll_forward_receipt_hash
+            }
             $event['recovery_checkpoint_hash'] =
                 [string]$recoveryReceipt.checkpoint_hash
             $event['recovery_input_manifest_hash'] =

@@ -440,6 +440,45 @@ If the replacement has no final answer, its recovery receipts use a separate
 and remain limited to three attempts on that replacement thread. Exhaustion
 stays blocked and cannot create a replacement-of-replacement.
 
+A replacement continuity authorizes only its captured checkpoint and input. If
+the already adopted replacement task must continue the same logical source at
+the immediate next declared milestone, create an append-only seat roll-forward
+before dispatch:
+
+```powershell
+pwsh -File scripts/New-ReplacementCheckpointRollForwardReceipt.ps1 `
+  -RunDirectory <run> -SourceNodeId <source> `
+  -ReplacementThreadId <existing-replacement-thread> `
+  -ReplacementContinuityReceiptPath <run>/receipts/<continuity>.json `
+  -PriorResultReceiptPath <run>/receipts/<prior-result>.json `
+  -PriorDispositionReceiptPath <run>/receipts/<prior-disposition>.json `
+  -TargetMilestoneId <immediate-next-milestone> `
+  -CheckpointManifestPath <run>/materials/<new-checkpoint>.json `
+  -InputManifestPath <run>/materials/<new-input>.json `
+  -AuthorizationMaterialPath <run>/materials/<authorization>.md `
+  -ActivationKey controller:<stable-key>
+
+pwsh -File scripts/Add-OrchestrationEvent.ps1 `
+  -RunDirectory <run> -NodeId <source> -Status running `
+  -ThreadId <existing-replacement-thread> `
+  -ReplacementCheckpointRollForwardReceiptPath `
+    receipts/<source>.replacement-roll-forward-<id>.json `
+  -IdempotencyKey <stable-event-key>
+```
+
+The receipt binds the run, source, role, same replacement thread, parent
+continuity, prior schema result and source disposition, terminal adopted event,
+active milestone/activation, new checkpoint/input, actual-model verification
+state, and controller authorization. It is single-use and does not consume a
+new Worker slot. Only this binding permits `adopted -> running`; ordinary
+`adopted` stays terminal. The new source result is schema 1.4 and binds this
+roll-forward; a missing-final recovery uses a separate schema 1.3 replacement
+cycle under the same roll-forward. Completion and milestone selection accept
+only the bound result/disposition chain. Cross-source, role, thread,
+checkpoint, milestone or hash changes, duplicate/forked receipts, reuse of the
+original task, and replacement-of-replacement all fail closed. Open P0/P1 and
+missing main acceptance continue to block completion.
+
 For legacy sources, `New-LegacySourceAdoptionReceipt.ps1` captures observable
 material and explicitly lists unavailable machine fields. This migration path
 does not backfill or infer old hashes. The adoption receipt is single-use and

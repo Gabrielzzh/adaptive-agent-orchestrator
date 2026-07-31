@@ -1333,6 +1333,521 @@ try {
     )
     Set-Content -LiteralPath $cycleB2Path -Value $cycleB2Original -NoNewline
 
+    # A same-role replacement is checkpoint-scoped. After its verified result
+    # is adopted, the same replacement thread may review the next declared
+    # milestone only through one append-only roll-forward receipt. The receipt
+    # also creates a separate bounded recovery namespace for the new checkpoint.
+    $rollPlanPath = Join-Path $testRoot 'replacement-roll-forward-plan.json'
+    New-RecoveryCyclePlan -Path $rollPlanPath
+    $rollRun = Join-Path $testRoot 'replacement-roll-forward-run'
+    & (Join-Path $scriptRoot 'New-OrchestrationRun.ps1') `
+        -PlanPath $rollPlanPath -RunDirectory $rollRun `
+        -WorkspaceRoot $testRoot | Out-Null
+    foreach ($status in @(
+        'launch_reserved', 'materializing', 'materialized', 'running'
+    )) {
+        $modelArguments = if ($status -eq 'materialized') {
+            @{
+                ModelVerificationState = 'unverified'
+                ModelVerificationEvidence = 'observation:model-not-exposed'
+            }
+        } else { @{} }
+        $thread = if ($status -in @('materialized', 'running')) {
+            'roll-original-thread'
+        } else { $null }
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $rollRun -NodeId 'review' -Status $status `
+            -Message "roll-forward original $status" -ThreadId $thread `
+            @modelArguments -IdempotencyKey "roll-original-$status" |
+            Out-Null
+    }
+    $rollMaterials = Join-Path $rollRun 'materials'
+    $rollReceipts = Join-Path $rollRun 'receipts'
+    $null = New-Item -ItemType Directory -Path $rollMaterials, $rollReceipts
+    $rollCheckpointA = Join-Path $rollMaterials 'checkpoint-a.json'
+    $rollInputA = Join-Path $rollMaterials 'input-a.json'
+    $rollAuthorizationA = Join-Path $rollMaterials 'replacement-auth-a.md'
+    Set-Content -LiteralPath $rollCheckpointA -Value '{"checkpoint":"a"}'
+    Set-Content -LiteralPath $rollInputA -Value '{"input":"a"}'
+    Set-Content -LiteralPath $rollAuthorizationA -Value (
+        'Controller authorizes one same-role read-only replacement for ' +
+        'checkpoint A only.'
+    )
+    $rollOriginalRecoveryPaths =
+        [Collections.Generic.List[string]]::new()
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $progressPath = Join-Path $rollMaterials (
+            "original-progress-$attempt.json"
+        )
+        New-ProgressCapture -Path $progressPath `
+            -ThreadId 'roll-original-thread' `
+            -TurnId "roll-original-progress-$attempt"
+        $recovery = & (
+            Join-Path $scriptRoot 'New-ThreadResultRecoveryReceipt.ps1'
+        ) -RunDirectory $rollRun -SourceNodeId 'review' `
+            -OriginalThreadId 'roll-original-thread' `
+            -CheckpointManifestPath $rollCheckpointA `
+            -InputManifestPath $rollInputA -ThreadReadPath $progressPath `
+            -MilestoneId 'group-1' -Attempt $attempt |
+            ConvertFrom-Json -Depth 50
+        $recoveryPath = Join-Path $rollReceipts (
+            "review.cycle-$($recovery.recovery_cycle_id)." +
+            "attempt-$attempt.result-recovery.json"
+        )
+        $rollOriginalRecoveryPaths.Add($recoveryPath)
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $rollRun -NodeId 'review' `
+            -Status 'result_pending' `
+            -Message "roll original final missing $attempt" `
+            -ThreadId 'roll-original-thread' `
+            -ErrorClass 'final_missing_with_progress_evidence' `
+            -RecoveryReceiptPath (
+                [IO.Path]::GetRelativePath($rollRun, $recoveryPath)
+            ) -IdempotencyKey "roll-original-pending-$attempt" | Out-Null
+        if ($attempt -lt 3) {
+            & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+                -RunDirectory $rollRun -NodeId 'review' -Status 'running' `
+                -Message "roll original recovery $attempt" `
+                -ThreadId 'roll-original-thread' `
+                -IdempotencyKey "roll-original-running-$attempt" | Out-Null
+        }
+    }
+    $rollContinuityPath = Join-Path $rollReceipts (
+        'review.replacement-continuity.json'
+    )
+    $rollContinuity = & (
+        Join-Path $scriptRoot 'New-ReplacementContinuityReceipt.ps1'
+    ) -RunDirectory $rollRun -SourceNodeId 'review' `
+        -OriginalThreadId 'roll-original-thread' `
+        -ReplacementThreadId 'roll-replacement-thread' `
+        -CheckpointManifestPath $rollCheckpointA `
+        -InputManifestPath $rollInputA `
+        -RecoveryReceiptPaths @($rollOriginalRecoveryPaths) `
+        -AuthorizationMaterialPath $rollAuthorizationA `
+        -ActivationKey 'controller:roll-replacement-a' `
+        -OutputPath $rollContinuityPath | ConvertFrom-Json -Depth 50
+    & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+        -RunDirectory $rollRun -NodeId 'review' `
+        -Status 'replacement_pending' `
+        -Message 'checkpoint A replacement materialized' `
+        -ThreadId 'roll-replacement-thread' `
+        -ReplacementContinuityReceiptPath (
+            [IO.Path]::GetRelativePath($rollRun, $rollContinuityPath)
+        ) -Evidence @(
+            'observation:requested-route:gpt-5.6-sol/high',
+            'observation:actual-model:unverified'
+        ) -IdempotencyKey 'roll-replacement-pending' | Out-Null
+    & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+        -RunDirectory $rollRun -NodeId 'review' -Status 'running' `
+        -Message 'checkpoint A replacement running' `
+        -ThreadId 'roll-replacement-thread' `
+        -IdempotencyKey 'roll-replacement-running' | Out-Null
+
+    $rollFinalA = Join-Path $rollMaterials 'replacement-final-a.json'
+    [ordered]@{
+        schemaVersion = 1
+        thread = [ordered]@{ id = 'roll-replacement-thread' }
+        page = [ordered]@{ order = 'newest_first' }
+        turns = @(
+            [ordered]@{
+                id = 'roll-replacement-final-a'
+                status = 'completed'
+                items = @(
+                    [ordered]@{
+                        type = 'agentMessage'
+                        phase = 'final_answer'
+                        text = 'Replacement checkpoint A result.'
+                    }
+                )
+            }
+        )
+    } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $rollFinalA
+    $rollFindingText = 'One carry-forward finding remains open.'
+    $rollFindingsA = Join-Path $rollMaterials 'replacement-findings-a.json'
+    @(
+        [ordered]@{
+            finding_id = 'roll-finding-001'
+            severity = 'P1'
+            text = $rollFindingText
+        }
+    ) | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $rollFindingsA
+    $rollResultAPath = Join-Path $rollReceipts (
+        'review.roll-a.thread-result-receipt.json'
+    )
+    $rollResultA = & (
+        Join-Path $scriptRoot 'New-ThreadResultReceipt.ps1'
+    ) -RunDirectory $rollRun -SourceNodeId 'review' `
+        -ThreadId 'roll-replacement-thread' -HostId 'test-host' `
+        -ThreadReadPath $rollFinalA -OutputPath $rollResultAPath `
+        -MilestoneId 'final-gate' `
+        -CheckpointMaterialPath $rollCheckpointA `
+        -ReplacementContinuityReceiptPath $rollContinuityPath `
+        -PendingFindingRecordsPath $rollFindingsA |
+        ConvertFrom-Json -Depth 50
+    $rollDecisionsA = Join-Path $rollMaterials 'replacement-decisions-a.json'
+    @(
+        [ordered]@{
+            source_finding_id = 'roll-finding-001'
+            finding = $rollFindingText
+            finding_hash = Get-TextSha256 $rollFindingText
+            canonical_finding_id = 'roll.finding-001'
+            severity = 'P1'
+            disposition = 'adopted'
+            rationale = 'The next checkpoint must re-review the finding.'
+            resolution_status = 'open'
+            evidence = @('source:replacement-checkpoint-a')
+            re_review_status = 'requested'
+            re_review_source_node_id = 'review'
+            re_review_evidence = @()
+        }
+    ) | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $rollDecisionsA
+    $rollDispositionAPath = Join-Path $rollReceipts (
+        'review.roll-a.disposition.json'
+    )
+    $rollDispositionA = & (
+        Join-Path $scriptRoot 'New-ReviewDispositionReceipt.ps1'
+    ) -RunDirectory $rollRun -MilestoneId 'final-gate' `
+        -SourceNodeId 'review' -SourceThreadId 'roll-replacement-thread' `
+        -SourceResultReceiptPath $rollResultAPath `
+        -DecisionsPath $rollDecisionsA -OutputPath $rollDispositionAPath |
+        ConvertFrom-Json -Depth 50
+    foreach ($status in @('completed', 'validated', 'adopted')) {
+        $evidence = if ($status -eq 'completed') {
+            @("artifact:receipts/$([IO.Path]::GetFileName($rollResultAPath))")
+        } else {
+            @(
+                "artifact:receipts/$([IO.Path]::GetFileName($rollResultAPath))",
+                "artifact:receipts/$([IO.Path]::GetFileName(
+                    $rollDispositionAPath
+                ))"
+            )
+        }
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $rollRun -NodeId 'review' -Status $status `
+            -Message "replacement checkpoint A $status" `
+            -ThreadId 'roll-replacement-thread' -Evidence $evidence `
+            -IdempotencyKey "roll-replacement-a-$status" | Out-Null
+    }
+
+    $rollCheckpointB = Join-Path $rollMaterials 'checkpoint-b.json'
+    $rollInputB = Join-Path $rollMaterials 'input-b.json'
+    $rollAuthorizationB = Join-Path $rollMaterials 'roll-forward-auth-b.md'
+    Set-Content -LiteralPath $rollCheckpointB -Value '{"checkpoint":"b"}'
+    Set-Content -LiteralPath $rollInputB -Value '{"input":"b"}'
+    Set-Content -LiteralPath $rollAuthorizationB -Value (
+        'Controller authorizes the adopted replacement seat, on the same ' +
+        'thread and role, to review checkpoint B for final-gate.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $rollRun -NodeId 'review' -Status 'running' `
+            -Message 'ordinary adopted replacement reopen' `
+            -ThreadId 'roll-replacement-thread' `
+            -IdempotencyKey 'ordinary-replacement-reopen' | Out-Null
+    } 'terminal' (
+        'An adopted replacement must stay terminal without checkpoint roll-forward.'
+    )
+    $rollForward = & (
+        Join-Path $scriptRoot 'New-ReplacementCheckpointRollForwardReceipt.ps1'
+    ) -RunDirectory $rollRun -SourceNodeId 'review' `
+        -ReplacementThreadId 'roll-replacement-thread' `
+        -ReplacementContinuityReceiptPath $rollContinuityPath `
+        -PriorResultReceiptPath $rollResultAPath `
+        -PriorDispositionReceiptPath $rollDispositionAPath `
+        -TargetMilestoneId 'final-gate' `
+        -CheckpointManifestPath $rollCheckpointB `
+        -InputManifestPath $rollInputB `
+        -AuthorizationMaterialPath $rollAuthorizationB `
+        -ActivationKey 'controller:roll-replacement-checkpoint-b' |
+        ConvertFrom-Json -Depth 50
+    $rollForwardPath = Join-Path $rollReceipts (
+        "review.replacement-roll-forward-$($rollForward.roll_forward_id).json"
+    )
+    Assert-True (
+        $rollForward.source_kind -eq 'replacement' -and
+        $rollForward.replacement_thread_id -eq 'roll-replacement-thread' -and
+        $rollForward.previous_result_receipt_hash -eq
+            $rollResultA.receipt_hash -and
+        $rollForward.previous_disposition_receipt_hash -eq
+            $rollDispositionA.receipt_hash -and
+        $rollForward.target_milestone_id -eq 'final-gate' -and
+        (Test-Path -LiteralPath $rollForwardPath -PathType Leaf)
+    ) 'Replacement roll-forward must bind prior adoption and the new checkpoint.'
+    $rollForwardOriginal = Get-Content -LiteralPath $rollForwardPath -Raw
+    function Assert-RollForwardMutationRejected {
+        param(
+            [string] $Field,
+            [object] $Value,
+            [string] $ExpectedMessage,
+            [string] $AssertionMessage
+        )
+        $mutatedRollForward = $rollForwardOriginal |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        $mutatedRollForward[$Field] = $Value
+        $mutatedPayload = [ordered]@{}
+        foreach ($entry in $mutatedRollForward.GetEnumerator()) {
+            if ($entry.Key -ne 'receipt_hash') {
+                $mutatedPayload[$entry.Key] = $entry.Value
+            }
+        }
+        $mutatedRollForward.receipt_hash = Get-TextSha256 (
+            $mutatedPayload | ConvertTo-Json -Compress -Depth 100
+        )
+        $mutatedRollForward | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $rollForwardPath
+        try {
+            Assert-ThrowsLike {
+                Read-ReplacementCheckpointRollForwardReceipt `
+                    -Path $rollForwardPath -RunDirectory $rollRun `
+                    -ExpectedSourceNodeId 'review' `
+                    -ExpectedReplacementThreadId 'roll-replacement-thread' |
+                    Out-Null
+            } $ExpectedMessage $AssertionMessage
+        } finally {
+            Set-Content -LiteralPath $rollForwardPath `
+                -Value $rollForwardOriginal -NoNewline
+        }
+    }
+    Assert-RollForwardMutationRejected -Field 'source_kind' -Value 'original' `
+        -ExpectedMessage 'logical source' `
+        -AssertionMessage 'A roll-forward cannot relabel replacement as original.'
+    Assert-RollForwardMutationRejected -Field 'role_id' -Value 'other-role' `
+        -ExpectedMessage 'changed source role' `
+        -AssertionMessage 'A roll-forward cannot change the durable role.'
+    Assert-RollForwardMutationRejected `
+        -Field 'replacement_continuity_receipt_hash' -Value ('0' * 64) `
+        -ExpectedMessage 'changed parent continuity' `
+        -AssertionMessage 'A roll-forward cannot detach from parent continuity.'
+    Assert-RollForwardMutationRejected `
+        -Field 'previous_result_receipt_hash' -Value ('1' * 64) `
+        -ExpectedMessage 'changed the prior verified result' `
+        -AssertionMessage 'A roll-forward cannot replace the prior result.'
+    Assert-RollForwardMutationRejected `
+        -Field 'previous_disposition_receipt_hash' -Value ('2' * 64) `
+        -ExpectedMessage 'changed the prior verified result' `
+        -AssertionMessage 'A roll-forward cannot replace the prior disposition.'
+    Assert-RollForwardMutationRejected `
+        -Field 'previous_adopted_event_hash' -Value ('3' * 64) `
+        -ExpectedMessage 'terminal adopted replacement result chain' `
+        -AssertionMessage 'A roll-forward cannot rewrite the prior adopted event.'
+    Assert-RollForwardMutationRejected -Field 'checkpoint_hash' `
+        -Value ('4' * 64) -ExpectedMessage 'Checkpoint manifest is missing or changed' `
+        -AssertionMessage 'A roll-forward cannot change the new checkpoint.'
+    Assert-RollForwardMutationRejected -Field 'input_manifest_hash' `
+        -Value ('5' * 64) -ExpectedMessage 'Input manifest is missing or changed' `
+        -AssertionMessage 'A roll-forward cannot change the new input.'
+    Assert-RollForwardMutationRejected `
+        -Field 'active_milestone_activation_receipt_hash' -Value ('6' * 64) `
+        -ExpectedMessage 'baseline binding is invalid' `
+        -AssertionMessage 'A roll-forward cannot change the active activation epoch.'
+    Assert-ThrowsLike {
+        & (
+            Join-Path $scriptRoot 'New-ReplacementCheckpointRollForwardReceipt.ps1'
+        ) -RunDirectory $rollRun -SourceNodeId 'review' `
+            -ReplacementThreadId 'roll-replacement-thread' `
+            -ReplacementContinuityReceiptPath $rollContinuityPath `
+            -PriorResultReceiptPath $rollResultAPath `
+            -PriorDispositionReceiptPath $rollDispositionAPath `
+            -TargetMilestoneId 'final-gate' `
+            -CheckpointManifestPath $rollCheckpointA `
+            -InputManifestPath $rollInputB `
+            -AuthorizationMaterialPath $rollAuthorizationB `
+            -ActivationKey 'controller:roll-replacement-checkpoint-a-replay' |
+            Out-Null
+    } 'requires a new checkpoint' (
+        'A replacement roll-forward cannot replay its prior checkpoint.'
+    )
+    Assert-ThrowsLike {
+        & (
+            Join-Path $scriptRoot 'New-ReplacementCheckpointRollForwardReceipt.ps1'
+        ) -RunDirectory $rollRun -SourceNodeId 'review' `
+            -ReplacementThreadId 'roll-replacement-thread' `
+            -ReplacementContinuityReceiptPath $rollContinuityPath `
+            -PriorResultReceiptPath $rollResultAPath `
+            -PriorDispositionReceiptPath $rollDispositionAPath `
+            -TargetMilestoneId 'final-gate' `
+            -CheckpointManifestPath $rollCheckpointB `
+            -InputManifestPath $rollInputB `
+            -AuthorizationMaterialPath $rollAuthorizationB `
+            -ActivationKey 'controller:roll-replacement-checkpoint-b-fork' |
+            Out-Null
+    } 'already has a checkpoint roll-forward' (
+        'A replacement seat cannot fork the same next-milestone roll-forward.'
+    )
+    Assert-ThrowsLike {
+        Read-ReplacementCheckpointRollForwardReceipt `
+            -Path $rollForwardPath -RunDirectory $rollRun `
+            -ExpectedSourceNodeId 'domain' `
+            -ExpectedReplacementThreadId 'roll-replacement-thread' | Out-Null
+    } 'logical source' 'A roll-forward cannot cross source ownership.'
+    Assert-ThrowsLike {
+        Read-ReplacementCheckpointRollForwardReceipt `
+            -Path $rollForwardPath -RunDirectory $rollRun `
+            -ExpectedSourceNodeId 'review' `
+            -ExpectedReplacementThreadId 'other-thread' | Out-Null
+    } 'logical source' 'A roll-forward cannot cross replacement thread identity.'
+
+    $rollForwardEvent = & (
+        Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1'
+    ) -RunDirectory $rollRun -NodeId 'review' -Status 'running' `
+        -Message 'replacement seat rolled forward to checkpoint B' `
+        -ThreadId 'roll-replacement-thread' `
+        -ReplacementCheckpointRollForwardReceiptPath (
+            [IO.Path]::GetRelativePath($rollRun, $rollForwardPath)
+        ) -IdempotencyKey 'roll-replacement-b-running' |
+        ConvertFrom-Json -Depth 50
+    Assert-True (
+        $rollForwardEvent.replacement_roll_forward_receipt_hash -eq
+            $rollForward.receipt_hash -and
+        $rollForwardEvent.replacement_roll_forward_id -eq
+            $rollForward.roll_forward_id -and
+        $rollForwardEvent.replacement_checkpoint_hash -eq
+            $rollForward.checkpoint_hash
+    ) 'The adopted-to-running event must immutably bind the roll-forward receipt.'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $rollRun -NodeId 'review' -Status 'running' `
+            -Message 'duplicate replacement roll-forward' `
+            -ThreadId 'roll-replacement-thread' `
+            -ReplacementCheckpointRollForwardReceiptPath (
+                [IO.Path]::GetRelativePath($rollRun, $rollForwardPath)
+            ) -IdempotencyKey 'duplicate-roll-replacement-b' | Out-Null
+    } 'only valid for adopted-to-running' (
+        'A used replacement checkpoint roll-forward cannot be consumed twice.'
+    )
+
+    $rollProgressB = Join-Path $rollMaterials 'replacement-progress-b.json'
+    New-ProgressCapture -Path $rollProgressB `
+        -ThreadId 'roll-replacement-thread' `
+        -TurnId 'roll-replacement-progress-b'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ThreadResultRecoveryReceipt.ps1') `
+            -RunDirectory $rollRun -SourceNodeId 'review' `
+            -OriginalThreadId 'roll-replacement-thread' `
+            -CheckpointManifestPath $rollCheckpointB `
+            -InputManifestPath $rollInputB -ThreadReadPath $rollProgressB `
+            -RecoveryStage 'replacement' `
+            -ReplacementContinuityReceiptPath $rollContinuityPath `
+            -Attempt 1 | Out-Null
+    } 'roll-forward receipt' (
+        'Replacement recovery at a new checkpoint requires its roll-forward.'
+    )
+    $rollRecoveryB = & (
+        Join-Path $scriptRoot 'New-ThreadResultRecoveryReceipt.ps1'
+    ) -RunDirectory $rollRun -SourceNodeId 'review' `
+        -OriginalThreadId 'roll-replacement-thread' `
+        -CheckpointManifestPath $rollCheckpointB `
+        -InputManifestPath $rollInputB -ThreadReadPath $rollProgressB `
+        -RecoveryStage 'replacement' `
+        -ReplacementContinuityReceiptPath $rollContinuityPath `
+        -ReplacementCheckpointRollForwardReceiptPath $rollForwardPath `
+        -Attempt 1 | ConvertFrom-Json -Depth 50
+    $rollRecoveryBPath = Join-Path $rollReceipts (
+        "review.replacement-cycle-$($rollRecoveryB.recovery_cycle_id)." +
+        'attempt-1.result-recovery.json'
+    )
+    Assert-True (
+        $rollRecoveryB.schema_version -eq '1.3' -and
+        $rollRecoveryB.recovery_stage -eq 'replacement' -and
+        $rollRecoveryB.replacement_checkpoint_roll_forward_receipt_hash -eq
+            $rollForward.receipt_hash -and
+        (Test-Path -LiteralPath $rollRecoveryBPath -PathType Leaf)
+    ) 'Replacement roll-forward recovery needs an independent bounded cycle.'
+    & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+        -RunDirectory $rollRun -NodeId 'review' -Status 'result_pending' `
+        -Message 'replacement checkpoint B final missing' `
+        -ThreadId 'roll-replacement-thread' `
+        -ErrorClass 'final_missing_with_progress_evidence' `
+        -RecoveryReceiptPath (
+            [IO.Path]::GetRelativePath($rollRun, $rollRecoveryBPath)
+        ) -IdempotencyKey 'roll-replacement-b-pending-1' | Out-Null
+    & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+        -RunDirectory $rollRun -NodeId 'review' -Status 'running' `
+        -Message 'replacement checkpoint B recovery returned a final' `
+        -ThreadId 'roll-replacement-thread' `
+        -IdempotencyKey 'roll-replacement-b-recovered' | Out-Null
+
+    $rollFinalB = Join-Path $rollMaterials 'replacement-final-b.json'
+    [ordered]@{
+        schemaVersion = 1
+        thread = [ordered]@{ id = 'roll-replacement-thread' }
+        page = [ordered]@{ order = 'newest_first' }
+        turns = @(
+            [ordered]@{
+                id = 'roll-replacement-final-b'
+                status = 'completed'
+                items = @(
+                    [ordered]@{
+                        type = 'agentMessage'
+                        phase = 'final_answer'
+                        text = 'Replacement checkpoint B result.'
+                    }
+                )
+            }
+        )
+    } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $rollFinalB
+    $rollFindingsB = Join-Path $rollMaterials 'replacement-findings-b.json'
+    Copy-Item -LiteralPath $rollFindingsA -Destination $rollFindingsB
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ThreadResultReceipt.ps1') `
+            -RunDirectory $rollRun -SourceNodeId 'review' `
+            -ThreadId 'roll-replacement-thread' -HostId 'test-host' `
+            -ThreadReadPath $rollFinalB `
+            -OutputPath (Join-Path $rollReceipts (
+                'review.roll-b-unbound.thread-result-receipt.json'
+            )) -MilestoneId 'final-gate' `
+            -CheckpointMaterialPath $rollCheckpointB `
+            -ReplacementContinuityReceiptPath $rollContinuityPath `
+            -PendingFindingRecordsPath $rollFindingsB | Out-Null
+    } 'roll-forward receipt' (
+        'A new-checkpoint replacement result cannot omit its roll-forward.'
+    )
+    $rollResultBPath = Join-Path $rollReceipts (
+        'review.roll-b.thread-result-receipt.json'
+    )
+    $rollResultB = & (
+        Join-Path $scriptRoot 'New-ThreadResultReceipt.ps1'
+    ) -RunDirectory $rollRun -SourceNodeId 'review' `
+        -ThreadId 'roll-replacement-thread' -HostId 'test-host' `
+        -ThreadReadPath $rollFinalB -OutputPath $rollResultBPath `
+        -MilestoneId 'final-gate' -CheckpointMaterialPath $rollCheckpointB `
+        -ReplacementContinuityReceiptPath $rollContinuityPath `
+        -ReplacementCheckpointRollForwardReceiptPath $rollForwardPath `
+        -PendingFindingRecordsPath $rollFindingsB |
+        ConvertFrom-Json -Depth 50
+    Assert-True (
+        $rollResultB.schema_version -eq '1.4' -and
+        $rollResultB.source_kind -eq 'replacement' -and
+        $rollResultB.replacement_checkpoint_roll_forward_receipt_hash -eq
+            $rollForward.receipt_hash
+    ) 'Checkpoint B result must retain replacement kind and roll-forward binding.'
+    $rollDecisionsB = Join-Path $rollMaterials 'replacement-decisions-b.json'
+    Copy-Item -LiteralPath $rollDecisionsA -Destination $rollDecisionsB
+    $rollDispositionBPath = Join-Path $rollReceipts (
+        'review.roll-b.disposition.json'
+    )
+    $rollDispositionB = & (
+        Join-Path $scriptRoot 'New-ReviewDispositionReceipt.ps1'
+    ) -RunDirectory $rollRun -MilestoneId 'final-gate' `
+        -SourceNodeId 'review' -SourceThreadId 'roll-replacement-thread' `
+        -SourceResultReceiptPath $rollResultBPath `
+        -DecisionsPath $rollDecisionsB -OutputPath $rollDispositionBPath |
+        ConvertFrom-Json -Depth 50
+    $rollBinding = Get-DurableReviewDispositionBinding `
+        -RunDirectory $rollRun `
+        -Plan (Get-Content -LiteralPath (Join-Path $rollRun 'plan.json') -Raw |
+            ConvertFrom-Json -Depth 100 -DateKind String) `
+        -SourceNodeId 'review' `
+        -DispositionRelativePath (
+            [IO.Path]::GetRelativePath($rollRun, $rollDispositionBPath)
+        ) -ExpectedMilestoneId 'final-gate' `
+        -RequireResultMilestoneBinding
+    Assert-True (
+        $rollBinding.result_receipt_hash -eq $rollResultB.receipt_hash -and
+        $rollBinding.disposition_receipt_hash -eq
+            $rollDispositionB.receipt_hash
+    ) 'Milestone selection must accept only the roll-forward-bound result chain.'
+
     $fixturePath = Join-Path $skillRoot (
         'references/durable-recovery-adoption-fixtures.json'
     )
@@ -1354,6 +1869,7 @@ try {
         bounded_recovery_verified = $true
         replacement_continuity_verified = $true
         replacement_recovery_epoch_verified = $true
+        replacement_checkpoint_roll_forward_verified = $true
         original_recovery_cycles_verified = $true
         cross_source_rejected = $true
         consumer_result_only = $true

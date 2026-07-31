@@ -72,6 +72,41 @@ function Get-OrchestrationEventHash {
             $keys[$recoveryIndex..($keys.Count - 1)]
         )
     }
+    if ($null -ne $Event.PSObject.Properties['source_kind'] -or
+        $null -ne $Event.PSObject.Properties[
+            'replacement_roll_forward_receipt_path'
+        ] -or $null -ne $Event.PSObject.Properties[
+            'replacement_roll_forward_receipt_hash'
+        ] -or $null -ne $Event.PSObject.Properties[
+            'replacement_roll_forward_id'
+        ] -or $null -ne $Event.PSObject.Properties[
+            'replacement_roll_forward_active_milestone_id'
+        ] -or $null -ne $Event.PSObject.Properties[
+            'replacement_roll_forward_active_milestone_activation_hash'
+        ] -or $null -ne $Event.PSObject.Properties[
+            'replacement_roll_forward_target_milestone_id'
+        ] -or $null -ne $Event.PSObject.Properties[
+            'replacement_checkpoint_hash'
+        ] -or $null -ne $Event.PSObject.Properties[
+            'replacement_input_manifest_hash'
+        ]) {
+        $replacementIndex = [Array]::IndexOf(
+            $keys, 'replacement_receipt_hash'
+        ) + 1
+        $keys = @(
+            $keys[0..($replacementIndex - 1)]
+            'source_kind'
+            'replacement_roll_forward_receipt_path'
+            'replacement_roll_forward_receipt_hash'
+            'replacement_roll_forward_id'
+            'replacement_roll_forward_active_milestone_id'
+            'replacement_roll_forward_active_milestone_activation_hash'
+            'replacement_roll_forward_target_milestone_id'
+            'replacement_checkpoint_hash'
+            'replacement_input_manifest_hash'
+            $keys[$replacementIndex..($keys.Count - 1)]
+        )
+    }
     if ($null -ne $Event.PSObject.Properties['runtime_policy_version'] -or
         $null -ne $Event.PSObject.Properties['policy_activation_receipt_path'] -or
         $null -ne $Event.PSObject.Properties['policy_activation_receipt_hash']) {
@@ -471,19 +506,32 @@ function Read-ThreadResultReceipt {
         throw 'Thread result receipt contains invalid identifiers or hash.'
     }
     $schemaVersion = [string]$receipt.schema_version
-    if ($schemaVersion -notin @('1.1', '1.2', '1.3')) {
+    if ($schemaVersion -notin @('1.1', '1.2', '1.3', '1.4')) {
         throw 'Thread result receipt has an unsupported schema version.'
     }
     $hasSourceContract = $null -ne
         $receipt.PSObject.Properties['source_node_id']
-    if ($schemaVersion -eq '1.3') {
+    if ($schemaVersion -in @('1.3', '1.4')) {
         foreach ($name in @(
             'source_node_id', 'source_kind',
             'replacement_continuity_receipt_path',
             'replacement_continuity_receipt_hash'
         )) {
             if ($null -eq $receipt.PSObject.Properties[$name]) {
-                throw \"Schema 1.3 thread result receipt is missing '$name'.\"
+                throw (
+                    "Schema $schemaVersion thread result receipt is missing " +
+                    "'$name'."
+                )
+            }
+        }
+        if ($schemaVersion -eq '1.4') {
+            foreach ($name in @(
+                'replacement_checkpoint_roll_forward_receipt_path',
+                'replacement_checkpoint_roll_forward_receipt_hash'
+            )) {
+                if ($null -eq $receipt.PSObject.Properties[$name]) {
+                    throw \"Schema 1.4 thread result receipt is missing '$name'.\"
+                }
             }
         }
         $plan = Get-Content -LiteralPath (
@@ -581,13 +629,70 @@ function Read-ThreadResultReceipt {
                     'Replacement result is not bound to its continuity receipt.'
                 )
             }
+            if ($schemaVersion -eq '1.4') {
+                $rollForwardPath = Get-RunLocalReceiptPath `
+                    -RunDirectory $RunDirectory `
+                    -RelativePath ([string]$receipt.
+                        replacement_checkpoint_roll_forward_receipt_path) `
+                    -Label 'Replacement checkpoint roll-forward receipt'
+                $rollForward = Read-ReplacementCheckpointRollForwardReceipt `
+                    -Path $rollForwardPath -RunDirectory $RunDirectory `
+                    -ExpectedSourceNodeId ([string]$receipt.source_node_id) `
+                    -ExpectedReplacementThreadId $ExpectedThreadId
+                $rollForwardEvents = @($events | Where-Object {
+                    $null -ne $_.PSObject.Properties[
+                        'replacement_roll_forward_receipt_path'
+                    ] -and
+                    $null -ne $_.PSObject.Properties[
+                        'replacement_roll_forward_receipt_hash'
+                    ] -and
+                    $null -ne $_.PSObject.Properties[
+                        'replacement_roll_forward_id'
+                    ] -and
+                    [string]$_.node_id -eq
+                        [string]$receipt.source_node_id -and
+                    [string]$_.thread_id -eq $ExpectedThreadId -and
+                    [string]$_.status -eq 'running' -and
+                    [string]$_.replacement_roll_forward_receipt_path -eq
+                        [string]$receipt.
+                            replacement_checkpoint_roll_forward_receipt_path -and
+                    [string]$_.replacement_roll_forward_receipt_hash -eq
+                        [string]$rollForward.receipt_hash -and
+                    [string]$_.replacement_roll_forward_id -eq
+                        [string]$rollForward.roll_forward_id
+                })
+                if ([string]$receipt.
+                        replacement_checkpoint_roll_forward_receipt_hash -ne
+                        [string]$rollForward.receipt_hash -or
+                    [string]$rollForward.
+                        replacement_continuity_receipt_hash -ne
+                        [string]$replacement.receipt_hash -or
+                    [string]$rollForward.target_milestone_id -ne
+                        [string]$receipt.milestone_id -or
+                    [string]$rollForward.checkpoint_path -ne
+                        [string]$receipt.checkpoint_material_path -or
+                    $rollForwardEvents.Count -ne 1) {
+                    throw (
+                        'Replacement result is not bound to its unique ' +
+                        'checkpoint roll-forward lifecycle.'
+                    )
+                }
+            } elseif (-not [string]::IsNullOrWhiteSpace(
+                [string]$receipt.checkpoint_material_hash
+            ) -and [string]$replacement.checkpoint_hash -ne
+                [string]$receipt.checkpoint_material_hash) {
+                throw (
+                    'Replacement result at a new checkpoint requires schema ' +
+                    '1.4 checkpoint roll-forward binding.'
+                )
+            }
         }
     } elseif ($hasSourceContract -and
         [string]$receipt.source_node_id -ne $ExpectedSourceNodeId) {
         throw 'Historical thread result receipt changed its logical source.'
     }
     $hasPending = $null -ne $receipt.PSObject.Properties['pending_findings']
-    if ($schemaVersion -in @('1.2', '1.3') -and -not $hasPending) {
+    if ($schemaVersion -in @('1.2', '1.3', '1.4') -and -not $hasPending) {
         throw "Thread result receipt is missing 'pending_findings'."
     }
     $pending = @()
@@ -600,7 +705,7 @@ function Read-ThreadResultReceipt {
     if ($allFindings.Count -eq 0) {
         throw 'Thread result receipt lacks an adoption disposition.'
     }
-    if ($schemaVersion -eq '1.3') {
+    if ($schemaVersion -in @('1.3', '1.4')) {
         if (@($receipt.adopted_findings).Count -gt 0 -or
             @($receipt.rejected_findings).Count -gt 0) {
             throw 'Schema 1.3 source findings must remain pending until disposition.'
@@ -691,6 +796,14 @@ function Read-ThreadResultReceipt {
     $payload.rejected_findings = @($receipt.rejected_findings)
     if ($hasPending) {
         $payload.pending_findings = $pending
+    }
+    if ($schemaVersion -eq '1.4') {
+        $payload.replacement_checkpoint_roll_forward_receipt_path =
+            [string]$receipt.
+                replacement_checkpoint_roll_forward_receipt_path
+        $payload.replacement_checkpoint_roll_forward_receipt_hash =
+            [string]$receipt.
+                replacement_checkpoint_roll_forward_receipt_hash
     }
     $expectedHash = Get-TextSha256 (
         $payload | ConvertTo-Json -Compress -Depth 20
@@ -1068,7 +1181,7 @@ function Read-ThreadResultRecoveryReceipt {
         'attempt', 'outcome', 'previous_receipt_path',
         'previous_receipt_hash', 'created_at_utc', 'receipt_hash'
     )
-    $recoveryStage = if ([string]$receipt.schema_version -eq '1.1') {
+    $recoveryStage = if ([string]$receipt.schema_version -in @('1.1', '1.3')) {
         'replacement'
     } elseif ([string]$receipt.schema_version -in @('1.0', '1.2')) {
         'original'
@@ -1080,6 +1193,13 @@ function Read-ThreadResultRecoveryReceipt {
             'recovery_stage', 'replacement_continuity_receipt_path',
             'replacement_continuity_receipt_hash'
         )
+        if ([string]$receipt.schema_version -eq '1.3') {
+            $required += @(
+                'recovery_cycle_id', 'milestone_id',
+                'replacement_checkpoint_roll_forward_receipt_path',
+                'replacement_checkpoint_roll_forward_receipt_hash'
+            )
+        }
     } elseif ([string]$receipt.schema_version -eq '1.2') {
         $required += @(
             'recovery_stage', 'recovery_cycle_id', 'milestone_id',
@@ -1115,8 +1235,64 @@ function Read-ThreadResultRecoveryReceipt {
             -ExpectedSourceNodeId $ExpectedSourceNodeId `
             -ExpectedReplacementThreadId $ExpectedOriginalThreadId
         if ([string]$replacement.receipt_hash -ne
-            [string]$receipt.replacement_continuity_receipt_hash -or
-            [string]$replacement.checkpoint_hash -ne
+            [string]$receipt.replacement_continuity_receipt_hash) {
+            throw 'Replacement recovery changed its continuity receipt.'
+        }
+        if ([string]$receipt.schema_version -eq '1.3') {
+            $rollForwardPath = Get-RunLocalReceiptPath `
+                -RunDirectory $RunDirectory `
+                -RelativePath ([string]$receipt.
+                    replacement_checkpoint_roll_forward_receipt_path) `
+                -Label 'Replacement checkpoint roll-forward receipt'
+            $rollForward = Read-ReplacementCheckpointRollForwardReceipt `
+                -Path $rollForwardPath -RunDirectory $RunDirectory `
+                -ExpectedSourceNodeId $ExpectedSourceNodeId `
+                -ExpectedReplacementThreadId $ExpectedOriginalThreadId
+            $cyclePayload = [ordered]@{
+                run_id = [string]$receipt.run_id
+                source_node_id = $ExpectedSourceNodeId
+                replacement_thread_id = $ExpectedOriginalThreadId
+                replacement_continuity_receipt_hash =
+                    [string]$replacement.receipt_hash
+                replacement_checkpoint_roll_forward_receipt_hash =
+                    [string]$rollForward.receipt_hash
+                milestone_id = [string]$rollForward.target_milestone_id
+                checkpoint_hash = [string]$receipt.checkpoint_hash
+                input_manifest_hash = [string]$receipt.input_manifest_hash
+            }
+            $expectedCycleId = Get-TextSha256 (
+                $cyclePayload | ConvertTo-Json -Compress -Depth 20
+            )
+            if ([string]$receipt.
+                    replacement_checkpoint_roll_forward_receipt_hash -ne
+                    [string]$rollForward.receipt_hash -or
+                [string]$rollForward.
+                    replacement_continuity_receipt_hash -ne
+                    [string]$replacement.receipt_hash -or
+                [string]$rollForward.target_milestone_id -ne
+                    [string]$receipt.milestone_id -or
+                [string]$rollForward.checkpoint_hash -ne
+                    [string]$receipt.checkpoint_hash -or
+                [string]$rollForward.input_manifest_hash -ne
+                    [string]$receipt.input_manifest_hash -or
+                [string]$receipt.recovery_cycle_id -ne $expectedCycleId) {
+                throw (
+                    'Replacement recovery cycle changed its checkpoint ' +
+                    'roll-forward binding.'
+                )
+            }
+            $expectedReplacementCycleName = (
+                "$ExpectedSourceNodeId.replacement-cycle-$expectedCycleId." +
+                "attempt-$([int]$receipt.attempt).result-recovery.json"
+            )
+            if ([IO.Path]::GetFileName($receiptFullPath) -ne
+                $expectedReplacementCycleName) {
+                throw (
+                    'Replacement recovery cycle receipt has a non-canonical ' +
+                    'filename.'
+                )
+            }
+        } elseif ([string]$replacement.checkpoint_hash -ne
                 [string]$receipt.checkpoint_hash -or
             [string]$replacement.input_manifest_hash -ne
                 [string]$receipt.input_manifest_hash) {
@@ -1299,6 +1475,19 @@ function Read-ThreadResultRecoveryReceipt {
                 [string]$receipt.milestone_activation_receipt_hash
         )) {
             throw 'Thread result recovery receipt crossed recovery cycles.'
+        }
+        if ([string]$receipt.schema_version -eq '1.3' -and (
+            [string]$previous.schema_version -ne '1.3' -or
+            [string]$previous.recovery_cycle_id -ne
+                [string]$receipt.recovery_cycle_id -or
+            [string]$previous.milestone_id -ne
+                [string]$receipt.milestone_id -or
+            [string]$previous.
+                replacement_checkpoint_roll_forward_receipt_hash -ne
+                [string]$receipt.
+                    replacement_checkpoint_roll_forward_receipt_hash
+        )) {
+            throw 'Thread result recovery receipt crossed replacement cycles.'
         }
     }
     $hashPayload = [ordered]@{}
@@ -1667,6 +1856,416 @@ function Read-ReplacementContinuityReceipt {
     return $receipt
 }
 
+function Read-ReplacementCheckpointRollForwardReceipt {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $RunDirectory,
+        [Parameter(Mandatory)][string] $ExpectedSourceNodeId,
+        [Parameter(Mandatory)][string] $ExpectedReplacementThreadId
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Replacement checkpoint roll-forward receipt does not exist: $Path"
+    }
+    $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+    $canonicalReceiptDirectory = [IO.Path]::GetFullPath(
+        (Join-Path $runRoot 'receipts')
+    ).TrimEnd('\', '/')
+    $receiptFullPath = [IO.Path]::GetFullPath($Path)
+    if (-not [string]::Equals(
+        (Split-Path -Parent $receiptFullPath).TrimEnd('\', '/'),
+        $canonicalReceiptDirectory,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw (
+            'Replacement checkpoint roll-forward receipt must use the ' +
+            'canonical run receipts directory.'
+        )
+    }
+    $receipt = Get-Content -LiteralPath $receiptFullPath -Raw |
+        ConvertFrom-Json -Depth 100 -DateKind String
+    $required = @(
+        'schema_version', 'run_id', 'plan_hash', 'source_node_id', 'role_id',
+        'source_kind', 'replacement_thread_id', 'continuity_key',
+        'replacement_continuity_receipt_path',
+        'replacement_continuity_receipt_hash',
+        'replacement_pending_event_sequence',
+        'replacement_pending_event_hash', 'actual_model_state',
+        'actual_model_id', 'actual_model_evidence_hash',
+        'previous_result_receipt_path', 'previous_result_receipt_hash',
+        'previous_result_file_hash', 'previous_disposition_receipt_path',
+        'previous_disposition_receipt_hash',
+        'previous_disposition_file_hash', 'previous_adopted_event_sequence',
+        'previous_adopted_event_hash', 'previous_checkpoint_hash',
+        'active_milestone_id', 'active_milestone_activation_receipt_path',
+        'active_milestone_activation_receipt_hash', 'target_milestone_id',
+        'checkpoint_path', 'checkpoint_hash', 'input_manifest_path',
+        'input_manifest_hash', 'authorization_material_path',
+        'authorization_material_hash', 'activation_key', 'roll_forward_id',
+        'created_at_utc', 'receipt_hash'
+    )
+    foreach ($name in $required) {
+        if ($null -eq $receipt.PSObject.Properties[$name]) {
+            throw (
+                "Replacement checkpoint roll-forward receipt is missing '$name'."
+            )
+        }
+    }
+    if ([string]$receipt.schema_version -ne '1.0' -or
+        [string]$receipt.source_kind -ne 'replacement' -or
+        [string]$receipt.source_node_id -ne $ExpectedSourceNodeId -or
+        [string]$receipt.replacement_thread_id -ne
+            $ExpectedReplacementThreadId) {
+        throw (
+            'Replacement checkpoint roll-forward does not match its logical ' +
+            'source or replacement thread.'
+        )
+    }
+    $expectedName = (
+        "$ExpectedSourceNodeId.replacement-roll-forward-" +
+        "$([string]$receipt.roll_forward_id).json"
+    )
+    if ([IO.Path]::GetFileName($receiptFullPath) -ne $expectedName) {
+        throw 'Replacement checkpoint roll-forward filename is non-canonical.'
+    }
+    $run = Get-Content -LiteralPath (Join-Path $runRoot 'run.json') -Raw |
+        ConvertFrom-Json -Depth 30 -DateKind String
+    $plan = Get-Content -LiteralPath (Join-Path $runRoot 'plan.json') -Raw |
+        ConvertFrom-Json -Depth 100 -DateKind String
+    $node = @($plan.nodes | Where-Object {
+        [string]$_.id -eq $ExpectedSourceNodeId
+    }) | Select-Object -First 1
+    if ($null -eq $node -or
+        [string]$node.kind -ne 'agent' -or
+        [string]$node.topology -ne 'background-thread' -or
+        -not [bool]$node.read_only -or [bool]$node.allow_delegation -or
+        @($node.write_scope).Count -gt 0 -or
+        [string]$receipt.run_id -ne [string]$run.run_id -or
+        [string]$receipt.plan_hash -ne [string]$run.plan_hash -or
+        [string]$receipt.role_id -ne [string]$node.role_id -or
+        [string]$receipt.continuity_key -ne
+            [string]$node.context.continuity_key -or
+        [string]$receipt.activation_key -notmatch
+            '^(user|controller):[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$') {
+        throw (
+            'Replacement checkpoint roll-forward changed source role, ' +
+            'permissions, or activation identity.'
+        )
+    }
+
+    if ($null -eq $plan.PSObject.Properties['durable_review_profile']) {
+        throw 'Replacement checkpoint roll-forward requires durable_review_profile.'
+    }
+    $milestones = @(
+        $plan.durable_review_profile.milestone_ids |
+            ForEach-Object { [string]$_ }
+    )
+    $activeIndex = [Array]::IndexOf(
+        $milestones, [string]$receipt.active_milestone_id
+    )
+    if ($activeIndex -lt 0 -or $activeIndex + 1 -ge $milestones.Count -or
+        [string]$receipt.target_milestone_id -ne
+            [string]$milestones[$activeIndex + 1]) {
+        throw (
+            'Replacement checkpoint roll-forward must target the immediately ' +
+            'next declared durable milestone.'
+        )
+    }
+
+    foreach ($binding in @(
+        @('checkpoint_path', 'checkpoint_hash', 'Checkpoint manifest'),
+        @('input_manifest_path', 'input_manifest_hash', 'Input manifest'),
+        @(
+            'authorization_material_path', 'authorization_material_hash',
+            'Authorization material'
+        )
+    )) {
+        $boundPath = Get-RunLocalReceiptPath -RunDirectory $runRoot `
+            -RelativePath ([string]$receipt.($binding[0])) `
+            -Label ([string]$binding[2])
+        if (-not (Test-Path -LiteralPath $boundPath -PathType Leaf) -or
+            (Get-TextSha256 (
+                Get-Content -LiteralPath $boundPath -Raw
+            )) -ne [string]$receipt.($binding[1])) {
+            throw "$($binding[2]) is missing or changed."
+        }
+    }
+    if ([string]$receipt.checkpoint_hash -eq
+        [string]$receipt.previous_checkpoint_hash) {
+        throw 'Replacement checkpoint roll-forward requires a new checkpoint.'
+    }
+
+    $continuityPath = Get-RunLocalReceiptPath -RunDirectory $runRoot `
+        -RelativePath (
+            [string]$receipt.replacement_continuity_receipt_path
+        ) -Label 'Replacement continuity receipt'
+    $continuity = Read-ReplacementContinuityReceipt `
+        -Path $continuityPath -RunDirectory $runRoot `
+        -ExpectedSourceNodeId $ExpectedSourceNodeId `
+        -ExpectedReplacementThreadId $ExpectedReplacementThreadId
+    if ([string]$continuity.receipt_hash -ne
+        [string]$receipt.replacement_continuity_receipt_hash) {
+        throw 'Replacement checkpoint roll-forward changed parent continuity.'
+    }
+
+    $events = @(Read-OrchestrationJournal (Join-Path $runRoot 'events.jsonl'))
+    $replacementPendingEvents = @($events | Where-Object {
+        [string]$_.node_id -eq $ExpectedSourceNodeId -and
+        [string]$_.status -eq 'replacement_pending' -and
+        [string]$_.thread_id -eq $ExpectedReplacementThreadId -and
+        [string]$_.replacement_receipt_hash -eq
+            [string]$continuity.receipt_hash
+    })
+    if ($replacementPendingEvents.Count -ne 1) {
+        throw (
+            'Replacement checkpoint roll-forward has no unique materialized ' +
+            'replacement lifecycle.'
+        )
+    }
+    $replacementPending = $replacementPendingEvents[0]
+    $replacementModelVerificationState = if (
+        $null -ne $replacementPending.PSObject.Properties[
+            'model_verification_state'
+        ]
+    ) {
+        [string]$replacementPending.model_verification_state
+    } else { '' }
+    $actualModelState = if (-not [string]::IsNullOrWhiteSpace(
+        [string]$replacementPending.model_id
+    )) {
+        'verified'
+    } elseif (
+        $replacementModelVerificationState -eq 'unverified' -or
+        @($replacementPending.evidence | Where-Object {
+            [string]$_ -match 'actual-model.*unverified|did-not-expose-actual-model'
+        }).Count -gt 0
+    ) {
+        'unverified'
+    } else {
+        throw (
+            'Replacement lifecycle does not honestly identify the actual model ' +
+            'as verified or unverified.'
+        )
+    }
+    $actualModelId = if ($actualModelState -eq 'verified') {
+        [string]$replacementPending.model_id
+    } else { '' }
+    $actualModelEvidenceHash = Get-TextSha256 (
+        @($replacementPending.evidence) |
+            ConvertTo-Json -Compress -Depth 20
+    )
+    if ([int]$receipt.replacement_pending_event_sequence -ne
+            [int]$replacementPending.sequence -or
+        [string]$receipt.replacement_pending_event_hash -ne
+            [string]$replacementPending.hash -or
+        [string]$receipt.actual_model_state -ne $actualModelState -or
+        [string]$receipt.actual_model_id -ne $actualModelId -or
+        [string]$receipt.actual_model_evidence_hash -ne
+            $actualModelEvidenceHash) {
+        throw (
+            'Replacement checkpoint roll-forward changed materialization or ' +
+            'actual-model evidence.'
+        )
+    }
+
+    $previousResultPath = Get-RunLocalReceiptPath -RunDirectory $runRoot `
+        -RelativePath ([string]$receipt.previous_result_receipt_path) `
+        -Label 'Previous replacement result receipt'
+    $previousResult = Read-ThreadResultReceipt -Path $previousResultPath `
+        -ExpectedThreadId $ExpectedReplacementThreadId `
+        -ExpectedSourceNodeId $ExpectedSourceNodeId -RunDirectory $runRoot
+    $previousCheckpointPath = Get-RunLocalReceiptPath `
+        -RunDirectory $runRoot `
+        -RelativePath ([string]$previousResult.checkpoint_material_path) `
+        -Label 'Previous replacement checkpoint material'
+    $previousCheckpointHash = Get-TextSha256 (
+        Get-Content -LiteralPath $previousCheckpointPath -Raw
+    )
+    $previousDispositionPath = Get-RunLocalReceiptPath -RunDirectory $runRoot `
+        -RelativePath ([string]$receipt.previous_disposition_receipt_path) `
+        -Label 'Previous replacement disposition receipt'
+    $previousDisposition = Read-ReviewDispositionReceipt `
+        -Path $previousDispositionPath -RunDirectory $runRoot `
+        -ExpectedSourceNodeId $ExpectedSourceNodeId `
+        -ExpectedThreadId $ExpectedReplacementThreadId
+    if ([string]$previousResult.source_kind -ne 'replacement' -or
+        [string]$previousResult.replacement_continuity_receipt_hash -ne
+            [string]$continuity.receipt_hash -or
+        [string]$previousResult.milestone_id -ne
+            [string]$receipt.target_milestone_id -or
+        $previousCheckpointHash -ne
+            [string]$receipt.previous_checkpoint_hash -or
+        [string]$previousResult.receipt_hash -ne
+            [string]$receipt.previous_result_receipt_hash -or
+        (Get-FileHash -LiteralPath $previousResultPath -Algorithm SHA256).
+            Hash.ToLowerInvariant() -ne
+            [string]$receipt.previous_result_file_hash -or
+        [string]$previousDisposition.source_result_receipt_hash -ne
+            [string]$previousResult.receipt_hash -or
+        [string]$previousDisposition.receipt_hash -ne
+            [string]$receipt.previous_disposition_receipt_hash -or
+        (Get-FileHash -LiteralPath $previousDispositionPath -Algorithm SHA256).
+            Hash.ToLowerInvariant() -ne
+            [string]$receipt.previous_disposition_file_hash) {
+        throw (
+            'Replacement checkpoint roll-forward changed the prior verified ' +
+            'result or disposition.'
+        )
+    }
+    $sourceHistory = @($events | Where-Object {
+        [string]$_.node_id -eq $ExpectedSourceNodeId -and
+        [int]$_.sequence -le [int]$receipt.previous_adopted_event_sequence
+    })
+    if ($sourceHistory.Count -lt 3) {
+        throw 'Replacement checkpoint roll-forward lacks a prior adopted chain.'
+    }
+    $adoptedEvent = $sourceHistory[-1]
+    $validatedEvent = $sourceHistory[-2]
+    $completedEvent = $sourceHistory[-3]
+    $resultPointer = (
+        'artifact:' + [string]$receipt.previous_result_receipt_path
+    )
+    $dispositionPointer = (
+        'artifact:' + [string]$receipt.previous_disposition_receipt_path
+    )
+    if ([string]$completedEvent.status -ne 'completed' -or
+        [string]$validatedEvent.status -ne 'validated' -or
+        [string]$adoptedEvent.status -ne 'adopted' -or
+        [string]$completedEvent.thread_id -ne $ExpectedReplacementThreadId -or
+        [string]$validatedEvent.thread_id -ne $ExpectedReplacementThreadId -or
+        [string]$adoptedEvent.thread_id -ne $ExpectedReplacementThreadId -or
+        $resultPointer -notin @($completedEvent.evidence) -or
+        $dispositionPointer -notin @($validatedEvent.evidence) -or
+        $dispositionPointer -notin @($adoptedEvent.evidence) -or
+        [int]$receipt.previous_adopted_event_sequence -ne
+            [int]$adoptedEvent.sequence -or
+        [string]$receipt.previous_adopted_event_hash -ne
+            [string]$adoptedEvent.hash) {
+        throw (
+            'Replacement checkpoint roll-forward does not match the terminal ' +
+            'adopted replacement result chain.'
+        )
+    }
+
+    $activationPath = [string](
+        $receipt.active_milestone_activation_receipt_path
+    )
+    $activationHash = [string](
+        $receipt.active_milestone_activation_receipt_hash
+    )
+    if ([string]::IsNullOrWhiteSpace($activationPath)) {
+        $baselineHash = Get-TextSha256 (
+            "baseline|$([string]$run.run_id)|$([string]$run.plan_hash)|" +
+            [string]$receipt.active_milestone_id
+        )
+        if ($activeIndex -ne 0 -or $activationHash -ne $baselineHash) {
+            throw 'Replacement checkpoint roll-forward baseline binding is invalid.'
+        }
+    } else {
+        $activationEvents = @($events | Where-Object {
+            [string]$_.event -in @(
+                'milestone-activated', 'milestone-revision-selected'
+            ) -and
+            [string]$_.milestone_id -eq
+                [string]$receipt.active_milestone_id -and
+            [string]$_.milestone_activation_receipt_path -eq $activationPath -and
+            [string]$_.milestone_activation_receipt_hash -eq $activationHash
+        })
+        if ($activationEvents.Count -ne 1) {
+            throw (
+                'Replacement checkpoint roll-forward active milestone binding ' +
+                'is missing or ambiguous.'
+            )
+        }
+        $activationFullPath = Get-RunLocalReceiptPath `
+            -RunDirectory $runRoot -RelativePath $activationPath `
+            -Label 'Active milestone activation receipt'
+        $activation = Get-Content -LiteralPath $activationFullPath -Raw |
+            ConvertFrom-Json -Depth 100 -DateKind String
+        $activationPayload = [ordered]@{}
+        foreach ($property in $activation.PSObject.Properties) {
+            if ($property.Name -ne 'receipt_hash') {
+                $activationPayload[$property.Name] = $property.Value
+            }
+        }
+        if ([string]$activation.receipt_hash -ne $activationHash -or
+            (Get-TextSha256 (
+                $activationPayload | ConvertTo-Json -Compress -Depth 100
+            )) -ne $activationHash -or
+            [string]$activation.run_id -ne [string]$run.run_id -or
+            [string]$activation.plan_hash -ne [string]$run.plan_hash -or
+            [string]$activation.milestone_id -ne
+                [string]$receipt.active_milestone_id) {
+            throw (
+                'Replacement checkpoint roll-forward active milestone receipt ' +
+                'binding is invalid.'
+            )
+        }
+    }
+
+    $identityPayload = [ordered]@{
+        run_id = [string]$receipt.run_id
+        plan_hash = [string]$receipt.plan_hash
+        source_node_id = [string]$receipt.source_node_id
+        role_id = [string]$receipt.role_id
+        replacement_thread_id = [string]$receipt.replacement_thread_id
+        replacement_continuity_receipt_hash = [string](
+            $receipt.replacement_continuity_receipt_hash
+        )
+        previous_adopted_event_hash = [string](
+            $receipt.previous_adopted_event_hash
+        )
+        active_milestone_id = [string]$receipt.active_milestone_id
+        active_milestone_activation_receipt_hash = $activationHash
+        target_milestone_id = [string]$receipt.target_milestone_id
+        checkpoint_hash = [string]$receipt.checkpoint_hash
+        input_manifest_hash = [string]$receipt.input_manifest_hash
+        authorization_material_hash = [string](
+            $receipt.authorization_material_hash
+        )
+        activation_key = [string]$receipt.activation_key
+    }
+    if ([string]$receipt.roll_forward_id -ne (Get-TextSha256 (
+        $identityPayload | ConvertTo-Json -Compress -Depth 30
+    ))) {
+        throw 'Replacement checkpoint roll-forward identity hash mismatch.'
+    }
+    $hashPayload = [ordered]@{}
+    foreach ($property in $receipt.PSObject.Properties) {
+        if ($property.Name -ne 'receipt_hash') {
+            $hashPayload[$property.Name] = $property.Value
+        }
+    }
+    if ([string]$receipt.receipt_hash -ne (Get-TextSha256 (
+        $hashPayload | ConvertTo-Json -Compress -Depth 100
+    ))) {
+        throw 'Replacement checkpoint roll-forward receipt hash mismatch.'
+    }
+    $duplicates = @(
+        Get-ChildItem -LiteralPath $canonicalReceiptDirectory -File `
+            -Filter "$ExpectedSourceNodeId.replacement-roll-forward-*.json" `
+            -ErrorAction SilentlyContinue | ForEach-Object {
+                Get-Content -LiteralPath $_.FullName -Raw |
+                    ConvertFrom-Json -Depth 100 -DateKind String
+            } | Where-Object {
+                [string]$_.run_id -eq [string]$receipt.run_id -and
+                [string]$_.source_node_id -eq $ExpectedSourceNodeId -and
+                [string]$_.replacement_thread_id -eq
+                    $ExpectedReplacementThreadId -and
+                [string]$_.active_milestone_activation_receipt_hash -eq
+                    $activationHash -and
+                [string]$_.target_milestone_id -eq
+                    [string]$receipt.target_milestone_id
+            }
+    )
+    if ($duplicates.Count -ne 1) {
+        throw (
+            'Replacement seat already has a checkpoint roll-forward for this ' +
+            'next milestone, or its authorization forked.'
+        )
+    }
+    return $receipt
+}
+
 function Read-ReviewDispositionReceipt {
     param(
         [Parameter(Mandatory)][string] $Path,
@@ -1719,9 +2318,9 @@ function Read-ReviewDispositionReceipt {
         -ExpectedThreadId $ExpectedThreadId `
         -ExpectedSourceNodeId $ExpectedSourceNodeId `
         -RunDirectory $RunDirectory
-    if ([string]$source.schema_version -ne '1.3') {
+    if ([string]$source.schema_version -notin @('1.3', '1.4')) {
         throw (
-            'Durable review completion requires a schema 1.3 source receipt ' +
+            'Durable review completion requires a schema 1.3 or 1.4 source receipt ' +
             'with stable finding identity and severity.'
         )
     }
