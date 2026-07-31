@@ -7,6 +7,7 @@ release records.
 
 | Version | Channel | Focus | Details |
 | --- | --- | --- | --- |
+| `v0.7.16` | Stable | Consecutive same-milestone durable-review revisions | [Notes](v0.7.16.md) |
 | `v0.7.15` | Stable | Append-only durable-review lifecycle evidence correction | [Notes](v0.7.15.md) |
 | `v0.7.14` | Stable | Durable reviewer continuity, source rotation, and materialization reconciliation | [Notes](v0.7.14.md) |
 | `v0.7.13` | Stable | Historical recovery epochs and immutable review-selection replay | [Notes](v0.7.13.md) |

@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.7.15 release notes](docs/releases/v0.7.15.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.7.16 release notes](docs/releases/v0.7.16.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -263,14 +263,14 @@ state, integrates results, and performs authorized external actions.
 
 ## Validation
 
-The v0.7.15 release passes:
+The v0.7.16 release passes:
 
 - PowerShell parser validation for all 54 scripts;
 - 45 materialization-continuity assertions, including 13 invalid cases;
 - 91 recovery-protocol assertions;
-- 128 durable-milestone, revision, and successor-run assertions;
+- 149 durable-milestone, revision, and successor-run assertions;
 - 15 run-policy activation assertions;
-- 862 self-test assertions;
+- 883 self-test assertions;
 - 59 intentionally invalid negative-test cases correctly rejected;
 - strict parsing for all 8 bundled reference JSON files;
 - plan, metadata, journal, handoff, dependency, idempotency, ownership,
@@ -332,6 +332,13 @@ The v0.7.15 release passes:
   without changing either adopted source or the old 35-event prefix. Completion
   remained `BLOCKED` by one product P0, six open P1 occurrences, and missing
   main acceptance; a resolved P1 did not reappear.
+- the real checkpoint16 review authorized revision index 2 from a complete,
+  selected predecessor without inventing final main acceptance. Both durable
+  sources returned fresh formal results and dispositions, one schema 1.1
+  selection was appended, the original 37-event prefix stayed byte-identical,
+  and completion remained `BLOCKED` by one open P0, five open P1 source
+  occurrences, and missing final main acceptance. Two same-source findings
+  resolved in this revision did not reappear.
 
 Run:
 
