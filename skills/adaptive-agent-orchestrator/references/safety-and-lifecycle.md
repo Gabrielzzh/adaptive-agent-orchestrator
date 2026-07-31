@@ -276,6 +276,11 @@ Resume from the event journal:
 5. Dispatch only dependency-ready incomplete nodes.
 6. Record any plan revision as an event; never silently rewrite history.
 
+For the narrowly defined milestone-revision validated-pointer mistake, append
+the full-source lifecycle correction receipt and its non-state event. Never
+rewrite the original lifecycle events or use correction for another error
+shape.
+
 The journal uses ordered sequence numbers and a SHA-256 hash chain. Treat a
 sequence gap or hash mismatch as corruption and stop recovery. `unknown` is
 fail-closed: reconcile it manually or reject it; never recreate it

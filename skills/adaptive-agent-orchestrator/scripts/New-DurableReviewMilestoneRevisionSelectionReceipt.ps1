@@ -47,6 +47,29 @@ $existingSelection = @($events | Where-Object {
 if ($authorizationEvent.Count -ne 1 -or $existingSelection.Count -ne 0) {
     throw 'Milestone revision authorization is absent, already selected, or forked.'
 }
+$correctionReceiptName = (
+    "durable-review-milestone.$($authorization.milestone_id)." +
+    "revision-$($authorization.revision_id).lifecycle-correction.json"
+)
+$correctionReceiptPath = Join-Path (
+    Join-Path $runRoot 'receipts'
+) $correctionReceiptName
+$correctionEvents = @($events | Where-Object {
+    [string]$_.event -eq
+        'milestone-revision-lifecycle-evidence-corrected' -and
+    [string]$_.milestone_revision_id -eq [string]$authorization.revision_id
+})
+$lifecycleCorrection = $null
+if ((Test-Path -LiteralPath $correctionReceiptPath -PathType Leaf) -or
+    $correctionEvents.Count -gt 0) {
+    if (-not (Test-Path -LiteralPath $correctionReceiptPath -PathType Leaf) -or
+        $correctionEvents.Count -ne 1) {
+        throw 'Milestone revision lifecycle correction is missing or forked.'
+    }
+    $lifecycleCorrection =
+        Read-DurableReviewMilestoneRevisionLifecycleCorrection `
+            -Path $correctionReceiptPath -RunDirectory $runRoot
+}
 $selectionItems = @(
     Get-Content -LiteralPath $SelectionMaterialPath -Raw |
         ConvertFrom-Json -Depth 100 -DateKind String
@@ -129,10 +152,55 @@ foreach ($requiredSource in $requiredSources) {
     }
     $resultPointer = "artifact:$($binding.result_receipt_path)"
     $dispositionPointer = "artifact:$($binding.disposition_receipt_path)"
-    if ($resultPointer -notin @($completed.evidence) -or
-        $dispositionPointer -notin @($validated.evidence) -or
-        $dispositionPointer -notin @($adopted.evidence)) {
-        throw 'Milestone revision lifecycle does not bind the selected receipts.'
+    if ($null -eq $lifecycleCorrection) {
+        if ($resultPointer -notin @($completed.evidence) -or
+            $dispositionPointer -notin @($validated.evidence) -or
+            $dispositionPointer -notin @($adopted.evidence)) {
+            throw (
+                'Milestone revision lifecycle does not bind the selected ' +
+                'receipts.'
+            )
+        }
+    } else {
+        $sourceCorrection = @(
+            $lifecycleCorrection.source_corrections | Where-Object {
+                [string]$_.source_node_id -eq $sourceNodeId
+            }
+        )
+        if ($sourceCorrection.Count -ne 1 -or
+            [int]$sourceCorrection[0].rearm_event_sequence -ne
+                [int]$rearms[0].sequence -or
+            [string]$sourceCorrection[0].rearm_event_hash -ne
+                [string]$rearms[0].hash -or
+            [int]$sourceCorrection[0].completed_event_sequence -ne
+                [int]$completed.sequence -or
+            [string]$sourceCorrection[0].completed_event_hash -ne
+                [string]$completed.hash -or
+            [int]$sourceCorrection[0].validated_event_sequence -ne
+                [int]$validated.sequence -or
+            [string]$sourceCorrection[0].validated_event_hash -ne
+                [string]$validated.hash -or
+            [int]$sourceCorrection[0].adopted_event_sequence -ne
+                [int]$adopted.sequence -or
+            [string]$sourceCorrection[0].adopted_event_hash -ne
+                [string]$adopted.hash -or
+            [string]$sourceCorrection[0].result_receipt_path -ne
+                [string]$binding.result_receipt_path -or
+            [string]$sourceCorrection[0].result_receipt_hash -ne
+                [string]$binding.result_receipt_hash -or
+            [string]$sourceCorrection[0].result_file_hash -ne
+                [string]$binding.result_file_hash -or
+            [string]$sourceCorrection[0].disposition_receipt_path -ne
+                [string]$binding.disposition_receipt_path -or
+            [string]$sourceCorrection[0].disposition_receipt_hash -ne
+                [string]$binding.disposition_receipt_hash -or
+            [string]$sourceCorrection[0].disposition_file_hash -ne
+                [string]$binding.disposition_file_hash) {
+            throw (
+                "Milestone revision source '$sourceNodeId' correction " +
+                'does not bind the selected lifecycle and receipts.'
+            )
+        }
     }
 
     $previous = @($authorization.previous_source_bindings | Where-Object {
@@ -202,7 +270,7 @@ $relative = {
     [IO.Path]::GetRelativePath($runRoot, $Path).Replace('\', '/')
 }
 $payload = [ordered]@{
-    schema_version = '1.1'
+    schema_version = if ($null -eq $lifecycleCorrection) { '1.1' } else { '1.2' }
     run_id = [string]$run.run_id
     plan_hash = [string]$run.plan_hash
     milestone_id = [string]$authorization.milestone_id
@@ -248,6 +316,16 @@ $payload = [ordered]@{
     selection_key = [string]$authorization.selection_key
     activation_key = $SelectionKey
     created_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
+}
+if ($null -ne $lifecycleCorrection) {
+    $payload.lifecycle_correction_receipt_path =
+        "receipts/$correctionReceiptName"
+    $payload.lifecycle_correction_receipt_hash =
+        [string]$lifecycleCorrection.receipt_hash
+    $payload.lifecycle_correction_event_sequence =
+        [int]$correctionEvents[0].sequence
+    $payload.lifecycle_correction_event_hash =
+        [string]$correctionEvents[0].hash
 }
 $receipt = [ordered]@{}
 foreach ($key in $payload.Keys) { $receipt[$key] = $payload[$key] }

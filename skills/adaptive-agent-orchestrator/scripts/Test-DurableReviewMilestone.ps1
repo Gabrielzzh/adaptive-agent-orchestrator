@@ -441,6 +441,69 @@ function Resign-SuccessorExportTail {
     $lines | Set-Content -LiteralPath $eventsPath -Encoding utf8
 }
 
+function Resign-RevisionLifecycleCorrectionTail {
+    param(
+        [Parameter(Mandatory)][string] $Run,
+        [Parameter(Mandatory)][scriptblock] $ReceiptMutation
+    )
+    $receiptFiles = @(
+        Get-ChildItem -LiteralPath (Join-Path $Run 'receipts') -File |
+            Where-Object { $_.Name -like '*.lifecycle-correction.json' }
+    )
+    if ($receiptFiles.Count -ne 1) {
+        throw 'Correction mutation fixture needs exactly one receipt.'
+    }
+    $receiptPath = $receiptFiles[0].FullName
+    $receipt = Get-Content -LiteralPath $receiptPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    & $ReceiptMutation $receipt
+    $receipt.source_corrections_hash = Get-TextSha256 (
+        ConvertTo-Json -InputObject @($receipt.source_corrections) `
+            -Compress -Depth 100
+    )
+    $receipt.Remove('receipt_hash')
+    $receipt.receipt_hash = Get-TextSha256 (
+        $receipt | ConvertTo-Json -Compress -Depth 100
+    )
+    $receipt | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $receiptPath -Encoding utf8
+
+    $eventsPath = Join-Path $Run 'events.jsonl'
+    $events = @(
+        Get-Content -LiteralPath $eventsPath | ForEach-Object {
+            $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+        }
+    )
+    $correctionIndex = [Array]::FindIndex(
+        [object[]]$events,
+        [Predicate[object]]{
+            param($event)
+            [string]$event.event -eq
+                'milestone-revision-lifecycle-evidence-corrected'
+        }
+    )
+    if ($correctionIndex -ne ($events.Count - 1)) {
+        throw 'Correction mutation fixture requires the correction at the tail.'
+    }
+    $event = $events[$correctionIndex]
+    $event.milestone_id = [string]$receipt.milestone_id
+    $event.milestone_activation_receipt_hash = [string]$receipt.receipt_hash
+    $event.milestone_revision_id = [string]$receipt.revision_id
+    $event.milestone_revision_authorization_receipt_hash =
+        [string]$receipt.authorization_receipt_hash
+    $event.milestone_revision_checkpoint_hash =
+        [string]$receipt.checkpoint_material_hash
+    $event.milestone_revision_input_hash = [string]$receipt.input_manifest_hash
+    $event.milestone_revision_selection_key = [string]$receipt.selection_key
+    $event.idempotency_key = [string]$receipt.correction_key
+    $event.request_fingerprint = [string]$receipt.receipt_hash
+    $event.Remove('hash')
+    $event.hash = Get-OrchestrationEventHash ([pscustomobject]$event)
+    @($events | ForEach-Object {
+        [pscustomobject]$_ | ConvertTo-Json -Compress -Depth 100
+    }) | Set-Content -LiteralPath $eventsPath -Encoding utf8
+}
+
 function Assert-AdoptionMutationRejected {
     param(
         [string] $Run,
@@ -942,6 +1005,416 @@ try {
         }
     ) | ConvertTo-Json -Depth 20 |
         Set-Content -LiteralPath $revisionSelectionMaterial
+
+    # A caller may have correctly bound the result at completed and the
+    # disposition at adopted, but accidentally repeated the result pointer at
+    # validated. The immutable events remain evidence; one append-only,
+    # whole-source-set correction must be required before selection.
+    $evidenceCorrectionRun = Join-Path $testRoot (
+        'revision-validated-evidence-correction'
+    )
+    Copy-Item -LiteralPath $revisionReadyRun `
+        -Destination $evidenceCorrectionRun -Recurse
+    $evidenceCorrectionSelection = Join-Path $evidenceCorrectionRun (
+        'materials/method-1-revision-1-selection.json'
+    )
+    Copy-Item -LiteralPath $revisionSelectionMaterial `
+        -Destination $evidenceCorrectionSelection
+    $evidenceCorrectionEventsPath = Join-Path (
+        $evidenceCorrectionRun
+    ) 'events.jsonl'
+    $evidenceCorrectionEvents = @(
+        Get-Content -LiteralPath $evidenceCorrectionEventsPath |
+            ForEach-Object {
+                $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+            }
+    )
+    foreach ($source in @(
+        @{
+            id = 'review'
+            result = $revisionReview.result_path
+        },
+        @{
+            id = 'domain'
+            result = $revisionDomain.result_path
+        }
+    )) {
+        $validatedIndex = [Array]::FindLastIndex(
+            [object[]]$evidenceCorrectionEvents,
+            [Predicate[object]]{
+                param($event)
+                [string]$event.node_id -eq [string]$source.id -and
+                [string]$event.status -eq 'validated'
+            }
+        )
+        Assert-True ($validatedIndex -ge 0) (
+            "The correction fixture needs a validated event for '$($source.id)'."
+        )
+        $evidenceCorrectionEvents[$validatedIndex].evidence = @(
+            "artifact:$($source.result)"
+        )
+    }
+    for ($eventIndex = 0; $eventIndex -lt $evidenceCorrectionEvents.Count;
+        $eventIndex++) {
+        $evidenceCorrectionEvents[$eventIndex].prev_hash = if (
+            $eventIndex -eq 0
+        ) { $null } else {
+            [string]$evidenceCorrectionEvents[$eventIndex - 1].hash
+        }
+        $evidenceCorrectionEvents[$eventIndex].hash =
+            Get-OrchestrationEventHash (
+                [pscustomobject]$evidenceCorrectionEvents[$eventIndex]
+            )
+    }
+    @($evidenceCorrectionEvents | ForEach-Object {
+        [pscustomobject]$_ | ConvertTo-Json -Compress -Depth 100
+    }) | Set-Content -LiteralPath $evidenceCorrectionEventsPath
+    $evidenceCorrectionAuthorizationPath = Join-Path (
+        $evidenceCorrectionRun
+    ) $revisionAuthorizationRelative
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+        )) -RunDirectory $evidenceCorrectionRun `
+            -AuthorizationReceiptPath $evidenceCorrectionAuthorizationPath `
+            -SelectionMaterialPath $evidenceCorrectionSelection `
+            -SelectionKey $authorizedSelectionKey | Out-Null
+    } 'lifecycle does not bind' (
+        'A validated event that repeats the result pointer must fail closed.'
+    )
+    $evidenceCorrectionAuthorization = Join-Path (
+        $evidenceCorrectionRun
+    ) 'materials/revision-lifecycle-correction-authorization.md'
+    Set-Content -LiteralPath $evidenceCorrectionAuthorization -Value (
+        'Controller authorizes only the validated evidence pointer correction.'
+    )
+    $evidenceCorrectionBeforeRun = Join-Path $testRoot (
+        'revision-validated-evidence-before-correction'
+    )
+    Copy-Item -LiteralPath $evidenceCorrectionRun `
+        -Destination $evidenceCorrectionBeforeRun -Recurse
+    $evidenceCorrection = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+    )) -RunDirectory $evidenceCorrectionRun `
+        -AuthorizationReceiptPath $evidenceCorrectionAuthorizationPath `
+        -SelectionMaterialPath $evidenceCorrectionSelection `
+        -AuthorizationMaterialPath $evidenceCorrectionAuthorization `
+        -CorrectionKey 'controller:revision-validated-evidence-correction' |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$evidenceCorrection.schema_version -eq '1.0' -and
+        @($evidenceCorrection.source_corrections).Count -eq 2
+    ) 'One correction receipt must bind the complete durable source set.'
+    $evidenceCorrectionPendingRun = Join-Path $testRoot (
+        'revision-validated-evidence-corrected-pending-selection'
+    )
+    Copy-Item -LiteralPath $evidenceCorrectionRun `
+        -Destination $evidenceCorrectionPendingRun -Recurse
+    $correctedRevisionSelection = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+    )) -RunDirectory $evidenceCorrectionRun `
+        -AuthorizationReceiptPath $evidenceCorrectionAuthorizationPath `
+        -SelectionMaterialPath $evidenceCorrectionSelection `
+        -SelectionKey $authorizedSelectionKey |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$correctedRevisionSelection.schema_version -eq '1.2' -and
+        [string]$correctedRevisionSelection.lifecycle_correction_receipt_hash -eq
+            [string]$evidenceCorrection.receipt_hash
+    ) (
+        'A corrected selection must bind the exact append-only correction ' +
+        'without rewriting lifecycle events.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $evidenceCorrectionRun | Out-Null
+    } 'lacks main-owner acceptance' (
+        'Lifecycle evidence correction cannot replace independent main acceptance.'
+    )
+
+    $pendingCorrectionPath = @(
+        Get-ChildItem -LiteralPath (
+            Join-Path $evidenceCorrectionPendingRun 'receipts'
+        ) -File | Where-Object {
+            $_.Name -like '*.lifecycle-correction.json'
+        }
+    )[0].FullName
+    $pendingCorrectionEvents = @(Read-OrchestrationJournal (
+        Join-Path $evidenceCorrectionPendingRun 'events.jsonl'
+    ))
+    $pendingCorrectionState = & (
+        Join-Path $scriptRoot 'Get-OrchestrationState.ps1'
+    ) -RunDirectory $evidenceCorrectionPendingRun |
+        ConvertFrom-Json -Depth 100
+    $pendingCorrectionEvent = $pendingCorrectionEvents[-1]
+    Assert-True (
+        [string]$pendingCorrectionEvent.event -eq
+            'milestone-revision-lifecycle-evidence-corrected' -and
+        $null -eq $pendingCorrectionEvent.node_id -and
+        $null -eq $pendingCorrectionEvent.prior_state -and
+        [string]$pendingCorrectionEvent.status -eq 'planned' -and
+        @($pendingCorrectionState.nodes | Where-Object {
+            [string]$_.id -in @('review', 'domain') -and
+            [string]$_.status -eq 'adopted'
+        }).Count -eq 2
+    ) (
+        'Lifecycle evidence correction must append a non-state event and leave ' +
+        'both durable sources adopted.'
+    )
+    $pendingCorrectionJournalHash = (
+        Get-FileHash -LiteralPath (
+            Join-Path $evidenceCorrectionPendingRun 'events.jsonl'
+        ) -Algorithm SHA256
+    ).Hash
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+        )) -RunDirectory $evidenceCorrectionPendingRun `
+            -AuthorizationReceiptPath (
+                Join-Path $evidenceCorrectionPendingRun (
+                    $revisionAuthorizationRelative
+                )
+            ) -SelectionMaterialPath (
+                Join-Path $evidenceCorrectionPendingRun (
+                    'materials/method-1-revision-1-selection.json'
+                )
+            ) -AuthorizationMaterialPath (
+                Join-Path $evidenceCorrectionPendingRun (
+                    'materials/revision-lifecycle-correction-authorization.md'
+                )
+            ) -CorrectionKey 'controller:duplicate-lifecycle-correction' |
+            Out-Null
+    } 'requires one pending, uncorrected authorization' (
+        'A revision lifecycle correction cannot be repeated or forked.'
+    )
+    Assert-True (
+        $pendingCorrectionJournalHash -eq (
+            Get-FileHash -LiteralPath (
+                Join-Path $evidenceCorrectionPendingRun 'events.jsonl'
+            ) -Algorithm SHA256
+        ).Hash
+    ) 'A rejected duplicate correction must not mutate the journal.'
+
+    $partialCorrectionRun = Join-Path $testRoot (
+        'revision-lifecycle-correction-partial-source'
+    )
+    Copy-Item -LiteralPath $evidenceCorrectionBeforeRun `
+        -Destination $partialCorrectionRun -Recurse
+    $partialSelectionPath = Join-Path $partialCorrectionRun (
+        'materials/method-1-revision-1-selection.json'
+    )
+    $partialSelection = @(
+        Get-Content -LiteralPath $partialSelectionPath -Raw |
+            ConvertFrom-Json -Depth 100
+    )
+    @($partialSelection | Select-Object -First 1) |
+        ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $partialSelectionPath
+    $partialJournalHash = (
+        Get-FileHash -LiteralPath (
+            Join-Path $partialCorrectionRun 'events.jsonl'
+        ) -Algorithm SHA256
+    ).Hash
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+        )) -RunDirectory $partialCorrectionRun `
+            -AuthorizationReceiptPath (
+                Join-Path $partialCorrectionRun $revisionAuthorizationRelative
+            ) -SelectionMaterialPath $partialSelectionPath `
+            -AuthorizationMaterialPath (
+                Join-Path $partialCorrectionRun (
+                    'materials/revision-lifecycle-correction-authorization.md'
+                )
+            ) -CorrectionKey 'controller:partial-lifecycle-correction' |
+            Out-Null
+    } 'source set is incomplete' (
+        'A lifecycle correction must include every required source.'
+    )
+    Assert-True (
+        $partialJournalHash -eq (
+            Get-FileHash -LiteralPath (
+                Join-Path $partialCorrectionRun 'events.jsonl'
+            ) -Algorithm SHA256
+        ).Hash
+    ) 'A rejected partial correction must not mutate the journal.'
+
+    $otherShapeRun = Join-Path $testRoot (
+        'revision-lifecycle-correction-other-error-shape'
+    )
+    Copy-Item -LiteralPath $evidenceCorrectionBeforeRun `
+        -Destination $otherShapeRun -Recurse
+    $otherShapeEventsPath = Join-Path $otherShapeRun 'events.jsonl'
+    $otherShapeEvents = @(
+        Get-Content -LiteralPath $otherShapeEventsPath | ForEach-Object {
+            $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+        }
+    )
+    $otherShapeIndex = [Array]::FindLastIndex(
+        [object[]]$otherShapeEvents,
+        [Predicate[object]]{
+            param($event)
+            [string]$event.node_id -eq 'review' -and
+            [string]$event.status -eq 'adopted'
+        }
+    )
+    $otherShapeEvents[$otherShapeIndex].evidence = @(
+        "artifact:$($revisionReview.result_path)"
+    )
+    for ($eventIndex = 0; $eventIndex -lt $otherShapeEvents.Count;
+        $eventIndex++) {
+        $otherShapeEvents[$eventIndex].prev_hash = if ($eventIndex -eq 0) {
+            $null
+        } else { [string]$otherShapeEvents[$eventIndex - 1].hash }
+        $otherShapeEvents[$eventIndex].Remove('hash')
+        $otherShapeEvents[$eventIndex].hash = Get-OrchestrationEventHash (
+            [pscustomobject]$otherShapeEvents[$eventIndex]
+        )
+    }
+    @($otherShapeEvents | ForEach-Object {
+        [pscustomobject]$_ | ConvertTo-Json -Compress -Depth 100
+    }) | Set-Content -LiteralPath $otherShapeEventsPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+        )) -RunDirectory $otherShapeRun `
+            -AuthorizationReceiptPath (
+                Join-Path $otherShapeRun $revisionAuthorizationRelative
+            ) -SelectionMaterialPath (
+                Join-Path $otherShapeRun (
+                    'materials/method-1-revision-1-selection.json'
+                )
+            ) -AuthorizationMaterialPath (
+                Join-Path $otherShapeRun (
+                    'materials/revision-lifecycle-correction-authorization.md'
+                )
+            ) -CorrectionKey 'controller:reject-other-error-shape' |
+            Out-Null
+    } 'exact validated-result-pointer error shape' (
+        'The correction cannot repair a wrong adopted evidence pointer.'
+    )
+
+    foreach ($mutation in @(
+        @{
+            name = 'partial-receipt'
+            expected = 'source set is incomplete'
+            action = {
+                param($receipt)
+                $receipt.source_corrections =
+                    @($receipt.source_corrections | Select-Object -First 1)
+            }
+        },
+        @{
+            name = 'cross-source'
+            expected = 'missing or repeated'
+            action = {
+                param($receipt)
+                $receipt.source_corrections[0].source_node_id = 'review'
+            }
+        },
+        @{
+            name = 'cross-thread'
+            expected = 'binding changed'
+            action = {
+                param($receipt)
+                $receipt.source_corrections[0].source_thread_id =
+                    'another-thread'
+            }
+        },
+        @{
+            name = 'cross-role'
+            expected = 'binding changed'
+            action = {
+                param($receipt)
+                $receipt.source_corrections[0].role_id = 'another-role'
+            }
+        },
+        @{
+            name = 'cross-run'
+            expected = 'binding is invalid'
+            action = {
+                param($receipt)
+                $receipt.run_id = 'another-run'
+            }
+        },
+        @{
+            name = 'cross-revision'
+            expected = 'binding is invalid'
+            action = {
+                param($receipt)
+                $receipt.revision_id = 'another-revision'
+            }
+        },
+        @{
+            name = 'cross-checkpoint'
+            expected = 'binding is invalid'
+            action = {
+                param($receipt)
+                $receipt.checkpoint_material_hash = ('0' * 64)
+            }
+        },
+        @{
+            name = 'cross-input'
+            expected = 'binding is invalid'
+            action = {
+                param($receipt)
+                $receipt.input_manifest_hash = ('1' * 64)
+            }
+        },
+        @{
+            name = 'selection-key'
+            expected = 'binding is invalid'
+            action = {
+                param($receipt)
+                $receipt.selection_key =
+                    'controller:milestone-revision-selection:another-revision'
+            }
+        }
+    )) {
+        $mutationRun = Join-Path $testRoot (
+            "revision-lifecycle-correction-$($mutation.name)"
+        )
+        Copy-Item -LiteralPath $evidenceCorrectionPendingRun `
+            -Destination $mutationRun -Recurse
+        Resign-RevisionLifecycleCorrectionTail -Run $mutationRun `
+            -ReceiptMutation $mutation.action
+        $mutationReceiptPath = @(
+            Get-ChildItem -LiteralPath (Join-Path $mutationRun 'receipts') -File |
+                Where-Object {
+                    $_.Name -like '*.lifecycle-correction.json'
+                }
+        )[0].FullName
+        Assert-ThrowsLike {
+            Read-DurableReviewMilestoneRevisionLifecycleCorrection `
+                -Path $mutationReceiptPath -RunDirectory $mutationRun |
+                Out-Null
+        } $mutation.expected (
+            "A $($mutation.name) correction mutation must fail closed."
+        )
+    }
+
+    $artifactDriftRun = Join-Path $testRoot (
+        'revision-lifecycle-correction-artifact-drift'
+    )
+    Copy-Item -LiteralPath $evidenceCorrectionPendingRun `
+        -Destination $artifactDriftRun -Recurse
+    Add-Content -LiteralPath (
+        Join-Path $artifactDriftRun $revisionReview.disposition_path
+    ) -Value ' '
+    $artifactDriftReceipt = @(
+        Get-ChildItem -LiteralPath (Join-Path $artifactDriftRun 'receipts') -File |
+            Where-Object {
+                $_.Name -like '*.lifecycle-correction.json'
+            }
+    )[0].FullName
+    Assert-ThrowsLike {
+        Read-DurableReviewMilestoneRevisionLifecycleCorrection `
+            -Path $artifactDriftReceipt -RunDirectory $artifactDriftRun |
+            Out-Null
+    } 'binding changed' (
+        'Selected result and disposition file hashes must remain immutable.'
+    )
+
     $preboundSelectionJournalHash = (
         Get-FileHash -LiteralPath (Join-Path $revisionRun 'events.jsonl') `
             -Algorithm SHA256

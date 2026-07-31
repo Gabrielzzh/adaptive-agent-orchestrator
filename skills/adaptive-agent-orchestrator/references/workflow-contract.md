@@ -286,6 +286,29 @@ produce fresh post-anchor `completed -> validated -> adopted` chains, select
 them once with
 `New-DurableReviewMilestoneRevisionSelectionReceipt.ps1`.
 
+If and only if every source's `completed` event binds its result, every
+`adopted` event binds its disposition, and every `validated` event mistakenly
+repeats that result pointer, append one whole-source-set correction before
+selection:
+
+```powershell
+pwsh -File scripts/New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1 `
+  -RunDirectory <run> `
+  -AuthorizationReceiptPath <run>/receipts/<revision-authorization>.json `
+  -SelectionMaterialPath <run>/materials/<revision-selection>.json `
+  -AuthorizationMaterialPath <run>/materials/<correction-authorization>.md `
+  -CorrectionKey "controller:<stable-correction-reference>"
+```
+
+The correction binds the authorization and its pre-bound selection key, the
+current journal head/count, checkpoint/input, complete source/role/thread set,
+exact lifecycle event sequence/hash, and result/disposition file and internal
+hashes. It appends a non-state event: it cannot change a source state, resolve a
+finding, resend review, or replace main acceptance. Partial, repeated, forked,
+cross-run/source/thread/revision/checkpoint, artifact-drifted, or differently
+shaped corrections fail before journal write. Selection schema 1.2 binds and
+revalidates this correction together with the original events.
+
 Selection rejects partial source sets, excluded chains, cross-source/thread or
 cross-checkpoint substitutions, and any prior occurrence that disappears or
 changes `source_finding_id`, severity, exact text/hash, or canonical ID.
