@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[English](README.md) · [v0.7.14 正式版说明](docs/releases/v0.7.14.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+[English](README.md) · [v0.7.15 正式版说明](docs/releases/v0.7.15.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
 
 ![Adaptive Agent Orchestrator v0.7.0 发布图](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -231,14 +231,14 @@ $adaptive-agent-orchestrator。共享上下文留在主 Agent，Worker 只拿引
 
 ## 验证情况
 
-v0.7.14 正式版本通过：
+v0.7.15 正式版本通过：
 
-- 53 个 PowerShell 脚本语法解析；
+- 54 个 PowerShell 脚本语法解析；
 - 45 项物化连续性断言，其中包含 13 个非法案例；
 - 91 项恢复协议专项断言；
-- 106 项 durable milestone、revision 与 successor-run 专项断言；
+- 128 项 durable milestone、revision 与 successor-run 专项断言；
 - 15 项 run policy activation 专项断言；
-- 840 项完整自测断言；
+- 862 项完整自测断言；
 - 59 份故意构造的非法负面案例均被正确拦截；
 - 8 个 reference JSON 文件严格解析；
 - 计划、元数据、日志、handoff、依赖、幂等、所有权、上下文重叠、渐进
@@ -282,6 +282,10 @@ v0.7.14 正式版本通过：
   创建一位审核员；两份正式复审都在原任务内完成恢复，并生成各自的 result 与
   disposition。completion 继续因 multi-divination 产品 P0、7 条开放 P1 和
   缺少主任务最终验收而 `BLOCKED`，没有发现新的 Orchestrator P0/P1。
+- 真实 checkpoint15 revision 对两条误绑的 `validated` 事件追加了一份完整
+  来源集合的生命周期证据纠正，再生成 schema 1.2 selection；两个来源仍为
+  adopted，旧 35 条事件前缀逐字节不变。completion 继续因 1 个产品 P0、
+  6 条开放 P1 和缺少主任务验收而 `BLOCKED`，已解决的 P1 没有回流。
 
 ```powershell
 pwsh -NoProfile -File `
@@ -291,6 +295,9 @@ pwsh -NoProfile -File `
 ## 当前限制
 
 - 这是治理 Skill，不是独立 Agent 托管平台。
+- 生命周期证据纠正只适用于所有选定来源都精确满足
+  `completed=result`、`validated=result`、`adopted=disposition` 的错误
+  形态；它不是通用的日志编辑或生命周期修复机制。
 - Skill 不修复平台自身的 `systemError` 或 final 丢失；它保证这些状态不会
   被误报为成功，并使恢复与替代连续性可核验。
 - source rotation 只更换审核席位并继承控制义务，不迁移、判断或修复被审核

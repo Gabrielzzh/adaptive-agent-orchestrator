@@ -333,6 +333,10 @@ every prior source occurrence by source ID, severity, exact text/hash, and
 canonical ID; canonical grouping never deletes an occurrence. A pending or
 partially reviewed revision blocks completion, and selection does not replace
 fresh main-owner acceptance.
+If every source's `completed` and `adopted` evidence is correct but each
+`validated` event repeated the result pointer, use the lifecycle correction
+command in [workflow-contract.md](references/workflow-contract.md). It appends
+one non-state correction for the full source set; no other error shape qualifies.
 The activation must also bind controller material that fixes the later
 main-owner acceptance key and evidence path/hash.
 If a reviewed milestone intentionally retains P0/P1 work assigned to the next

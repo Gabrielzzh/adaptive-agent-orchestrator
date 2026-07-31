@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.7.15 - 2026-07-31
+
+Append-only durable-review lifecycle evidence correction release.
+
+- Fix a fail-closed deadlock where both durable sources had correctly recorded
+  `completed` result evidence and `adopted` disposition evidence, but each
+  `validated` event mistakenly repeated the result pointer. The immutable
+  lifecycle could not be selected, while editing history or rerunning reviewers
+  was forbidden.
+- Add one whole-source, append-only lifecycle correction receipt and journal
+  event for that exact error shape. It binds the pending revision
+  authorization, pre-bound selection key, journal head/count, both exact source
+  lifecycle chains, checkpoint/input, and result/disposition internal and file
+  hashes.
+- Keep source states unchanged. The correction cannot resolve findings, resend
+  or create reviewers, repair any other lifecycle error, or replace an original
+  event.
+- Require revision selection and completion readback to validate both the
+  immutable original events and the correction. Duplicate, partial, forked,
+  cross-run/source/role/thread/revision/checkpoint/input, artifact-drift, and
+  authority-drift attempts fail before journal write.
+- Validate the fixed 73-file package through an independent 39/39 dynamic
+  re-attack with P0=0/P1=0/P2=0, then exercise it in the real checkpoint15
+  review run. The old 35-event prefix remained byte-identical, both sources
+  remained adopted, and completion stayed correctly `BLOCKED` by one product
+  P0, six open P1 occurrences, and missing main acceptance.
+- Preserve the boundary: this release does not repair platform `systemError`,
+  judge or fix multi-divination findings, claim measured Token savings or
+  business accuracy, or modify multi-divination product files.
+
 ## 0.7.14 - 2026-07-31
 
 Durable reviewer continuity and source-rotation patch release.
