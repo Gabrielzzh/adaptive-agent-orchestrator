@@ -279,6 +279,18 @@ related pre-authorization event sequence/hash plus capture, recovery, result,
 and disposition path/file/internal hashes. Omitting or rewriting one fails
 before source re-arm.
 
+A selected revision that retains open P0/P1 findings may authorize another
+checkpoint revision of that same plan-index-0 milestone without manufacturing
+final main-owner acceptance. Authorization schema 1.1 additionally binds the
+previous selection receipt and exact journal event plus every open occurrence's
+source, role, thread, source/canonical IDs, severity, exact text/hash, and open
+status. The checkpoint and input must both change. A pending revision, later
+milestone activation, existing final acceptance, omitted or rewritten
+occurrence, changed source/thread, replay, or fork fails before journal write.
+The next selection must conserve those occurrences through the existing
+source-specific selection gate; open P0/P1 and missing main acceptance continue
+to block completion.
+
 Each required source then uses `Add-OrchestrationEvent.ps1 -Status running`
 with `-MilestoneRevisionAuthorizationReceiptPath`; this is the sole narrow
 `adopted -> running` exception and is single-use per source. After all sources

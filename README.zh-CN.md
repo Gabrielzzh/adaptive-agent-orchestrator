@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[English](README.md) · [v0.7.15 正式版说明](docs/releases/v0.7.15.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+[English](README.md) · [v0.7.16 正式版说明](docs/releases/v0.7.16.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
 
 ![Adaptive Agent Orchestrator v0.7.0 发布图](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -231,14 +231,14 @@ $adaptive-agent-orchestrator。共享上下文留在主 Agent，Worker 只拿引
 
 ## 验证情况
 
-v0.7.15 正式版本通过：
+v0.7.16 正式版本通过：
 
 - 54 个 PowerShell 脚本语法解析；
 - 45 项物化连续性断言，其中包含 13 个非法案例；
 - 91 项恢复协议专项断言；
-- 128 项 durable milestone、revision 与 successor-run 专项断言；
+- 149 项 durable milestone、revision 与 successor-run 专项断言；
 - 15 项 run policy activation 专项断言；
-- 862 项完整自测断言；
+- 883 项完整自测断言；
 - 59 份故意构造的非法负面案例均被正确拦截；
 - 8 个 reference JSON 文件严格解析；
 - 计划、元数据、日志、handoff、依赖、幂等、所有权、上下文重叠、渐进
@@ -286,6 +286,11 @@ v0.7.15 正式版本通过：
   来源集合的生命周期证据纠正，再生成 schema 1.2 selection；两个来源仍为
   adopted，旧 35 条事件前缀逐字节不变。completion 继续因 1 个产品 P0、
   6 条开放 P1 和缺少主任务验收而 `BLOCKED`，已解决的 P1 没有回流。
+- 真实 checkpoint16 在前一轮已经完整选定、但仍保留开放问题且没有最终主
+  验收的情况下，合法授权 revision index 2。两个长期来源都返回 fresh
+  result/disposition，唯一 schema 1.1 selection 被追加，旧 37 条事件前缀
+  逐字节不变；completion 继续因 1 个开放 P0、5 条开放 P1 来源记录和缺少
+  主任务最终验收而 `BLOCKED`，本轮同来源解决的两项问题没有回流。
 
 ```powershell
 pwsh -NoProfile -File `

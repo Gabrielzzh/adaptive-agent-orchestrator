@@ -50,12 +50,6 @@ $chain = Read-DurableReviewMilestoneActivationChain -RunDirectory $runRoot
 if ([string]$chain.active_milestone_id -ne $MilestoneId) {
     throw 'A first-milestone revision cannot replace or skip a later milestone.'
 }
-if (-not [string]::IsNullOrWhiteSpace(
-    [string]$chain.activation_receipt_hash
-)) {
-    $null = Read-DurableReviewMilestoneAcceptance `
-        -RunDirectory $runRoot -MilestoneChain $chain
-}
 $authorizedEvents = @($events | Where-Object {
     [string]$_.event -eq 'milestone-revision-authorized'
 })
@@ -64,6 +58,43 @@ $selectedEvents = @($events | Where-Object {
 })
 if ($authorizedEvents.Count -ne $selectedEvents.Count) {
     throw 'A prior milestone revision authorization is still pending selection.'
+}
+$previousSelection = $null
+$previousSelectionEvent = $null
+$previousOpenInventory = $null
+$finalAcceptancePresent = $false
+if ($selectedEvents.Count -gt 0) {
+    $acceptanceReceiptPath = Join-Path $runRoot (
+        "receipts/durable-review-milestone.$MilestoneId.acceptance.json"
+    )
+    if (Test-Path -LiteralPath $acceptanceReceiptPath -PathType Leaf) {
+        $null = Read-DurableReviewMilestoneAcceptance `
+            -RunDirectory $runRoot -MilestoneChain $chain
+        $finalAcceptancePresent = $true
+    }
+    if (@($events | Where-Object {
+        [string]$_.event -eq 'milestone-accepted' -and
+        [string]$_.milestone_id -eq $MilestoneId
+    }).Count -gt 0) {
+        $finalAcceptancePresent = $true
+    }
+    $previousSelection = $chain.activation_receipt
+    $previousSelectionEvent = $selectedEvents[-1]
+    if ($null -eq $previousSelection -or
+        [string]$chain.activation_receipt_path -ne
+            [string]$previousSelectionEvent.milestone_activation_receipt_path -or
+        [string]$chain.activation_receipt_hash -ne
+            [string]$previousSelectionEvent.milestone_activation_receipt_hash -or
+        [int]$previousSelection.revision_index -ne $selectedEvents.Count) {
+        throw 'The previous first-milestone revision selection is incomplete.'
+    }
+    $previousOpenInventory = Get-MilestoneRevisionOpenOccurrenceInventory `
+        -RunDirectory $runRoot -Plan $plan -MilestoneId $MilestoneId `
+        -SourceBindings @($chain.active_source_bindings)
+} elseif (-not [string]::IsNullOrWhiteSpace(
+    [string]$chain.activation_receipt_hash
+)) {
+    throw 'The first-milestone revision chain is inconsistent.'
 }
 
 function Resolve-RunFile {
@@ -124,13 +155,19 @@ foreach ($sourceNodeId in $requiredSourceIds) {
     $material = @($reviewMaterials | Where-Object {
         [string]$_.source_node_id -eq $sourceNodeId
     })
+    $previousBinding = @($chain.active_source_bindings | Where-Object {
+        [string]$_.source_node_id -eq $sourceNodeId
+    })
     if ($null -eq $node -or $null -eq $nodeState -or
         [string]$nodeState.status -ne 'adopted' -or
         [string]::IsNullOrWhiteSpace([string]$nodeState.thread_id) -or
-        $material.Count -ne 1) {
+        $material.Count -ne 1 -or $previousBinding.Count -ne 1 -or
+        [string]$previousBinding[0].source_thread_id -ne
+            [string]$nodeState.thread_id) {
         throw (
             "Revision source '$sourceNodeId' must be uniquely materialized, " +
-            'adopted, and assigned one review material.'
+            'adopted on its existing durable thread, and assigned one review ' +
+            'material.'
         )
     }
     $materialPath = Get-RunLocalReceiptPath -RunDirectory $runRoot `
@@ -158,6 +195,9 @@ foreach ($sourceNodeId in $requiredSourceIds) {
 $checkpointHash = (
     Get-FileHash -LiteralPath $checkpointPath -Algorithm SHA256
 ).Hash.ToLowerInvariant()
+$inputHash = (
+    Get-FileHash -LiteralPath $inputPath -Algorithm SHA256
+).Hash.ToLowerInvariant()
 $activeCheckpointHashes = @($chain.active_source_bindings |
     ForEach-Object { [string]$_.checkpoint_material_hash } |
     Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
@@ -165,6 +205,10 @@ $activeCheckpointHashes = @($chain.active_source_bindings |
 if ($activeCheckpointHashes.Count -eq 1 -and
     $activeCheckpointHashes[0] -eq $checkpointHash) {
     throw 'The active first-milestone checkpoint cannot be revised in place.'
+}
+if ($null -ne $previousSelection -and
+    [string]$previousSelection.input_manifest_hash -eq $inputHash) {
+    throw 'A subsequent first-milestone revision requires a new input manifest.'
 }
 $expectedInventory = Get-MilestoneRevisionExcludedInventory `
     -RunDirectory $runRoot -Events $events `
@@ -291,13 +335,20 @@ if (-not (Test-Path -LiteralPath $acceptanceEvidencePath -PathType Leaf) -or
     throw 'Revision acceptance evidence binding changed.'
 }
 
-$inputHash = (
-    Get-FileHash -LiteralPath $inputPath -Algorithm SHA256
-).Hash.ToLowerInvariant()
 if (@($selectedEvents | Where-Object {
     [string]$_.milestone_revision_checkpoint_hash -eq $checkpointHash
 }).Count -gt 0) {
     throw 'The same checkpoint already has a selected milestone revision.'
+}
+if ($finalAcceptancePresent) {
+    throw 'A finally accepted first milestone cannot be revised again.'
+}
+if ($selectedEvents.Count -gt 0 -and
+    [int]$previousOpenInventory.count -lt 1) {
+    throw (
+        'A subsequent first-milestone revision requires unresolved P0/P1 ' +
+        'occurrences from the selected predecessor.'
+    )
 }
 $revisionSeed = [ordered]@{
     run_id = [string]$run.run_id
@@ -328,7 +379,7 @@ $relative = {
     [IO.Path]::GetRelativePath($runRoot, $Path).Replace('\', '/')
 }
 $payload = [ordered]@{
-    schema_version = '1.0'
+    schema_version = if ($selectedEvents.Count -eq 0) { '1.0' } else { '1.1' }
     run_id = [string]$run.run_id
     plan_hash = [string]$run.plan_hash
     genesis_hash = [string]$events[0].hash
@@ -388,8 +439,24 @@ $payload = [ordered]@{
     selection_authority_key = $SelectionKey
     selection_key = $boundSelectionKey
     activation_key = $ActivationKey
-    created_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
 }
+if ($selectedEvents.Count -gt 0) {
+    $payload.previous_revision_selection_receipt_path =
+        [string]$chain.activation_receipt_path
+    $payload.previous_revision_selection_receipt_hash =
+        [string]$previousSelection.receipt_hash
+    $payload.previous_revision_selection_event_sequence =
+        [int]$previousSelectionEvent.sequence
+    $payload.previous_revision_selection_event_hash =
+        [string]$previousSelectionEvent.hash
+    $payload.previous_open_occurrences =
+        @($previousOpenInventory.occurrences)
+    $payload.previous_open_occurrences_hash =
+        [string]$previousOpenInventory.hash
+    $payload.previous_open_occurrence_count =
+        [int]$previousOpenInventory.count
+}
+$payload.created_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
 $receipt = [ordered]@{}
 foreach ($key in $payload.Keys) { $receipt[$key] = $payload[$key] }
 $receipt.receipt_hash = Get-TextSha256 (

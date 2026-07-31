@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.7.16 - 2026-07-31
+
+Consecutive first-milestone durable-review revision release.
+
+- Fix a fail-closed deadlock where a complete, selected first-milestone revision
+  still had open P0/P1 findings and therefore correctly lacked final main-owner
+  acceptance, but that missing final acceptance also prevented authorizing the
+  next checkpoint revision of the same milestone.
+- Allow the next revision only when the active milestone is plan index 0, the
+  preceding revision is complete and uniquely selected, no later milestone,
+  pending revision, partial revision, or final acceptance exists, and the new
+  checkpoint and input differ from the preceding revision.
+- Add schema 1.1 authorization that binds the preceding selection receipt and
+  exact selection event, current journal head/count, the same read-only source,
+  role, and durable-task identities, and every still-open P0/P1 occurrence with
+  its source ID, canonical ID, severity, exact text/hash, and status.
+- Reject omitted, downgraded, rewritten, cross-source, cross-task, replayed,
+  forked, stale-head, same-checkpoint, later-milestone, pending, and
+  post-authorization evidence-drift attempts before journal write. Schema 1.0
+  remains valid for the first revision.
+- Validate the fixed 73-file package through the same independent Noether role:
+  50/50 dynamic cases plus 9/9 real-run-shape checks passed with
+  P0=0/P1=0/P2=0.
+- Exercise the installed candidate in the real checkpoint16 review. Both
+  durable sources produced fresh formal results, dispositions, and lifecycle
+  evidence; one unique schema 1.1 selection was appended; the original
+  37-event prefix remained byte-identical; and completion stayed correctly
+  `BLOCKED` by one open P0, five open P1 source occurrences, and missing final
+  main acceptance.
+- Preserve the boundary: this release does not repair platform `systemError`,
+  judge or fix multi-divination findings, claim measured Token savings or
+  business accuracy, or modify multi-divination product files.
+
 ## 0.7.15 - 2026-07-31
 
 Append-only durable-review lifecycle evidence correction release.
