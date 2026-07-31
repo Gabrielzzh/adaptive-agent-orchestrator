@@ -20,6 +20,9 @@ review, adversarial acceptance, architecture, and ambiguous debugging use at
 least `strong`; a standard node cannot silently become a durable reviewer.
 Overriding an `economy` or `standard` Luna default with Sol is an escalation and
 requires the normal user or bounded-policy evidence.
+The resolver enforces this for every new launch. Existing immutable plans that
+were valid when `standard` defaulted to Sol remain readable; do not rewrite or
+invalidate a live run merely to adopt the new cost preference.
 
 Prefer Sol `max` over `ultra` when deeper reasoning is sufficient. In the
 current runtime, Ultra also enables automatic task delegation and therefore

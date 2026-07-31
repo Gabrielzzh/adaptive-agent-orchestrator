@@ -145,6 +145,9 @@ reasoning effort for cost-aware execution. This is not a review downgrade:
 durable domain/dissent roles and other formal acceptance reviewers require the
 `strong` Sol route. A low-risk sampled check may remain standard only when it is
 not the run's formal independent acceptance source.
+Apply the new default prospectively through the resolver. A prior immutable
+plan may retain its already-bound standard/Sol route; changing its model field
+would violate the durable-run contract and is not a cost optimization.
 
 `ultra` requires all of the following:
 

@@ -2858,6 +2858,22 @@ try {
         'model authorization requires user: evidence'
     )
 
+    $legacyStandardSol = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $legacyStandardSol.nodes[0].capability = 'standard'
+    $legacyStandardSol.nodes[0].model = 'gpt-5.6-sol'
+    $legacyStandardSol.nodes[0].effort = 'medium'
+    $legacyStandardSolPath = Join-Path $testRoot 'legacy-standard-sol.json'
+    $legacyStandardSol | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $legacyStandardSolPath
+    $legacyStandardSolValidation = & (
+        Join-Path $scriptRoot 'Test-OrchestrationPlan.ps1'
+    ) -PlanPath $legacyStandardSolPath -WorkspaceRoot $skillRoot |
+        ConvertFrom-Json
+    Assert-True $legacyStandardSolValidation.valid (
+        'An immutable standard/Sol plan valid under the prior binding must remain readable.'
+    )
+
     $missingResolvedModel = Get-Content -LiteralPath $examplePath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 100
     $missingResolvedModel.nodes[0].Remove('model')

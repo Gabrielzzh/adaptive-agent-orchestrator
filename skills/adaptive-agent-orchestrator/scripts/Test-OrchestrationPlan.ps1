@@ -382,11 +382,11 @@ foreach ($node in $nodes) {
                     }
                 }
             }
-            if ($capability -in @('economy', 'standard') -and
+            if ($capability -eq 'economy' -and
                 $model -eq 'gpt-5.6-sol' -and
                 $modelAuthorization -notin @('user-confirmed', 'policy-confirmed')) {
                 Add-PlanError (
-                    "Agent node '$id' Luna-default-to-Sol selection requires " +
+                    "Agent node '$id' economy-to-Sol selection requires " +
                     'confirmed escalation.'
                 )
             }
