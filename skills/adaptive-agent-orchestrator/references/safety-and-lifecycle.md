@@ -65,7 +65,19 @@ For a durable background thread:
    reservation, and receipt hashes all verify. A typed observation string alone
    is insufficient.
 10. If reconciliation is unavailable or ambiguous, stop with `unknown`; never
-   retry the same activation key.
+    retry the same activation key.
+
+If a fresh task ID was recorded one step early on `materializing`, do not create
+another task or edit the journal. The immediately adjacent `materialized` event
+may keep that exact ID only when both events share the run, node, role, and
+attempt; the launch reservation still verifies; a run-local reconciliation
+receipt re-derives exactly one matching task; and a raw `read_thread` capture
+contains the exact final marker `MATERIALIZED_WAITING_FOR_CONTINUITY`. The ID
+must not occur in any earlier event or another node. New `materializing` events
+that carry an ID must pass the same uniqueness, reconciliation, reservation, and
+handshake checks on first use. A different ID, interleaving event, partial
+evidence, duplicate match, or repeated materialization fails before journal
+append.
 
 After the run's reconciliation receipts are final, append verified,
 privacy-minimal observations once:

@@ -138,6 +138,10 @@ record it with `New-ThreadResultReceipt.ps1` before integration. Follow the
 exact tool, marker, collection, and failure rules in
 [platform-codex.md](references/platform-codex.md) and
 [safety-and-lifecycle.md](references/safety-and-lifecycle.md).
+If a fresh task ID was accidentally recorded on `materializing`, never recreate
+the task or edit history. Use the narrow adjacent same-ID materialization path
+from `safety-and-lifecycle.md`; it requires the original reservation, a unique
+task-list reconciliation, and the exact waiting-handshake capture.
 
 A worktree task requires a verified Git repository and usable `HEAD`. Run
 `Test-CodexWorktreePreflight.ps1` before the creation call. An unborn branch or

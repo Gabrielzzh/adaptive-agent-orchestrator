@@ -71,6 +71,13 @@ try {
         'Thread capture compatibility tests must pass.'
     )
 
+    $materializationContinuity = & (
+        Join-Path $scriptRoot 'Test-MaterializationContinuity.ps1'
+    ) | ConvertFrom-Json
+    Assert-True $materializationContinuity.pass (
+        'Fresh materialization continuity tests must pass.'
+    )
+
     $valid = & (Join-Path $scriptRoot 'Test-OrchestrationPlan.ps1') `
         -PlanPath $examplePath -WorkspaceRoot $skillRoot |
         ConvertFrom-Json

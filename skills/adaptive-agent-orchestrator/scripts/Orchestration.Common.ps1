@@ -45,6 +45,49 @@ function Get-OrchestrationEventHash {
             $keys[$modelIndex..($keys.Count - 1)]
         )
     }
+    if ($null -ne $Event.PSObject.Properties[
+        'materialization_reconciliation_receipt_path'
+    ] -or $null -ne $Event.PSObject.Properties[
+        'materialization_reconciliation_receipt_hash'
+    ] -or $null -ne $Event.PSObject.Properties[
+        'materialization_activation_reservation_path'
+    ] -or $null -ne $Event.PSObject.Properties[
+        'materialization_activation_reservation_hash'
+    ] -or $null -ne $Event.PSObject.Properties[
+        'materialization_activation_key_hash'
+    ] -or $null -ne $Event.PSObject.Properties[
+        'materialization_handshake_capture_path'
+    ] -or $null -ne $Event.PSObject.Properties[
+        'materialization_handshake_capture_hash'
+    ] -or $null -ne $Event.PSObject.Properties[
+        'materialization_handshake_turn_id'
+    ] -or $null -ne $Event.PSObject.Properties[
+        'materialization_launch_event_sequence'
+    ] -or $null -ne $Event.PSObject.Properties[
+        'materialization_launch_event_hash'
+    ] -or $null -ne $Event.PSObject.Properties[
+        'materialization_prior_event_sequence'
+    ] -or $null -ne $Event.PSObject.Properties[
+        'materialization_prior_event_hash'
+    ]) {
+        $materializationIndex = [Array]::IndexOf($keys, 'model_id') + 1
+        $keys = @(
+            $keys[0..($materializationIndex - 1)]
+            'materialization_reconciliation_receipt_path'
+            'materialization_reconciliation_receipt_hash'
+            'materialization_activation_reservation_path'
+            'materialization_activation_reservation_hash'
+            'materialization_activation_key_hash'
+            'materialization_handshake_capture_path'
+            'materialization_handshake_capture_hash'
+            'materialization_handshake_turn_id'
+            'materialization_launch_event_sequence'
+            'materialization_launch_event_hash'
+            'materialization_prior_event_sequence'
+            'materialization_prior_event_hash'
+            $keys[$materializationIndex..($keys.Count - 1)]
+        )
+    }
     if ($null -ne $Event.PSObject.Properties['recovery_cycle_id'] -or
         $null -ne $Event.PSObject.Properties['recovery_milestone_id'] -or
         $null -ne $Event.PSObject.Properties[
@@ -464,6 +507,50 @@ function Read-ThreadReadCapture {
     return [pscustomobject]@{
         final_turn_id = [string]$finalTurn.id
         final_content_hash = Get-TextSha256 $finalText
+        capture_hash = Get-TextSha256 $raw
+    }
+}
+
+function Read-ThreadMaterializationHandshakeCapture {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $ExpectedThreadId
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Materialization handshake capture does not exist: $Path"
+    }
+    $raw = Get-Content -LiteralPath $Path -Raw
+    $capture = $raw | ConvertFrom-Json -Depth 100 -DateKind String
+    if ($null -eq $capture.PSObject.Properties['page'] -or
+        [string]$capture.page.order -ne 'newest_first') {
+        throw 'Materialization handshake capture must declare newest_first turn order.'
+    }
+    $captureThreadId = Get-ThreadCaptureId -Capture $capture `
+        -CaptureKind 'Materialization handshake'
+    if ($captureThreadId -cne $ExpectedThreadId) {
+        throw 'Materialization handshake capture does not match the expected thread.'
+    }
+    $turns = @($capture.turns)
+    if ($turns.Count -eq 0 -or
+        [string]$turns[0].status -ne 'completed' -or
+        [string]::IsNullOrWhiteSpace([string]$turns[0].id)) {
+        throw 'Materialization handshake capture lacks a completed newest turn.'
+    }
+    $finalMessages = @($turns[0].items | Where-Object {
+        [string]$_.type -eq 'agentMessage' -and
+        [string]$_.phase -eq 'final_answer'
+    })
+    if ($finalMessages.Count -ne 1 -or
+        [string]$finalMessages[0].text -cne
+            'MATERIALIZED_WAITING_FOR_CONTINUITY') {
+        throw (
+            'Materialization handshake capture lacks the exact waiting marker ' +
+            'MATERIALIZED_WAITING_FOR_CONTINUITY.'
+        )
+    }
+    return [pscustomobject]@{
+        final_turn_id = [string]$turns[0].id
         capture_hash = Get-TextSha256 $raw
     }
 }
@@ -4473,6 +4560,130 @@ function Read-ThreadReconciliationReceipt {
             $snapshotTimes[-1] -lt $windowEnd -or
             $hasMatchingThread) {
             throw 'Thread reconciliation no-match is not supported by its input.'
+        }
+    } elseif ([string]$receipt.decision -eq 'adopted') {
+        $windowStart = [DateTimeOffset]::Parse(
+            [string]$input.window_start_utc,
+            [Globalization.CultureInfo]::InvariantCulture
+        ).ToUniversalTime()
+        $windowEnd = [DateTimeOffset]::Parse(
+            [string]$input.window_end_utc,
+            [Globalization.CultureInfo]::InvariantCulture
+        ).ToUniversalTime()
+        $expectedSummary = [regex]::Replace(
+            ([string]$input.task_summary).Trim(),
+            '\s+',
+            ' '
+        ).ToLowerInvariant()
+        $matches = [Collections.Generic.List[object]]::new()
+        foreach ($snapshot in @($input.snapshots)) {
+            foreach ($thread in @($snapshot.threads)) {
+                $threadId = if ($null -ne
+                    $thread.PSObject.Properties['thread_id']) {
+                    [string]$thread.thread_id
+                } elseif ($null -ne $thread.PSObject.Properties['id']) {
+                    [string]$thread.id
+                } else { '' }
+                $hostId = if ($null -ne
+                    $thread.PSObject.Properties['host_id']) {
+                    [string]$thread.host_id
+                } else { '' }
+                $preview = if ($null -ne
+                    $thread.PSObject.Properties['preview']) {
+                    [string]$thread.preview
+                } else { '' }
+                $activation = if ($null -ne
+                    $thread.PSObject.Properties['activation_key']) {
+                    [string]$thread.activation_key
+                } else {
+                    $match = [regex]::Match(
+                        $preview,
+                        '<activation_key>([^<]+)</activation_key>'
+                    )
+                    if ($match.Success) {
+                        [string]$match.Groups[1].Value
+                    } else { '' }
+                }
+                $source = if ($null -ne
+                    $thread.PSObject.Properties['source_thread_id']) {
+                    [string]$thread.source_thread_id
+                } else {
+                    $match = [regex]::Match(
+                        $preview,
+                        '<source_thread_id>([^<]+)</source_thread_id>'
+                    )
+                    if ($match.Success) {
+                        [string]$match.Groups[1].Value
+                    } else { '' }
+                }
+                $summaryMatches = $false
+                if ($null -ne
+                    $thread.PSObject.Properties['task_summary_hash']) {
+                    $summaryMatches = (
+                        [string]$thread.task_summary_hash
+                    ).ToLowerInvariant() -eq (
+                        Get-TextSha256 $expectedSummary
+                    )
+                } elseif ($null -ne
+                    $thread.PSObject.Properties['task_summary']) {
+                    $summaryMatches = (
+                        [regex]::Replace(
+                            ([string]$thread.task_summary).Trim(),
+                            '\s+',
+                            ' '
+                        ).ToLowerInvariant()
+                    ) -eq $expectedSummary
+                } elseif (-not [string]::IsNullOrWhiteSpace($preview)) {
+                    $summaryMatches = (
+                        [regex]::Replace(
+                            $preview.Trim(),
+                            '\s+',
+                            ' '
+                        ).ToLowerInvariant()
+                    ).Contains($expectedSummary)
+                }
+                if ([string]::IsNullOrWhiteSpace($threadId) -or
+                    [string]::IsNullOrWhiteSpace($hostId) -or
+                    $activation -ne [string]$input.activation_key -or
+                    $source -ne [string]$input.source_thread_id -or
+                    -not $summaryMatches -or
+                    $null -eq $thread.PSObject.Properties['created_at']) {
+                    continue
+                }
+                $createdAt = [DateTimeOffset]::Parse(
+                    [string]$thread.created_at,
+                    [Globalization.CultureInfo]::InvariantCulture
+                ).ToUniversalTime()
+                if ($createdAt -lt $windowStart -or $createdAt -gt $windowEnd) {
+                    continue
+                }
+                $matches.Add([pscustomobject]@{
+                    thread_id = $threadId
+                    host_id = $hostId
+                })
+            }
+        }
+        $uniqueMatches = @($matches | Sort-Object thread_id -Unique)
+        $receiptMatches = @($receipt.matched_thread_ids)
+        $returnedThreadId = if ($null -eq $receipt.returned_thread_id) {
+            ''
+        } else { [string]$receipt.returned_thread_id }
+        if ($uniqueMatches.Count -ne 1 -or
+            $receiptMatches.Count -ne 1 -or
+            [string]$receiptMatches[0] -ne
+                [string]$uniqueMatches[0].thread_id -or
+            [string]$receipt.adopted_thread_id -ne
+                [string]$uniqueMatches[0].thread_id -or
+            [string]$receipt.adopted_host_id -ne
+                [string]$uniqueMatches[0].host_id -or
+            @($receipt.duplicate_thread_ids).Count -ne 0 -or
+            (-not [string]::IsNullOrWhiteSpace($returnedThreadId) -and
+                $returnedThreadId -ne
+                    [string]$uniqueMatches[0].thread_id)) {
+            throw (
+                'Thread reconciliation adopted decision is not supported by ' +
+                'one unique input match.'
+            )
         }
     }
     return $receipt

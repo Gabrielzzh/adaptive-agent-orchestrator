@@ -58,6 +58,8 @@ param(
     [string] $ReplacementContinuityReceiptPath,
     [string] $ReplacementCheckpointRollForwardReceiptPath,
     [string] $MilestoneRevisionAuthorizationReceiptPath,
+    [string] $MaterializationReconciliationReceiptPath,
+    [string] $MaterializationHandshakeCapturePath,
     [switch] $AdoptActivatedLifecycle
 )
 
@@ -326,6 +328,142 @@ if (-not [string]::IsNullOrWhiteSpace($ReconciliationReceiptPath)) {
     )
     $cleanEvidence += 'observation:task-list-reconciled-no-match'
 }
+$materializationReconciliation = $null
+$materializationHandshake = $null
+$normalizedMaterializationReconciliationPath = $null
+$normalizedMaterializationHandshakePath = $null
+$materializationActivationReservationRelativePath = $null
+$materializationActivationReservationHash = $null
+$materializationActivationKey = $null
+$materializationActivationKeyHash = $null
+$hasMaterializationReconciliation = -not [string]::IsNullOrWhiteSpace(
+    $MaterializationReconciliationReceiptPath
+)
+$hasMaterializationHandshake = -not [string]::IsNullOrWhiteSpace(
+    $MaterializationHandshakeCapturePath
+)
+if ($hasMaterializationReconciliation -xor $hasMaterializationHandshake) {
+    throw (
+        'Fresh same-ID materialization requires reconciliation and handshake ' +
+        'captures together.'
+    )
+}
+if ($hasMaterializationReconciliation) {
+    if ($node.kind -ne 'agent' -or
+        [string]$node.context.session_policy -ne 'fresh' -or
+        $Status -notin @('materializing', 'materialized') -or
+        [string]::IsNullOrWhiteSpace($ThreadId)) {
+        throw (
+            'Materialization reconciliation and handshake captures are only ' +
+            'valid for a concrete fresh agent materializing or materialized event.'
+        )
+    }
+    if ([IO.Path]::IsPathRooted($MaterializationReconciliationReceiptPath) -or
+        [IO.Path]::IsPathRooted($MaterializationHandshakeCapturePath)) {
+        throw 'Materialization evidence paths must be run-relative.'
+    }
+    $normalizedMaterializationReconciliationPath = (
+        $MaterializationReconciliationReceiptPath.Replace('\', '/')
+    )
+    $normalizedMaterializationHandshakePath = (
+        $MaterializationHandshakeCapturePath.Replace('\', '/')
+    )
+    $materializationReconciliation = Read-ThreadReconciliationReceipt `
+        -Path (Join-Path $RunDirectory (
+            $normalizedMaterializationReconciliationPath
+        )) -RunDirectory $RunDirectory -ExpectedDecision 'adopted'
+    if (@($materializationReconciliation.matched_thread_ids).Count -ne 1 -or
+        @($materializationReconciliation.duplicate_thread_ids).Count -ne 0 -or
+        [string]$materializationReconciliation.adopted_thread_id -ne $ThreadId -or
+        [string]$materializationReconciliation.matched_thread_ids[0] -ne
+            $ThreadId) {
+        if ($Status -eq 'materialized') {
+            throw (
+                'Materialized must keep the exact thread bound by the adjacent ' +
+                'materializing event.'
+            )
+        }
+        throw 'Fresh materialization requires one uniquely reconciled matching thread.'
+    }
+    $handshakePath = Get-RunLocalReceiptPath -RunDirectory $RunDirectory `
+        -RelativePath $normalizedMaterializationHandshakePath `
+        -Label 'Materialization handshake capture'
+    $materializationHandshake =
+        Read-ThreadMaterializationHandshakeCapture -Path $handshakePath `
+            -ExpectedThreadId $ThreadId
+
+    $reconciliationInputPath = Get-RunLocalReceiptPath `
+        -RunDirectory $RunDirectory `
+        -RelativePath (
+            [string]$materializationReconciliation.reconciliation_input_path
+        ) -Label 'Materialization reconciliation input'
+    $reconciliationInput = Get-Content -LiteralPath (
+        $reconciliationInputPath
+    ) -Raw | ConvertFrom-Json -Depth 50 -DateKind String
+    $reservationPath = [IO.Path]::GetFullPath(
+        [string]$reconciliationInput.reservation_path
+    )
+    $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+    $activationRoot = [IO.Path]::GetFullPath(
+        (Join-Path $runRoot 'receipts/activations')
+    ).TrimEnd('\', '/')
+    if (-not $reservationPath.StartsWith(
+        $activationRoot + [IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase
+    ) -or -not (Test-Path -LiteralPath $reservationPath -PathType Leaf)) {
+        throw 'Materialization activation reservation is missing or outside the run.'
+    }
+    $reservation = Get-Content -LiteralPath $reservationPath -Raw |
+        ConvertFrom-Json -Depth 20 -DateKind String
+    $materializationActivationReservationRelativePath =
+        [IO.Path]::GetRelativePath(
+            $runRoot,
+            $reservationPath
+        ).Replace('\', '/')
+    $materializationActivationReservationHash =
+        [string]$reservation.reservation_hash
+    if ($materializationActivationReservationHash -ne
+        [string]$materializationReconciliation.activation_reservation_hash) {
+        throw 'Materialization activation reservation hash changed.'
+    }
+    $materializationActivationKey = [string]$reservation.activation_key
+    $materializationActivationKeyHash =
+        [string]$reservation.activation_key_hash
+    if ([string]::IsNullOrWhiteSpace($materializationActivationKey) -or
+        $materializationActivationKeyHash -ne (
+            Get-TextSha256 $materializationActivationKey
+        )) {
+        throw 'Materialization activation reservation key is invalid.'
+    }
+    $previewPath = Get-RunLocalReceiptPath -RunDirectory $RunDirectory `
+        -RelativePath ([string]$reservation.role_preview_path) `
+        -Label 'Materialization role preview'
+    $previewText = Get-Content -LiteralPath $previewPath -Raw
+    if (-not $previewText.Contains("[$($node.role_id)]") -or
+        $previewText -notlike (
+            "*Topology/session: $($node.topology) / fresh*"
+        )) {
+        throw 'Materialization activation reservation changed the node role.'
+    }
+    $cleanEvidence += (
+        "artifact:$normalizedMaterializationReconciliationPath"
+    )
+    $cleanEvidence += (
+        'observation:materialization-reconciliation-hash:' +
+        [string]$materializationReconciliation.receipt_hash
+    )
+    $cleanEvidence += (
+        "artifact:$normalizedMaterializationHandshakePath"
+    )
+    $cleanEvidence += (
+        'observation:materialization-handshake-hash:' +
+        [string]$materializationHandshake.capture_hash
+    )
+    $cleanEvidence += (
+        'observation:materialization-handshake-turn:' +
+        [string]$materializationHandshake.final_turn_id
+    )
+}
 $recoveryReceipt = $null
 $normalizedRecoveryPath = $null
 if (-not [string]::IsNullOrWhiteSpace($RecoveryReceiptPath)) {
@@ -491,6 +629,28 @@ $requestPayload = [ordered]@{
             if ($replacementRollForwardReceipt) {
                 [string]$replacementRollForwardReceipt.receipt_hash
             } else { $null }
+        materialization_reconciliation_receipt_path =
+            $normalizedMaterializationReconciliationPath
+        materialization_reconciliation_receipt_hash =
+            if ($materializationReconciliation) {
+                [string]$materializationReconciliation.receipt_hash
+            } else { $null }
+        materialization_activation_reservation_path =
+            $materializationActivationReservationRelativePath
+        materialization_activation_reservation_hash =
+            $materializationActivationReservationHash
+        materialization_activation_key_hash =
+            $materializationActivationKeyHash
+        materialization_handshake_capture_path =
+            $normalizedMaterializationHandshakePath
+        materialization_handshake_capture_hash =
+            if ($materializationHandshake) {
+                [string]$materializationHandshake.capture_hash
+            } else { $null }
+        materialization_handshake_turn_id =
+            if ($materializationHandshake) {
+                [string]$materializationHandshake.final_turn_id
+            } else { $null }
         adopt_activated_lifecycle = [bool]$AdoptActivatedLifecycle
 }
 if ($revisionAuthorization) {
@@ -558,6 +718,228 @@ try {
 
     $history = @($events | Where-Object { $_.node_id -eq $NodeId })
     $priorState = if ($history.Count) { [string]$history[-1].status } else { 'planned' }
+    $isFreshMaterializingBinding = $false
+    $isFreshMaterializationContinuity = $false
+    $materializationLaunchEvent = $null
+    $materializationPriorEvent = $null
+    if ($node.kind -eq 'agent' -and
+        [string]$node.context.session_policy -eq 'fresh') {
+        if ($Status -eq 'materializing' -and
+            -not [string]::IsNullOrWhiteSpace($ThreadId)) {
+            if ($null -eq $materializationReconciliation -or
+                $null -eq $materializationHandshake) {
+                throw (
+                    'Fresh same-ID materialization requires reconciliation and ' +
+                    'handshake captures together.'
+                )
+            }
+            if ($priorState -ne 'launch_reserved' -or
+                $history.Count -lt 1 -or
+                [string]$events[-1].hash -ne [string]$history[-1].hash) {
+                throw (
+                    'A thread-bound materializing event must immediately follow ' +
+                    'its launch reservation.'
+                )
+            }
+            if (@($events | Where-Object {
+                [string]$_.thread_id -eq $ThreadId
+            }).Count -gt 0) {
+                throw (
+                    "Fresh thread '$ThreadId' was already present in journal " +
+                    'history.'
+                )
+            }
+            $materializationLaunchEvent = $history[-1]
+            $isFreshMaterializingBinding = $true
+        } elseif ($Status -eq 'materialized' -and
+            $priorState -eq 'materializing' -and $history.Count -gt 0 -and
+            -not [string]::IsNullOrWhiteSpace(
+                [string]$history[-1].thread_id
+            )) {
+            $materializationPriorEvent = $history[-1]
+            if ([string]$materializationPriorEvent.thread_id -ne $ThreadId) {
+                throw (
+                    'Materialized must keep the exact thread bound by the ' +
+                    'adjacent materializing event.'
+                )
+            }
+            if ($null -eq $materializationReconciliation -or
+                $null -eq $materializationHandshake) {
+                throw (
+                    'Fresh same-ID materialization requires reconciliation and ' +
+                    'handshake captures together.'
+                )
+            }
+            if ([string]$events[-1].hash -ne
+                [string]$materializationPriorEvent.hash) {
+                throw (
+                    'Fresh same-ID materializing and materialized events must be ' +
+                    'immediately adjacent.'
+                )
+            }
+            if ($history.Count -lt 2) {
+                throw 'Fresh same-ID materialization lacks its launch reservation.'
+            }
+            $materializationLaunchEvent = $history[-2]
+            $threadHistory = @($events | Where-Object {
+                [string]$_.thread_id -eq $ThreadId
+            })
+            if ($threadHistory.Count -ne 1 -or
+                [string]$threadHistory[0].hash -ne
+                    [string]$materializationPriorEvent.hash) {
+                throw (
+                    'Fresh same-ID materialization found an older or cross-node ' +
+                    'thread use.'
+                )
+            }
+            $isFreshMaterializationContinuity = $true
+        } elseif ($null -ne $materializationReconciliation -or
+            $null -ne $materializationHandshake) {
+            throw (
+                'Materialization evidence is only valid for first thread binding ' +
+                'or the immediately adjacent same-ID materialized event.'
+            )
+        }
+    } elseif ($null -ne $materializationReconciliation -or
+        $null -ne $materializationHandshake) {
+        throw 'Materialization evidence requires a fresh agent node.'
+    }
+    if ($isFreshMaterializingBinding -or
+        $isFreshMaterializationContinuity) {
+        if ([string]$materializationLaunchEvent.status -ne 'launch_reserved' -or
+            [string]$materializationLaunchEvent.node_id -ne $NodeId -or
+            [string]$materializationLaunchEvent.role_id -ne
+                [string]$node.role_id -or
+            [int]$materializationLaunchEvent.attempt -lt 1) {
+            throw (
+                'Fresh materialization must keep the same node, role, and attempt ' +
+                'as its launch reservation.'
+            )
+        }
+        if ($isFreshMaterializationContinuity -and (
+            [string]$materializationPriorEvent.node_id -ne $NodeId -or
+            [string]$materializationPriorEvent.role_id -ne
+                [string]$node.role_id -or
+            [int]$materializationPriorEvent.attempt -ne
+                [int]$materializationLaunchEvent.attempt
+        )) {
+            throw (
+                'Fresh materialization must keep the same node, role, and attempt ' +
+                'across materializing and materialized.'
+            )
+        }
+        $reservationPointers = @(
+            @($materializationLaunchEvent.evidence) | Where-Object {
+                [string]$_ -like
+                    'artifact:receipts/activations/*.thread-activation.json'
+            }
+        )
+        $expectedReservationPointer = (
+            "artifact:$materializationActivationReservationRelativePath"
+        )
+        if ($reservationPointers.Count -ne 1 -or
+            [string]$reservationPointers[0] -ne
+                $expectedReservationPointer -or
+            [string]$materializationLaunchEvent.idempotency_key -ne
+                "$materializationActivationKey`:launch-reserved") {
+            throw (
+                'Fresh materialization does not match its activation reservation.'
+            )
+        }
+        $expectedCurrentSuffix = if ($Status -eq 'materializing') {
+            'materializing'
+        } else { 'materialized' }
+        if ($IdempotencyKey -ne
+            "$materializationActivationKey`:$expectedCurrentSuffix") {
+            throw (
+                'Fresh materialization idempotency key does not match its ' +
+                'activation reservation.'
+            )
+        }
+        if ($isFreshMaterializationContinuity) {
+            if ([string]$materializationPriorEvent.idempotency_key -ne
+                "$materializationActivationKey`:materializing") {
+                throw (
+                    'Adjacent materializing event does not match the activation ' +
+                    'reservation.'
+                )
+            }
+            $formalPriorFields = @(
+                'materialization_reconciliation_receipt_path',
+                'materialization_reconciliation_receipt_hash',
+                'materialization_activation_reservation_path',
+                'materialization_activation_reservation_hash',
+                'materialization_activation_key_hash',
+                'materialization_handshake_capture_path',
+                'materialization_handshake_capture_hash',
+                'materialization_handshake_turn_id'
+            )
+            $formalPriorCount = @($formalPriorFields | Where-Object {
+                $null -ne
+                    $materializationPriorEvent.PSObject.Properties[$_]
+            }).Count
+            if ($formalPriorCount -eq $formalPriorFields.Count) {
+                if (
+                    [string]$materializationPriorEvent.
+                        materialization_reconciliation_receipt_path -ne
+                        $normalizedMaterializationReconciliationPath -or
+                    [string]$materializationPriorEvent.
+                        materialization_reconciliation_receipt_hash -ne
+                        [string]$materializationReconciliation.receipt_hash -or
+                    [string]$materializationPriorEvent.
+                        materialization_activation_reservation_path -ne
+                        $materializationActivationReservationRelativePath -or
+                    [string]$materializationPriorEvent.
+                        materialization_activation_reservation_hash -ne
+                        $materializationActivationReservationHash -or
+                    [string]$materializationPriorEvent.
+                        materialization_activation_key_hash -ne
+                        $materializationActivationKeyHash -or
+                    [string]$materializationPriorEvent.
+                        materialization_handshake_capture_path -ne
+                        $normalizedMaterializationHandshakePath -or
+                    [string]$materializationPriorEvent.
+                        materialization_handshake_capture_hash -ne
+                        [string]$materializationHandshake.capture_hash -or
+                    [string]$materializationPriorEvent.
+                        materialization_handshake_turn_id -ne
+                        [string]$materializationHandshake.final_turn_id
+                ) {
+                    throw 'Adjacent materializing evidence changed before materialized.'
+                }
+            } elseif ($formalPriorCount -ne 0) {
+                throw 'Adjacent materializing event has a partial evidence binding.'
+            } else {
+                $legacyEvidence = @(
+                    "observation:create-thread-returned-id:$ThreadId",
+                    'observation:list-threads-single-match',
+                    'observation:handshake-turn-completed'
+                )
+                if (@($legacyEvidence | Where-Object {
+                    $_ -notin @($materializationPriorEvent.evidence)
+                }).Count -gt 0) {
+                    throw (
+                        'Historical materializing event lacks the exact pre-fix ' +
+                        'reconciliation and handshake observations.'
+                    )
+                }
+            }
+        }
+        $verifiedReconciliation = Read-ThreadReconciliationReceipt `
+            -Path (Join-Path $RunDirectory (
+                $normalizedMaterializationReconciliationPath
+            )) -RunDirectory $RunDirectory -ExpectedDecision 'adopted'
+        $verifiedHandshake = Read-ThreadMaterializationHandshakeCapture `
+            -Path (Join-Path $RunDirectory (
+                $normalizedMaterializationHandshakePath
+            )) -ExpectedThreadId $ThreadId
+        if ([string]$verifiedReconciliation.receipt_hash -ne
+                [string]$materializationReconciliation.receipt_hash -or
+            [string]$verifiedHandshake.capture_hash -ne
+                [string]$materializationHandshake.capture_hash) {
+            throw 'Materialization evidence changed while appending the event.'
+        }
+    }
     $isRecoveryCycleReentry = $false
     $isMilestoneRevisionRearm = $false
     $isReplacementCheckpointRollForward = $false
@@ -1071,9 +1453,9 @@ try {
     if ($kind -eq 'agent' -and $Status -eq 'materialized') {
         if ($node.context.session_policy -eq 'fresh') {
             $alreadyUsed = @($events | Where-Object {
-                $_.thread_id -eq $ThreadId
+                [string]$_.thread_id -eq $ThreadId
             }).Count -gt 0
-            if ($alreadyUsed) {
+            if ($alreadyUsed -and -not $isFreshMaterializationContinuity) {
                 throw "Fresh agent node '$NodeId' cannot reuse thread '$ThreadId'."
             }
         } elseif ($ThreadId -ne $node.context.prior_thread_id) {
@@ -1533,6 +1915,35 @@ try {
                         [string]$previousMilestoneActivationEvent.hash
                 }
             }
+        }
+    }
+    if ($isFreshMaterializingBinding -or
+        $isFreshMaterializationContinuity) {
+        $event['materialization_reconciliation_receipt_path'] =
+            $normalizedMaterializationReconciliationPath
+        $event['materialization_reconciliation_receipt_hash'] =
+            [string]$materializationReconciliation.receipt_hash
+        $event['materialization_activation_reservation_path'] =
+            $materializationActivationReservationRelativePath
+        $event['materialization_activation_reservation_hash'] =
+            $materializationActivationReservationHash
+        $event['materialization_activation_key_hash'] =
+            $materializationActivationKeyHash
+        $event['materialization_handshake_capture_path'] =
+            $normalizedMaterializationHandshakePath
+        $event['materialization_handshake_capture_hash'] =
+            [string]$materializationHandshake.capture_hash
+        $event['materialization_handshake_turn_id'] =
+            [string]$materializationHandshake.final_turn_id
+        $event['materialization_launch_event_sequence'] =
+            [int]$materializationLaunchEvent.sequence
+        $event['materialization_launch_event_hash'] =
+            [string]$materializationLaunchEvent.hash
+        if ($isFreshMaterializationContinuity) {
+            $event['materialization_prior_event_sequence'] =
+                [int]$materializationPriorEvent.sequence
+            $event['materialization_prior_event_hash'] =
+                [string]$materializationPriorEvent.hash
         }
     }
     if ($ModelVerificationState -eq 'unverified') {
