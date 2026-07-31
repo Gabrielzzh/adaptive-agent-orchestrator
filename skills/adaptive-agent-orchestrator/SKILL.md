@@ -405,6 +405,21 @@ recovery uses its own schema 1.3 replacement cycle. This is not a new Worker or
 a replacement-of-replacement; missing bindings, replay, fork, or identity
 changes remain blocked.
 
+If both durable review seats become unusable during an active milestone—one
+replacement has independence-contaminated evidence and the other replacement
+has exhausted its complete 3/3 recovery chain—do not reuse either replacement,
+revive either original task, or create a replacement-of-replacement. Use the
+source-rotation protocol in [workflow-contract.md](references/workflow-contract.md):
+export the current run with
+`New-DurableReviewSourceRotationExportReceipt.ps1`, then create a fresh
+successor only through `New-OrchestrationSourceRotationSuccessorRun.ps1`. The
+new run keeps the same two logical sources and exact role contracts but starts
+two fresh, read-only, non-delegating tasks. It inherits the target checkpoint
+and every open source occurrence without omission, downgrade, canonical-only
+merging, or cross-source movement. Adoption alone never satisfies completion;
+fresh same-source dispositions and independent main acceptance are still
+required.
+
 For an older durable task that lacks machine source IDs or original input/read
 hashes, do not invent them. With controller authorization, capture the real
 role text, checkpoint/input material, four turn-status records, unknown fields,

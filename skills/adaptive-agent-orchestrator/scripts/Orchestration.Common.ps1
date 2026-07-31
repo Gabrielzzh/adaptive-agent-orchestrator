@@ -5643,6 +5643,783 @@ function Read-AbandonedSuccessorAdoptionReceipt {
     return $Receipt
 }
 
+function Get-DurableReviewSourceRotationSnapshot {
+    param(
+        [Parameter(Mandatory)][string] $RunDirectory,
+        [Parameter(Mandatory)][string] $RotationManifestPath
+    )
+
+    $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+    $planPath = Join-Path $runRoot 'plan.json'
+    $runPath = Join-Path $runRoot 'run.json'
+    $eventsPath = Join-Path $runRoot 'events.jsonl'
+    foreach ($path in @($planPath, $runPath, $eventsPath)) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw 'Source rotation requires a complete predecessor run.'
+        }
+    }
+    $planRaw = Get-Content -LiteralPath $planPath -Raw
+    $plan = $planRaw | ConvertFrom-Json -Depth 100 -DateKind String
+    $runRaw = Get-Content -LiteralPath $runPath -Raw
+    $run = $runRaw | ConvertFrom-Json -Depth 50 -DateKind String
+    $events = @(Read-OrchestrationJournal $eventsPath)
+    if ($events.Count -lt 2 -or
+        [string]$run.run_id -ne [string]$plan.run_id -or
+        [string]$run.plan_hash -ne (Get-TextSha256 $planRaw)) {
+        throw 'Source-rotation predecessor identity is inconsistent.'
+    }
+    if ($null -eq $plan.PSObject.Properties['durable_review_profile']) {
+        throw 'Source rotation requires durable_review_profile.'
+    }
+    $exportEvents = @($events | Where-Object {
+        [string]$_.event -eq 'durable-review-source-rotation-exported'
+    })
+    if ($exportEvents.Count -gt 1) {
+        throw 'The predecessor has more than one source-rotation export.'
+    }
+    $baseEvents = if ($exportEvents.Count -eq 1) {
+        if ([string]$events[-1].event -ne
+            'durable-review-source-rotation-exported') {
+            throw 'The source-rotation export must be the predecessor journal tail.'
+        }
+        @($events | Select-Object -First ($events.Count - 1))
+    } else { @($events) }
+
+    $chain = Read-DurableReviewMilestoneActivationChain -RunDirectory $runRoot
+    if ([string]::IsNullOrWhiteSpace([string]$chain.next_milestone_id)) {
+        throw 'Source rotation requires an immediately next declared milestone.'
+    }
+    $targetEvents = @($baseEvents | Where-Object {
+        [string]$_.event -in @(
+            'durable-review-milestone-activated',
+            'durable-review-milestone-revision-selected',
+            'milestone-activated',
+            'milestone-revision-selected'
+        ) -and [string]$_.milestone_id -eq [string]$chain.next_milestone_id
+    })
+    if ($targetEvents.Count -gt 0) {
+        throw 'Source rotation cannot replace an already activated next milestone.'
+    }
+
+    $manifestFullPath = [IO.Path]::GetFullPath($RotationManifestPath)
+    if (-not $manifestFullPath.StartsWith(
+        $runRoot + [IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase
+    ) -or -not (Test-Path -LiteralPath $manifestFullPath -PathType Leaf)) {
+        throw 'Source-rotation manifest must be a run-local file.'
+    }
+    $manifestRaw = Get-Content -LiteralPath $manifestFullPath -Raw
+    $manifest = $manifestRaw |
+        ConvertFrom-Json -Depth 100 -DateKind String
+    foreach ($name in @(
+        'schema_version', 'active_milestone_id', 'target_milestone_id',
+        'checkpoint_material_path', 'checkpoint_material_hash', 'sources'
+    )) {
+        if ($null -eq $manifest.PSObject.Properties[$name]) {
+            throw "Source-rotation manifest is missing '$name'."
+        }
+    }
+    if ([string]$manifest.schema_version -ne '1.0' -or
+        [string]$manifest.active_milestone_id -ne
+            [string]$chain.active_milestone_id -or
+        [string]$manifest.target_milestone_id -ne
+            [string]$chain.next_milestone_id) {
+        throw 'Source-rotation manifest changed the milestone sequence.'
+    }
+    $checkpointPath = Get-RunLocalReceiptPath -RunDirectory $runRoot `
+        -RelativePath ([string]$manifest.checkpoint_material_path) `
+        -Label 'Source-rotation checkpoint'
+    $checkpointHash = Get-TextSha256 (
+        Get-Content -LiteralPath $checkpointPath -Raw
+    )
+    if ($checkpointHash -ne [string]$manifest.checkpoint_material_hash) {
+        throw 'Source-rotation checkpoint is missing or changed.'
+    }
+
+    $requiredSourceIds = @(
+        @($plan.durable_review_profile.domain_node_ids) +
+        @($plan.durable_review_profile.dissent_node_ids) |
+            ForEach-Object { [string]$_ }
+    )
+    $manifestSources = @($manifest.sources)
+    if ($requiredSourceIds.Count -ne 2 -or
+        $manifestSources.Count -ne 2 -or
+        (@($manifestSources | ForEach-Object {
+            [string]$_.source_node_id
+        }) -join "`n") -ne ($requiredSourceIds -join "`n")) {
+        throw (
+            'Source rotation requires the exact ordered pair of durable review ' +
+            'sources.'
+        )
+    }
+
+    $formalBindings = [Collections.Generic.List[object]]::new()
+    $rotatedBindings = [Collections.Generic.List[object]]::new()
+    $openObligations = [Collections.Generic.List[object]]::new()
+    $failureClasses = [Collections.Generic.List[string]]::new()
+    foreach ($sourceNodeId in $requiredSourceIds) {
+        $nodeMatches = @($plan.nodes | Where-Object {
+            [string]$_.id -eq $sourceNodeId
+        })
+        $activeMatches = @($chain.active_source_bindings | Where-Object {
+            [string]$_.source_node_id -eq $sourceNodeId
+        })
+        $manifestMatches = @($manifestSources | Where-Object {
+            [string]$_.source_node_id -eq $sourceNodeId
+        })
+        if ($nodeMatches.Count -ne 1 -or $activeMatches.Count -ne 1 -or
+            $manifestMatches.Count -ne 1) {
+            throw "Source-rotation source '$sourceNodeId' is not uniquely bound."
+        }
+        $node = $nodeMatches[0]
+        $active = $activeMatches[0]
+        $entry = $manifestMatches[0]
+        $roleId = [string]$node.role_id
+        $roleMatches = @($plan.roles | Where-Object {
+            [string]$_.id -eq $roleId
+        })
+        if ($roleMatches.Count -ne 1 -or
+            [string]$node.kind -ne 'agent' -or
+            [string]$node.topology -ne 'background-thread' -or
+            [bool]$node.read_only -ne $true -or
+            [bool]$node.allow_delegation -ne $false -or
+            @($node.write_scope).Count -gt 0) {
+            throw "Source-rotation source '$sourceNodeId' changed its role or scope."
+        }
+        $roleHash = Get-TextSha256 (
+            $roleMatches[0] | ConvertTo-Json -Compress -Depth 100
+        )
+        foreach ($name in @(
+            'source_node_id', 'role_id', 'failed_source_kind',
+            'failed_thread_id', 'failure_class', 'input_manifest_path',
+            'input_manifest_hash', 'replacement_continuity_receipt_path',
+            'replacement_continuity_receipt_hash',
+            'replacement_roll_forward_receipt_path',
+            'replacement_roll_forward_receipt_hash', 'latest_event_sequence',
+            'latest_event_hash', 'failure_capture_path',
+            'failure_capture_file_hash', 'recovery_receipt_paths',
+            'recovery_receipt_hashes'
+        )) {
+            if ($null -eq $entry.PSObject.Properties[$name]) {
+                throw "Source-rotation source '$sourceNodeId' is missing '$name'."
+            }
+        }
+        $failedThreadId = [string]$entry.failed_thread_id
+        $failureClass = [string]$entry.failure_class
+        if ([string]$entry.role_id -ne $roleId -or
+            [string]$entry.failed_source_kind -ne 'replacement' -or
+            [string]::IsNullOrWhiteSpace($failedThreadId) -or
+            $failedThreadId -eq [string]$active.source_thread_id -or
+            $failureClass -notin @(
+                'independence-contaminated',
+                'replacement-recovery-exhausted'
+            )) {
+            throw (
+                "Source-rotation source '$sourceNodeId' does not identify one " +
+                'failed replacement seat.'
+            )
+        }
+        $failureClasses.Add($failureClass)
+
+        $inputPath = Get-RunLocalReceiptPath -RunDirectory $runRoot `
+            -RelativePath ([string]$entry.input_manifest_path) `
+            -Label 'Source-rotation input manifest'
+        $inputHash = Get-TextSha256 (
+            Get-Content -LiteralPath $inputPath -Raw
+        )
+        if ($inputHash -ne [string]$entry.input_manifest_hash) {
+            throw "Source-rotation input for '$sourceNodeId' changed."
+        }
+        $continuityPath = Get-RunLocalReceiptPath -RunDirectory $runRoot `
+            -RelativePath (
+                [string]$entry.replacement_continuity_receipt_path
+            ) -Label 'Source-rotation replacement continuity'
+        $continuity = Read-ReplacementContinuityReceipt `
+            -Path $continuityPath -RunDirectory $runRoot `
+            -ExpectedSourceNodeId $sourceNodeId `
+            -ExpectedReplacementThreadId $failedThreadId
+        $rollForwardPath = Get-RunLocalReceiptPath -RunDirectory $runRoot `
+            -RelativePath (
+                [string]$entry.replacement_roll_forward_receipt_path
+            ) -Label 'Source-rotation replacement roll-forward'
+        $rollForward = Read-ReplacementCheckpointRollForwardReceipt `
+            -Path $rollForwardPath -RunDirectory $runRoot `
+            -ExpectedSourceNodeId $sourceNodeId `
+            -ExpectedReplacementThreadId $failedThreadId
+        if ([string]$continuity.receipt_hash -ne
+                [string]$entry.replacement_continuity_receipt_hash -or
+            [string]$rollForward.receipt_hash -ne
+                [string]$entry.replacement_roll_forward_receipt_hash -or
+            [string]$rollForward.replacement_continuity_receipt_hash -ne
+                [string]$continuity.receipt_hash -or
+            [string]$rollForward.target_milestone_id -ne
+                [string]$chain.next_milestone_id -or
+            [string]$rollForward.checkpoint_hash -ne $checkpointHash -or
+            [string]$rollForward.input_manifest_hash -ne $inputHash) {
+            throw (
+                "Source-rotation source '$sourceNodeId' changed replacement, " +
+                'checkpoint, or input continuity.'
+            )
+        }
+
+        $sourceHistory = @($baseEvents | Where-Object {
+            [string]$_.node_id -eq $sourceNodeId
+        })
+        if ($sourceHistory.Count -lt 1) {
+            throw "Source-rotation source '$sourceNodeId' has no lifecycle."
+        }
+        $latest = $sourceHistory[-1]
+        if ([int]$entry.latest_event_sequence -ne [int]$latest.sequence -or
+            [string]$entry.latest_event_hash -ne [string]$latest.hash -or
+            [string]$latest.thread_id -ne $failedThreadId) {
+            throw "Source-rotation source '$sourceNodeId' lifecycle changed."
+        }
+
+        if ($failureClass -eq 'independence-contaminated') {
+            if ([string]$latest.status -ne 'running' -or
+                @($entry.recovery_receipt_paths).Count -ne 0 -or
+                @($entry.recovery_receipt_hashes).Count -ne 0) {
+                throw (
+                    'Independence-contaminated source must remain running and ' +
+                    'cannot claim an exhausted recovery chain.'
+                )
+            }
+            $capturePath = Get-RunLocalReceiptPath -RunDirectory $runRoot `
+                -RelativePath ([string]$entry.failure_capture_path) `
+                -Label 'Independence failure capture'
+            $null = Read-ThreadReadCapture -Path $capturePath `
+                -ExpectedThreadId $failedThreadId
+            if ((Get-FileHash -LiteralPath $capturePath -Algorithm SHA256).
+                    Hash.ToLowerInvariant() -ne
+                    [string]$entry.failure_capture_file_hash) {
+                throw 'Independence failure capture changed.'
+            }
+        } else {
+            if (-not [string]::IsNullOrWhiteSpace(
+                    [string]$entry.failure_capture_path
+                ) -or -not [string]::IsNullOrWhiteSpace(
+                    [string]$entry.failure_capture_file_hash
+                ) -or [string]$latest.status -ne 'result_pending' -or
+                [string]$latest.error_class -ne
+                    'final_missing_with_progress_evidence') {
+                throw 'Exhausted replacement source has an invalid terminal state.'
+            }
+            $recoveryPaths = @($entry.recovery_receipt_paths)
+            $recoveryHashes = @($entry.recovery_receipt_hashes)
+            if ($recoveryPaths.Count -ne 3 -or $recoveryHashes.Count -ne 3) {
+                throw 'Exhausted replacement source requires exactly three recoveries.'
+            }
+            $cycleId = ''
+            for ($index = 0; $index -lt 3; $index++) {
+                $recoveryPath = Get-RunLocalReceiptPath `
+                    -RunDirectory $runRoot `
+                    -RelativePath ([string]$recoveryPaths[$index]) `
+                    -Label 'Exhausted replacement recovery receipt'
+                $recovery = Read-ThreadResultRecoveryReceipt `
+                    -Path $recoveryPath -RunDirectory $runRoot `
+                    -ExpectedSourceNodeId $sourceNodeId `
+                    -ExpectedOriginalThreadId $failedThreadId `
+                    -ExpectedRecoveryStage replacement
+                if ([int]$recovery.attempt -ne ($index + 1) -or
+                    [string]$recovery.receipt_hash -ne
+                        [string]$recoveryHashes[$index] -or
+                    [string]$recovery.milestone_id -ne
+                        [string]$chain.next_milestone_id -or
+                    [string]$recovery.checkpoint_hash -ne $checkpointHash -or
+                    [string]$recovery.input_manifest_hash -ne $inputHash -or
+                    [string]$recovery.
+                        replacement_checkpoint_roll_forward_receipt_hash -ne
+                        [string]$rollForward.receipt_hash) {
+                    throw 'Exhausted recovery chain changed source or checkpoint.'
+                }
+                if ($index -eq 0) {
+                    $cycleId = [string]$recovery.recovery_cycle_id
+                } elseif ([string]$recovery.recovery_cycle_id -ne $cycleId) {
+                    throw 'Exhausted recovery chain crossed recovery cycles.'
+                }
+                if ($index -eq 2 -and
+                    [string]$recovery.outcome -ne 'recovery-exhausted') {
+                    throw 'The third recovery receipt is not exhausted.'
+                }
+            }
+            $lastRecoveryPath = [string]$recoveryPaths[-1]
+            if ([string]$latest.recovery_receipt_path -ne $lastRecoveryPath -or
+                [string]$latest.recovery_receipt_hash -ne
+                    [string]$recoveryHashes[-1]) {
+                throw 'Exhausted recovery tail event does not bind attempt three.'
+            }
+        }
+
+        $dispositionPath = Join-Path $runRoot (
+            [string]$active.disposition_receipt_path
+        )
+        $disposition = Read-ReviewDispositionReceipt `
+            -Path $dispositionPath -RunDirectory $runRoot `
+            -ExpectedSourceNodeId $sourceNodeId `
+            -ExpectedThreadId ([string]$active.source_thread_id)
+        foreach ($decision in @($disposition.decisions)) {
+            if ([string]$decision.severity -eq 'P0' -and
+                [string]$decision.resolution_status -ne 'resolved') {
+                throw 'Source rotation does not permit an unresolved P0 baseline.'
+            }
+            if ([string]$decision.severity -eq 'P1' -and
+                [string]$decision.resolution_status -ne 'resolved') {
+                $openObligations.Add([ordered]@{
+                    source_node_id = $sourceNodeId
+                    role_id = $roleId
+                    source_thread_id = [string]$active.source_thread_id
+                    source_finding_id = [string]$decision.source_finding_id
+                    canonical_finding_id =
+                        [string]$decision.canonical_finding_id
+                    severity = 'P1'
+                    finding = [string]$decision.finding
+                    finding_hash = [string]$decision.finding_hash
+                    resolution_status = [string]$decision.resolution_status
+                })
+            }
+        }
+        $formalBindings.Add([ordered]@{
+            source_node_id = $sourceNodeId
+            role_id = $roleId
+            role_contract_hash = $roleHash
+            source_thread_id = [string]$active.source_thread_id
+            milestone_id = [string]$chain.active_milestone_id
+            checkpoint_material_path =
+                [string]$active.checkpoint_material_path
+            checkpoint_material_hash =
+                [string]$active.checkpoint_material_hash
+            result_receipt_path = [string]$active.result_receipt_path
+            result_receipt_hash = [string]$active.result_receipt_hash
+            disposition_receipt_path =
+                [string]$active.disposition_receipt_path
+            disposition_receipt_hash =
+                [string]$active.disposition_receipt_hash
+        })
+        $rotatedBindings.Add([ordered]@{
+            source_node_id = $sourceNodeId
+            role_id = $roleId
+            role_contract_hash = $roleHash
+            failed_source_kind = 'replacement'
+            failed_thread_id = $failedThreadId
+            failure_class = $failureClass
+            input_manifest_path = [string]$entry.input_manifest_path
+            input_manifest_hash = $inputHash
+            replacement_continuity_receipt_path =
+                [string]$entry.replacement_continuity_receipt_path
+            replacement_continuity_receipt_hash =
+                [string]$continuity.receipt_hash
+            replacement_roll_forward_receipt_path =
+                [string]$entry.replacement_roll_forward_receipt_path
+            replacement_roll_forward_receipt_hash =
+                [string]$rollForward.receipt_hash
+            latest_event_sequence = [int]$latest.sequence
+            latest_event_hash = [string]$latest.hash
+        })
+    }
+    if (@($failureClasses | Where-Object {
+            $_ -eq 'independence-contaminated'
+        }).Count -ne 1 -or
+        @($failureClasses | Where-Object {
+            $_ -eq 'replacement-recovery-exhausted'
+        }).Count -ne 1) {
+        throw (
+            'Source rotation requires one independence failure and one exhausted ' +
+            'replacement.'
+        )
+    }
+    if ($openObligations.Count -lt 1) {
+        throw 'Source rotation requires at least one open P1 occurrence.'
+    }
+    $policy = Resolve-OrchestrationRunPolicy -RunDirectory $runRoot `
+        -Events $baseEvents
+    return [pscustomobject]@{
+        run_root = $runRoot
+        plan = $plan
+        plan_raw = $planRaw
+        plan_hash = [string]$run.plan_hash
+        run = $run
+        run_raw = $runRaw
+        run_file_hash = (
+            Get-FileHash -LiteralPath $runPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        events = @($events)
+        base_events = @($baseEvents)
+        genesis_hash = [string]$baseEvents[0].hash
+        journal_head = [string]$baseEvents[-1].hash
+        journal_event_count = $baseEvents.Count
+        effective_policy_version = [string]$policy.effective_policy_version
+        active_milestone_id = [string]$chain.active_milestone_id
+        active_milestone_receipt_path =
+            [string]$chain.activation_receipt_path
+        active_milestone_receipt_hash =
+            [string]$chain.activation_receipt_hash
+        active_checkpoint_material_path =
+            [string]$formalBindings[0].checkpoint_material_path
+        active_checkpoint_material_hash =
+            [string]$formalBindings[0].checkpoint_material_hash
+        rotation_target_milestone_id = [string]$chain.next_milestone_id
+        rotation_checkpoint_material_path =
+            [string]$manifest.checkpoint_material_path
+        rotation_checkpoint_material_hash = $checkpointHash
+        rotation_manifest_path = [IO.Path]::GetRelativePath(
+            $runRoot, $manifestFullPath
+        ).Replace('\', '/')
+        rotation_manifest_file_hash = (
+            Get-FileHash -LiteralPath $manifestFullPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        formal_source_bindings = @($formalBindings)
+        formal_source_bindings_hash = Get-TextSha256 (
+            @($formalBindings) | ConvertTo-Json -Compress -Depth 100
+        )
+        rotated_source_bindings = @($rotatedBindings)
+        rotated_source_bindings_hash = Get-TextSha256 (
+            @($rotatedBindings) | ConvertTo-Json -Compress -Depth 100
+        )
+        open_obligations = @($openObligations)
+        open_obligations_hash = Get-TextSha256 (
+            @($openObligations) | ConvertTo-Json -Compress -Depth 100
+        )
+    }
+}
+
+function Read-DurableReviewSourceRotationExportReceipt {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $PredecessorRunDirectory,
+        [Parameter(Mandatory)][string] $SuccessorPlanPath,
+        [string] $ExpectedSuccessorRunDirectory = ''
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Source-rotation export receipt does not exist: $Path"
+    }
+    $receipt = Get-Content -LiteralPath $Path -Raw |
+        ConvertFrom-Json -Depth 100 -DateKind String
+    $keys = @(
+        'schema_version', 'lineage_kind', 'predecessor_run_path',
+        'predecessor_run_id', 'predecessor_plan_hash',
+        'predecessor_run_file_hash', 'predecessor_genesis_hash',
+        'predecessor_journal_head', 'predecessor_journal_event_count',
+        'effective_policy_version', 'active_milestone_id',
+        'active_milestone_receipt_path', 'active_milestone_receipt_hash',
+        'active_checkpoint_material_path', 'active_checkpoint_material_hash',
+        'rotation_target_milestone_id', 'rotation_checkpoint_material_path',
+        'rotation_checkpoint_material_hash', 'rotation_manifest_path',
+        'rotation_manifest_file_hash', 'formal_source_bindings',
+        'formal_source_bindings_hash', 'rotated_source_bindings',
+        'rotated_source_bindings_hash', 'open_obligations',
+        'open_obligations_hash', 'successor_run_id', 'successor_plan_hash',
+        'successor_run_path', 'successor_milestone_ids',
+        'authorization_material_path', 'authorization_material_hash',
+        'activation_key', 'created_at_utc'
+    )
+    $payload = [ordered]@{}
+    foreach ($name in $keys) {
+        if ($null -eq $receipt.PSObject.Properties[$name]) {
+            throw "Source-rotation export receipt is missing '$name'."
+        }
+        $payload[$name] = $receipt.$name
+    }
+    if ([string]$receipt.schema_version -ne '1.0' -or
+        [string]$receipt.lineage_kind -ne 'source-rotation' -or
+        [string]$receipt.receipt_hash -ne (Get-TextSha256 (
+            $payload | ConvertTo-Json -Compress -Depth 100
+        ))) {
+        throw 'Source-rotation export receipt hash or schema is invalid.'
+    }
+    $runRoot = [IO.Path]::GetFullPath(
+        $PredecessorRunDirectory
+    ).TrimEnd('\', '/')
+    $manifestPath = Get-RunLocalReceiptPath -RunDirectory $runRoot `
+        -RelativePath ([string]$receipt.rotation_manifest_path) `
+        -Label 'Source-rotation manifest'
+    $snapshot = Get-DurableReviewSourceRotationSnapshot `
+        -RunDirectory $runRoot -RotationManifestPath $manifestPath
+    $events = @($snapshot.events)
+    if ($events.Count -ne ([int]$receipt.predecessor_journal_event_count + 1) -or
+        [string]$events[-2].hash -ne [string]$receipt.predecessor_journal_head) {
+        throw 'Predecessor journal changed outside the source-rotation export.'
+    }
+    $event = $events[-1]
+    if ([string]$event.event -ne 'durable-review-source-rotation-exported' -or
+        [string]$event.result_receipt_hash -ne [string]$receipt.receipt_hash -or
+        [string]$event.prev_hash -ne [string]$receipt.predecessor_journal_head) {
+        throw 'Source-rotation export event does not bind the receipt.'
+    }
+    $successorPlanRaw = Get-Content -LiteralPath $SuccessorPlanPath -Raw
+    $successorPlan = $successorPlanRaw |
+        ConvertFrom-Json -Depth 100 -DateKind String
+    $comparisons = @(
+        @([string]$receipt.predecessor_run_path, [string]$snapshot.run_root),
+        @([string]$receipt.predecessor_run_id, [string]$snapshot.run.run_id),
+        @([string]$receipt.predecessor_plan_hash, [string]$snapshot.plan_hash),
+        @([string]$receipt.predecessor_run_file_hash,
+            [string]$snapshot.run_file_hash),
+        @([string]$receipt.predecessor_genesis_hash,
+            [string]$snapshot.genesis_hash),
+        @([string]$receipt.effective_policy_version,
+            [string]$snapshot.effective_policy_version),
+        @([string]$receipt.active_milestone_id,
+            [string]$snapshot.active_milestone_id),
+        @([string]$receipt.active_milestone_receipt_hash,
+            [string]$snapshot.active_milestone_receipt_hash),
+        @([string]$receipt.active_checkpoint_material_hash,
+            [string]$snapshot.active_checkpoint_material_hash),
+        @([string]$receipt.rotation_target_milestone_id,
+            [string]$snapshot.rotation_target_milestone_id),
+        @([string]$receipt.rotation_checkpoint_material_hash,
+            [string]$snapshot.rotation_checkpoint_material_hash),
+        @([string]$receipt.rotation_manifest_file_hash,
+            [string]$snapshot.rotation_manifest_file_hash),
+        @([string]$receipt.formal_source_bindings_hash,
+            [string]$snapshot.formal_source_bindings_hash),
+        @([string]$receipt.rotated_source_bindings_hash,
+            [string]$snapshot.rotated_source_bindings_hash),
+        @([string]$receipt.open_obligations_hash,
+            [string]$snapshot.open_obligations_hash),
+        @([string]$receipt.successor_run_id, [string]$successorPlan.run_id),
+        @([string]$receipt.successor_plan_hash,
+            (Get-TextSha256 $successorPlanRaw))
+    )
+    if (@($comparisons | Where-Object { $_[0] -ne $_[1] }).Count -gt 0) {
+        throw 'Source-rotation export no longer matches its bound runs.'
+    }
+    foreach ($pair in @(
+        @($receipt.formal_source_bindings, $snapshot.formal_source_bindings),
+        @($receipt.rotated_source_bindings, $snapshot.rotated_source_bindings),
+        @($receipt.open_obligations, $snapshot.open_obligations)
+    )) {
+        if ((@($pair[0]) | ConvertTo-Json -Compress -Depth 100) -ne
+            (@($pair[1]) | ConvertTo-Json -Compress -Depth 100)) {
+            throw 'Source-rotation export changed identities or open findings.'
+        }
+    }
+    $profile = $successorPlan.successor_review_profile
+    $sourceIds = @($snapshot.rotated_source_bindings |
+        ForEach-Object { [string]$_.source_node_id })
+    $expectedMilestones = @(
+        $snapshot.plan.durable_review_profile.milestone_ids |
+            ForEach-Object { [string]$_ }
+    )
+    $targetIndex = [Array]::IndexOf(
+        $expectedMilestones, [string]$snapshot.rotation_target_milestone_id
+    )
+    $expectedMilestones = @(
+        $expectedMilestones[$targetIndex..($expectedMilestones.Count - 1)]
+    )
+    if ([string]$profile.lineage_kind -ne 'source-rotation' -or
+        [string]$profile.predecessor_run_id -ne
+            [string]$snapshot.run.run_id -or
+        [string]$profile.predecessor_active_milestone_id -ne
+            [string]$snapshot.active_milestone_id -or
+        [string]$profile.predecessor_checkpoint_material_hash -ne
+            [string]$snapshot.active_checkpoint_material_hash -or
+        [string]$profile.rotation_target_milestone_id -ne
+            [string]$snapshot.rotation_target_milestone_id -or
+        [string]$profile.rotation_checkpoint_material_hash -ne
+            [string]$snapshot.rotation_checkpoint_material_hash -or
+        (@($profile.source_node_ids) -join "`n") -ne ($sourceIds -join "`n") -or
+        (@($successorPlan.durable_review_profile.milestone_ids) -join "`n") -ne
+            ($expectedMilestones -join "`n") -or
+        (@($receipt.successor_milestone_ids) -join "`n") -ne
+            ($expectedMilestones -join "`n")) {
+        throw 'Source-rotation successor plan changed the bound lineage.'
+    }
+    foreach ($binding in @($snapshot.rotated_source_bindings)) {
+        $node = @($successorPlan.nodes | Where-Object {
+            [string]$_.id -eq [string]$binding.source_node_id
+        })
+        $role = @($successorPlan.roles | Where-Object {
+            [string]$_.id -eq [string]$binding.role_id
+        })
+        if ($node.Count -ne 1 -or $role.Count -ne 1 -or
+            [string]$node[0].role_id -ne [string]$binding.role_id -or
+            [string]$node[0].context.session_policy -ne 'fresh' -or
+            [int]$node[0].context.max_prior_turns -ne 0 -or
+            $null -ne $node[0].context.PSObject.Properties['prior_thread_id'] -or
+            [bool]$node[0].read_only -ne $true -or
+            [bool]$node[0].allow_delegation -ne $false -or
+            (Get-TextSha256 (
+                $role[0] | ConvertTo-Json -Compress -Depth 100
+            )) -ne [string]$binding.role_contract_hash) {
+            throw 'Source-rotation successor changed role or fresh-session scope.'
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSuccessorRunDirectory) -and
+        [string]$receipt.successor_run_path -ne [IO.Path]::GetFullPath(
+            $ExpectedSuccessorRunDirectory
+        ).TrimEnd('\', '/')) {
+        throw 'Source-rotation export cannot be replayed into another run.'
+    }
+    $authorizationPath = Get-RunLocalReceiptPath -RunDirectory $runRoot `
+        -RelativePath ([string]$receipt.authorization_material_path) `
+        -Label 'Source-rotation authorization material'
+    if ((Get-FileHash -LiteralPath $authorizationPath -Algorithm SHA256).
+            Hash.ToLowerInvariant() -ne
+            [string]$receipt.authorization_material_hash) {
+        throw 'Source-rotation authorization material changed.'
+    }
+    return $receipt
+}
+
+function Read-DurableReviewSourceRotationAdoptionReceipt {
+    param(
+        [Parameter(Mandatory)][string] $RunDirectory,
+        [Parameter(Mandatory)][object] $Receipt
+    )
+
+    $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+    $planPath = Join-Path $runRoot 'plan.json'
+    $runPath = Join-Path $runRoot 'run.json'
+    $eventsPath = Join-Path $runRoot 'events.jsonl'
+    $planRaw = Get-Content -LiteralPath $planPath -Raw
+    $plan = $planRaw | ConvertFrom-Json -Depth 100 -DateKind String
+    $run = Get-Content -LiteralPath $runPath -Raw |
+        ConvertFrom-Json -Depth 50 -DateKind String
+    $events = @(Read-OrchestrationJournal $eventsPath)
+    $keys = @(
+        'schema_version', 'lineage_kind', 'run_path', 'run_id', 'plan_hash',
+        'genesis_hash', 'predecessor_run_path', 'predecessor_run_id',
+        'predecessor_final_journal_head',
+        'predecessor_final_journal_event_count', 'export_receipt_path',
+        'export_receipt_hash', 'export_receipt_file_hash',
+        'predecessor_active_milestone_id', 'rotation_target_milestone_id',
+        'rotation_checkpoint_material_path',
+        'rotation_checkpoint_material_hash', 'source_bindings',
+        'source_bindings_hash', 'inherited_obligations',
+        'inherited_obligations_hash', 'successor_milestone_ids',
+        'created_at_utc'
+    )
+    $payload = [ordered]@{}
+    foreach ($name in $keys) {
+        if ($null -eq $Receipt.PSObject.Properties[$name]) {
+            throw "Source-rotation adoption is missing '$name'."
+        }
+        $payload[$name] = $Receipt.$name
+    }
+    if ([string]$Receipt.schema_version -ne '1.2' -or
+        [string]$Receipt.lineage_kind -ne 'source-rotation-successor' -or
+        [string]$Receipt.receipt_hash -ne (Get-TextSha256 (
+            $payload | ConvertTo-Json -Compress -Depth 100
+        ))) {
+        throw 'Source-rotation adoption receipt hash or schema is invalid.'
+    }
+    if ($events.Count -lt 2 -or
+        [string]$events[1].event -ne
+            'durable-review-source-rotation-adopted' -or
+        [string]$events[1].prev_hash -ne [string]$events[0].hash -or
+        [string]$events[1].result_receipt_hash -ne
+            [string]$Receipt.receipt_hash -or
+        [string]$Receipt.run_path -ne $runRoot -or
+        [string]$Receipt.run_id -ne [string]$run.run_id -or
+        [string]$Receipt.plan_hash -ne [string]$run.plan_hash -or
+        [string]$Receipt.plan_hash -ne (Get-TextSha256 $planRaw) -or
+        [string]$Receipt.genesis_hash -ne [string]$events[0].hash) {
+        throw 'Source-rotation adoption run identity changed.'
+    }
+    $predecessorRoot = [IO.Path]::GetFullPath(
+        [string]$Receipt.predecessor_run_path
+    ).TrimEnd('\', '/')
+    $exportPath = Get-RunLocalReceiptPath -RunDirectory $predecessorRoot `
+        -RelativePath ([string]$Receipt.export_receipt_path) `
+        -Label 'Source-rotation export receipt'
+    $export = Read-DurableReviewSourceRotationExportReceipt `
+        -Path $exportPath -PredecessorRunDirectory $predecessorRoot `
+        -SuccessorPlanPath $planPath `
+        -ExpectedSuccessorRunDirectory $runRoot
+    $predecessorEvents = @(Read-OrchestrationJournal (
+        Join-Path $predecessorRoot 'events.jsonl'
+    ))
+    if ([string]$Receipt.predecessor_final_journal_head -ne
+            [string]$predecessorEvents[-1].hash -or
+        [int]$Receipt.predecessor_final_journal_event_count -ne
+            $predecessorEvents.Count -or
+        [string]$Receipt.export_receipt_hash -ne
+            [string]$export.receipt_hash -or
+        [string]$Receipt.export_receipt_file_hash -ne (
+            Get-FileHash -LiteralPath $exportPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()) {
+        throw 'Source-rotation adoption predecessor chain changed.'
+    }
+    $expectedBindings = @($export.rotated_source_bindings |
+        ForEach-Object {
+            [ordered]@{
+                source_node_id = [string]$_.source_node_id
+                role_id = [string]$_.role_id
+                role_contract_hash = [string]$_.role_contract_hash
+                failed_source_kind = [string]$_.failed_source_kind
+                failed_thread_id = [string]$_.failed_thread_id
+                failure_class = [string]$_.failure_class
+                input_manifest_path = [string]$_.input_manifest_path
+                input_manifest_hash = [string]$_.input_manifest_hash
+                replacement_continuity_receipt_path =
+                    [string]$_.replacement_continuity_receipt_path
+                replacement_continuity_receipt_hash =
+                    [string]$_.replacement_continuity_receipt_hash
+                replacement_roll_forward_receipt_path =
+                    [string]$_.replacement_roll_forward_receipt_path
+                replacement_roll_forward_receipt_hash =
+                    [string]$_.replacement_roll_forward_receipt_hash
+                latest_event_sequence = [int]$_.latest_event_sequence
+                latest_event_hash = [string]$_.latest_event_hash
+                fresh_session_policy = 'fresh'
+            }
+        })
+    if ((@($Receipt.source_bindings) |
+            ConvertTo-Json -Compress -Depth 100) -ne
+        (@($expectedBindings) | ConvertTo-Json -Compress -Depth 100) -or
+        [string]$Receipt.source_bindings_hash -ne (Get-TextSha256 (
+            @($expectedBindings) | ConvertTo-Json -Compress -Depth 100
+        )) -or
+        (@($Receipt.inherited_obligations) |
+            ConvertTo-Json -Compress -Depth 100) -ne
+        (@($export.open_obligations) |
+            ConvertTo-Json -Compress -Depth 100) -or
+        [string]$Receipt.inherited_obligations_hash -ne
+            [string]$export.open_obligations_hash) {
+        throw 'Source-rotation adoption changed source identities or findings.'
+    }
+    $declaredMilestones = @(
+        $plan.durable_review_profile.milestone_ids |
+            ForEach-Object { [string]$_ }
+    )
+    if ([string]$Receipt.predecessor_run_id -ne
+            [string]$export.predecessor_run_id -or
+        [string]$Receipt.predecessor_active_milestone_id -ne
+            [string]$export.active_milestone_id -or
+        [string]$Receipt.rotation_target_milestone_id -ne
+            [string]$export.rotation_target_milestone_id -or
+        [string]$Receipt.rotation_checkpoint_material_path -ne
+            [string]$export.rotation_checkpoint_material_path -or
+        [string]$Receipt.rotation_checkpoint_material_hash -ne
+            [string]$export.rotation_checkpoint_material_hash -or
+        (@($Receipt.successor_milestone_ids) -join "`n") -ne
+            ($declaredMilestones -join "`n")) {
+        throw 'Source-rotation adoption lineage declaration changed.'
+    }
+    foreach ($binding in @($Receipt.source_bindings)) {
+        $node = @($plan.nodes | Where-Object {
+            [string]$_.id -eq [string]$binding.source_node_id
+        })
+        $role = @($plan.roles | Where-Object {
+            [string]$_.id -eq [string]$binding.role_id
+        })
+        if ($node.Count -ne 1 -or $role.Count -ne 1 -or
+            [string]$node[0].role_id -ne [string]$binding.role_id -or
+            [string]$node[0].context.session_policy -ne 'fresh' -or
+            [int]$node[0].context.max_prior_turns -ne 0 -or
+            $null -ne $node[0].context.PSObject.Properties['prior_thread_id'] -or
+            [bool]$node[0].read_only -ne $true -or
+            [bool]$node[0].allow_delegation -ne $false -or
+            (Get-TextSha256 (
+                $role[0] | ConvertTo-Json -Compress -Depth 100
+            )) -ne [string]$binding.role_contract_hash) {
+            throw 'Fresh source-rotation successor changed its reviewer contract.'
+        }
+    }
+    return $Receipt
+}
+
 function Read-DurableReviewSuccessorAdoptionReceipt {
     param([Parameter(Mandatory)][string] $RunDirectory)
 
@@ -5674,6 +6451,11 @@ function Read-DurableReviewSuccessorAdoptionReceipt {
     if ([string]$receipt.schema_version -eq '1.1' -and
         [string]$receipt.lineage_kind -eq 'abandoned-successor') {
         return Read-AbandonedSuccessorAdoptionReceipt `
+            -RunDirectory $runRoot -Receipt $receipt
+    }
+    if ([string]$receipt.schema_version -eq '1.2' -and
+        [string]$receipt.lineage_kind -eq 'source-rotation-successor') {
+        return Read-DurableReviewSourceRotationAdoptionReceipt `
             -RunDirectory $runRoot -Receipt $receipt
     }
     $keys = @(
