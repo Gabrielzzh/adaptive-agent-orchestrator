@@ -149,13 +149,16 @@ not the run's formal independent acceptance source.
 `ultra` requires all of the following:
 
 - the selected surface and model actually support it;
+- Sol `max` was considered first and is insufficient for a stated reason;
+- automatic task delegation is materially useful to the node, not incidental;
 - the plan states a concrete quality reason;
 - `limits.max_ultra_nodes` has remaining capacity;
 - the node is read-only; v0.4 does not permit Ultra writers;
 - the node cannot delegate or orchestrate;
 - the user explicitly requested Ultra for this node.
 
-Ultra is a reasoning allocation, not permission to create more agents.
+Ultra changes both reasoning and delegation behavior. It is not the default
+answer to a hard task and is not permission to create an unbounded team.
 
 ## Default limits
 

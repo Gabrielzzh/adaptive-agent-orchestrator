@@ -264,7 +264,10 @@ pointer in the resolver call; a role description, cost rationale, or automatic
 teaming policy is not authorization. Before any model or effort escalation,
 explain the
 change and obtain user confirmation unless a bounded policy already authorizes
-it. Ultra always needs explicit per-node confirmation.
+it. Ultra always needs explicit per-node confirmation. Prefer Sol `max` for
+very hard bounded work. Ultra is a last resort because the current runtime
+couples it to automatic task delegation; it additionally needs a concrete node
+reason explaining why that delegation is useful.
 
 Never silently inherit the main agent's model. Resolve only models exposed by
 the destination runtime. If the capability default is unavailable, keep the

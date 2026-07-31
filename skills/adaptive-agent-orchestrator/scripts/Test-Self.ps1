@@ -907,6 +907,26 @@ try {
     )
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+            -PlatformBindingPath $platformBindingPath `
+            -Capability ultra -UserConfirmedUltra `
+            -AuthorizationEvidence 'user:explicit-ultra-test-request' `
+            -AvailableModelIds $modelIds | Out-Null
+    } 'requires a concrete automatic-delegation reason' (
+        'Ultra confirmation alone must not omit why automatic delegation is needed.'
+    )
+    $confirmedUltra = & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
+        -Capability ultra -UserConfirmedUltra `
+        -UltraReason 'The bounded max route failed and automatic delegation is necessary.' `
+        -AuthorizationEvidence 'user:explicit-ultra-test-request' `
+        -AvailableModelIds $modelIds | ConvertFrom-Json
+    Assert-True (
+        $confirmedUltra.model -eq 'gpt-5.6-sol' -and
+        $confirmedUltra.effort -eq 'ultra' -and
+        $confirmedUltra.authorization -eq 'ultra-confirmed'
+    ) 'Explicit confirmation plus a delegation reason should permit Ultra.'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
         -PlatformBindingPath $platformBindingPath `
             -Capability economy -RequestedModel 'gpt-5.6-sol' `
             -AvailableModelIds $modelIds | Out-Null

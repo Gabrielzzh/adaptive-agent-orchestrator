@@ -20,6 +20,8 @@ param(
     [switch] $UserConfirmedEscalation,
     [switch] $UserConfirmedUltra,
 
+    [string] $UltraReason,
+
     [string] $AuthorizationEvidence
 )
 
@@ -164,6 +166,9 @@ if ($Capability -eq 'ultra' -or $resolvedEffort -eq 'ultra') {
         $AuthorizationEvidence -notmatch '^user:.+') {
         throw 'Ultra requires Sol, capability ultra, effort ultra, and user: confirmation evidence.'
     }
+    if ([string]::IsNullOrWhiteSpace($UltraReason)) {
+        throw 'Ultra requires a concrete automatic-delegation reason after considering Sol max.'
+    }
 }
 
 $supportedEfforts = $null
@@ -234,6 +239,7 @@ if (($UserConfirmedEscalation -or $UserConfirmedUltra) -and
     authorization_evidence = if ($AuthorizationEvidence) {
         $AuthorizationEvidence
     } else { $null }
+    ultra_reason = if ($Capability -eq 'ultra') { $UltraReason } else { $null }
     platform_binding_path = $resolvedPlatformBindingPath
     platform_binding_sha256 = $platformBindingHash
     selection_source = if ($RequestedModel) {

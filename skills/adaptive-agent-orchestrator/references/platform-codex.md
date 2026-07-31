@@ -21,6 +21,12 @@ least `strong`; a standard node cannot silently become a durable reviewer.
 Overriding an `economy` or `standard` Luna default with Sol is an escalation and
 requires the normal user or bounded-policy evidence.
 
+Prefer Sol `max` over `ultra` when deeper reasoning is sufficient. In the
+current runtime, Ultra also enables automatic task delegation and therefore
+changes execution topology rather than merely adding one reasoning step. Use it
+only as a last resort when that delegation is materially useful, the resolver
+records a concrete reason, and the user explicitly authorizes that node.
+
 `gpt-5.6-terra` remains experimental: explicit user request only, never an
 automatic selection or fallback. `Resolve-WorkerModel.ps1`,
 `Test-OrchestrationPlan.ps1`, and event validation implement this Codex model

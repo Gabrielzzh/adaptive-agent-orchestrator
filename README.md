@@ -119,6 +119,8 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   explicit-request-only, and no benchmark Agent is launched before work.
   Requested and actual models remain separate when the platform does not expose
   the runtime model.
+  Sol `max` is preferred for very hard bounded work; Ultra remains a last-resort,
+  explicitly authorized route because it also enables automatic delegation.
 - **Deterministic modes:** `auto` resolves to a lightweight quick path,
   independent team, or recoverable workflow without another routing Agent.
 - **Reusable research evidence:** an on-demand curator builds a source
