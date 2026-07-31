@@ -2776,6 +2776,80 @@ function Get-DurableReviewScopedCarryForward {
     }
 }
 
+function Get-MilestoneRevisionOpenOccurrenceInventory {
+    param(
+        [Parameter(Mandatory)][string] $RunDirectory,
+        [Parameter(Mandatory)][object] $Plan,
+        [Parameter(Mandatory)][string] $MilestoneId,
+        [Parameter(Mandatory)][object[]] $SourceBindings
+    )
+
+    $requiredSourceIds = @(
+        @($Plan.durable_review_profile.domain_node_ids) +
+        @($Plan.durable_review_profile.dissent_node_ids) |
+            ForEach-Object { [string]$_ }
+    )
+    if (@($SourceBindings).Count -ne $requiredSourceIds.Count) {
+        throw 'Milestone revision open-occurrence source set is incomplete.'
+    }
+    $occurrences = [Collections.Generic.List[object]]::new()
+    foreach ($sourceNodeId in $requiredSourceIds) {
+        $bindingMatches = @($SourceBindings | Where-Object {
+            [string]$_.source_node_id -eq $sourceNodeId
+        })
+        $nodeMatches = @($Plan.nodes | Where-Object {
+            [string]$_.id -eq $sourceNodeId
+        })
+        if ($bindingMatches.Count -ne 1 -or $nodeMatches.Count -ne 1 -or
+            [string]$bindingMatches[0].milestone_id -ne $MilestoneId -or
+            [string]::IsNullOrWhiteSpace(
+                [string]$bindingMatches[0].source_thread_id
+            )) {
+            throw (
+                "Milestone revision open-occurrence source '$sourceNodeId' " +
+                'binding is invalid.'
+            )
+        }
+        $dispositionPath = Get-RunLocalReceiptPath `
+            -RunDirectory $RunDirectory -RelativePath (
+                [string]$bindingMatches[0].disposition_receipt_path
+            ) -Label 'Milestone revision predecessor disposition'
+        $disposition = Read-ReviewDispositionReceipt `
+            -Path $dispositionPath -RunDirectory $RunDirectory `
+            -ExpectedSourceNodeId $sourceNodeId -ExpectedThreadId (
+                [string]$bindingMatches[0].source_thread_id
+            )
+        foreach ($decision in @($disposition.decisions | Where-Object {
+            [string]$_.severity -in @('P0', 'P1') -and
+            [string]$_.resolution_status -ne 'resolved'
+        })) {
+            if ([string]$decision.resolution_status -ne 'open') {
+                throw 'Milestone revision predecessor finding status is invalid.'
+            }
+            $occurrences.Add([pscustomobject][ordered]@{
+                source_node_id = $sourceNodeId
+                role_id = [string]$nodeMatches[0].role_id
+                source_thread_id =
+                    [string]$bindingMatches[0].source_thread_id
+                source_finding_id = [string]$decision.source_finding_id
+                canonical_finding_id =
+                    [string]$decision.canonical_finding_id
+                severity = [string]$decision.severity
+                finding = [string]$decision.finding
+                finding_hash = [string]$decision.finding_hash
+                resolution_status = [string]$decision.resolution_status
+            })
+        }
+    }
+    $occurrenceJson = ConvertTo-Json -InputObject @($occurrences) `
+        -Compress -Depth 50
+    return [pscustomobject]@{
+        occurrences = @($occurrences)
+        count = $occurrences.Count
+        hash = Get-TextSha256 $occurrenceJson
+    }
+}
+
 function Read-DurableReviewScopeTransitionAuthorization {
     param(
         [Parameter(Mandatory)][string] $Path,
@@ -3097,6 +3171,17 @@ function Read-DurableReviewMilestoneRevisionAuthorization {
         'selection_key', 'activation_key',
         'created_at_utc', 'receipt_hash'
     )
+    if ([string]$receipt.schema_version -eq '1.1') {
+        $required += @(
+            'previous_revision_selection_receipt_path',
+            'previous_revision_selection_receipt_hash',
+            'previous_revision_selection_event_sequence',
+            'previous_revision_selection_event_hash',
+            'previous_open_occurrences',
+            'previous_open_occurrences_hash',
+            'previous_open_occurrence_count'
+        )
+    }
     foreach ($name in $required) {
         if ($null -eq $receipt.PSObject.Properties[$name]) {
             throw "Milestone revision authorization is missing '$name'."
@@ -3111,7 +3196,7 @@ function Read-DurableReviewMilestoneRevisionAuthorization {
         $plan.durable_review_profile.milestone_ids |
             ForEach-Object { [string]$_ }
     )
-    if ([string]$receipt.schema_version -ne '1.0' -or
+    if ([string]$receipt.schema_version -notin @('1.0', '1.1') -or
         [string]$receipt.run_id -ne [string]$run.run_id -or
         [string]$receipt.plan_hash -ne [string]$run.plan_hash -or
         [string]$receipt.genesis_hash -ne [string]$events[0].hash -or
@@ -3122,6 +3207,12 @@ function Read-DurableReviewMilestoneRevisionAuthorization {
         [string]$receipt.activation_key -notmatch
             '^(user|controller):[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$') {
         throw 'Milestone revision authorization run or milestone binding is invalid.'
+    }
+    if (([string]$receipt.schema_version -eq '1.0' -and
+            [int]$receipt.revision_index -ne 1) -or
+        ([string]$receipt.schema_version -eq '1.1' -and
+            [int]$receipt.revision_index -lt 2)) {
+        throw 'Milestone revision authorization schema/index binding is invalid.'
     }
     $selectionAuthorityPrefix = (
         [string]$receipt.selection_authority_key
@@ -3141,6 +3232,24 @@ function Read-DurableReviewMilestoneRevisionAuthorization {
             [string]$receipt.source_journal_head) {
         throw 'Milestone revision authorization journal binding changed.'
     }
+    $prefixEvents = @($events | Select-Object -First $eventCount)
+    $prefixAuthorizations = @($prefixEvents | Where-Object {
+        [string]$_.event -eq 'milestone-revision-authorized'
+    })
+    $prefixSelections = @($prefixEvents | Where-Object {
+        [string]$_.event -eq 'milestone-revision-selected'
+    })
+    if ($prefixAuthorizations.Count -ne $prefixSelections.Count -or
+        $prefixSelections.Count -ne ([int]$receipt.revision_index - 1) -or
+        @($prefixEvents | Where-Object {
+            [string]$_.event -eq 'milestone-accepted' -and
+            [string]$_.milestone_id -eq [string]$receipt.milestone_id
+        }).Count -gt 0 -or
+        @($prefixEvents | Where-Object {
+            [string]$_.event -eq 'milestone-activated'
+        }).Count -gt 0) {
+        throw 'Milestone revision authorization predecessor state is invalid.'
+    }
     $relativePath = [IO.Path]::GetRelativePath(
         $runRoot, [IO.Path]::GetFullPath($Path)
     ).Replace('\', '/')
@@ -3159,6 +3268,70 @@ function Read-DurableReviewMilestoneRevisionAuthorization {
         [string]$matchingEvents[0].prev_hash -ne
             [string]$receipt.source_journal_head) {
         throw 'Milestone revision authorization lacks its exact journal event.'
+    }
+    if ([string]$receipt.schema_version -eq '1.1') {
+        $previousSelectionPath = Get-RunLocalReceiptPath `
+            -RunDirectory $runRoot -RelativePath (
+                [string]$receipt.previous_revision_selection_receipt_path
+            ) -Label 'Previous milestone revision selection'
+        $previousSelection = Read-DurableReviewMilestoneRevisionSelection `
+            -Path $previousSelectionPath -RunDirectory $runRoot
+        $previousSelectionEvent = $prefixSelections[-1]
+        $expectedPreviousRelative = [IO.Path]::GetRelativePath(
+            $runRoot, $previousSelectionPath
+        ).Replace('\', '/')
+        if ([string]$receipt.previous_revision_selection_receipt_path -ne
+                $expectedPreviousRelative -or
+            [string]$receipt.previous_activation_receipt_path -ne
+                $expectedPreviousRelative -or
+            [string]$receipt.previous_revision_selection_receipt_hash -ne
+                [string]$previousSelection.receipt_hash -or
+            [string]$receipt.previous_activation_receipt_hash -ne
+                [string]$previousSelection.receipt_hash -or
+            [int]$receipt.previous_revision_selection_event_sequence -ne
+                [int]$previousSelectionEvent.sequence -or
+            [string]$receipt.previous_revision_selection_event_hash -ne
+                [string]$previousSelectionEvent.hash -or
+            [string]$previousSelectionEvent.milestone_activation_receipt_path -ne
+                $expectedPreviousRelative -or
+            [string]$previousSelectionEvent.milestone_activation_receipt_hash -ne
+                [string]$previousSelection.receipt_hash -or
+            [int]$previousSelection.revision_index -ne
+                ([int]$receipt.revision_index - 1) -or
+            [string]$previousSelection.milestone_id -ne
+                [string]$receipt.milestone_id -or
+            [string]$receipt.previous_source_bindings_hash -ne
+                [string]$previousSelection.source_bindings_hash -or
+            [string]$previousSelection.checkpoint_material_hash -eq
+                [string]$receipt.checkpoint_material_hash -or
+            [string]$previousSelection.input_manifest_hash -eq
+                [string]$receipt.input_manifest_hash) {
+            throw (
+                'Milestone revision authorization previous selection binding ' +
+                'changed.'
+            )
+        }
+        $computedOpen = Get-MilestoneRevisionOpenOccurrenceInventory `
+            -RunDirectory $runRoot -Plan $plan `
+            -MilestoneId ([string]$receipt.milestone_id) `
+            -SourceBindings @($previousSelection.source_bindings)
+        $computedOpenJson = ConvertTo-Json -InputObject @(
+            $computedOpen.occurrences
+        ) -Compress -Depth 50
+        $declaredOpenJson = ConvertTo-Json -InputObject @(
+            $receipt.previous_open_occurrences
+        ) -Compress -Depth 50
+        if ([int]$computedOpen.count -lt 1 -or
+            [int]$receipt.previous_open_occurrence_count -ne
+                [int]$computedOpen.count -or
+            [string]$receipt.previous_open_occurrences_hash -ne
+                [string]$computedOpen.hash -or
+            $declaredOpenJson -ne $computedOpenJson) {
+            throw (
+                'Milestone revision authorization open finding occurrence ' +
+                'conservation changed.'
+            )
+        }
     }
 
     foreach ($bindingName in @(
@@ -3213,15 +3386,26 @@ function Read-DurableReviewMilestoneRevisionAuthorization {
         }
         $previousMatches = @($receipt.previous_source_bindings |
             Where-Object { [string]$_.source_node_id -eq $sourceNodeId })
-        if ($previousMatches.Count -ne 1) {
+        if ($previousMatches.Count -ne 1 -or
+            [string]$matches[0].thread_id -ne
+                [string]$previousMatches[0].source_thread_id) {
             throw "Milestone revision source '$sourceNodeId' predecessor is missing."
         }
-        $currentPrevious = Get-DurableReviewDispositionBinding `
-            -RunDirectory $runRoot -Plan $plan -SourceNodeId $sourceNodeId `
-            -DispositionRelativePath (
+        $previousBindingArguments = @{
+            RunDirectory = $runRoot
+            Plan = $plan
+            SourceNodeId = $sourceNodeId
+            DispositionRelativePath =
                 [string]$previousMatches[0].disposition_receipt_path
-            ) -ExpectedMilestoneId ([string]$receipt.milestone_id) `
-            -AllowHistoricalMilestoneAlias
+            ExpectedMilestoneId = [string]$receipt.milestone_id
+        }
+        if ([string]$receipt.schema_version -eq '1.1') {
+            $previousBindingArguments.RequireResultMilestoneBinding = $true
+        } else {
+            $previousBindingArguments.AllowHistoricalMilestoneAlias = $true
+        }
+        $currentPrevious = Get-DurableReviewDispositionBinding `
+            @previousBindingArguments
         if ((ConvertTo-Json -InputObject $currentPrevious -Compress -Depth 50) -ne
             (ConvertTo-Json -InputObject $previousMatches[0] `
                 -Compress -Depth 50)) {

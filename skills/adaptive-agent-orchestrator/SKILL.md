@@ -333,6 +333,11 @@ every prior source occurrence by source ID, severity, exact text/hash, and
 canonical ID; canonical grouping never deletes an occurrence. A pending or
 partially reviewed revision blocks completion, and selection does not replace
 fresh main-owner acceptance.
+If a selected first-milestone revision still has open P0/P1 work, a different
+checkpoint and input may authorize the next revision without falsely creating
+final acceptance. The new authorization must bind the prior selection
+receipt/event and every open source occurrence exactly; no later milestone,
+pending revision, changed source/thread, or completed final acceptance qualifies.
 If every source's `completed` and `adopted` evidence is correct but each
 `validated` event repeated the result pointer, use the lifecycle correction
 command in [workflow-contract.md](references/workflow-contract.md). It appends
