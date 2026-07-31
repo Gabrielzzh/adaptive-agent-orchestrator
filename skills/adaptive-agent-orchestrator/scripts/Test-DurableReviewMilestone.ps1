@@ -173,7 +173,8 @@ function New-SourceChain {
         [string] $AdditionalFindingText = '',
         [string] $AdditionalSeverity = '',
         [string] $AdditionalCanonicalFindingId = '',
-        [string] $ReplacementContinuityReceiptPath = ''
+        [string] $ReplacementContinuityReceiptPath = '',
+        [string] $MilestoneRevisionAuthorizationReceiptPath = ''
     )
     $capturePath = Join-Path $Run "thread-reads/$Stem.json"
     New-ThreadCapture -Path $capturePath -ThreadId $ThreadId `
@@ -221,6 +222,12 @@ function New-SourceChain {
     )) {
         $resultArguments.ReplacementContinuityReceiptPath =
             $ReplacementContinuityReceiptPath
+    }
+    if (-not [string]::IsNullOrWhiteSpace(
+        $MilestoneRevisionAuthorizationReceiptPath
+    )) {
+        $resultArguments.MilestoneRevisionAuthorizationReceiptPath =
+            $MilestoneRevisionAuthorizationReceiptPath
     }
     $result = & (Join-Path $scriptRoot 'New-ThreadResultReceipt.ps1') `
         @resultArguments |
@@ -2566,6 +2573,392 @@ try {
     } 'lacks main-owner acceptance' (
         'Selecting the second revision must not manufacture final acceptance.'
     )
+
+    # A source that was already replaced in revision one may remain the same
+    # logical, same-role reviewer in revision two. Its new-checkpoint result
+    # must bind the consecutive revision authorization and exact re-arm event;
+    # the ordinary checkpoint roll-forward route remains a different contract.
+    $replacementConsecutiveRun = Join-Path $testRoot (
+        'replacement-consecutive-first-milestone-revision'
+    )
+    Copy-Item -LiteralPath $replacementReadyRun `
+        -Destination $replacementConsecutiveRun -Recurse
+    foreach ($relativePath in @(
+        $replacementReview.disposition_path,
+        $replacementDomain.disposition_path
+    )) {
+        $dispositionPath = Join-Path $replacementConsecutiveRun $relativePath
+        $disposition = Get-Content -LiteralPath $dispositionPath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        foreach ($decision in @($disposition.decisions)) {
+            $decision.resolution_status = 'open'
+            $decision.re_review_status = 'requested'
+            $decision.re_review_evidence = @()
+        }
+        $disposition.blocking_open = @(
+            $disposition.decisions | ForEach-Object { [string]$_.finding }
+        )
+        $disposition.Remove('receipt_hash')
+        $disposition.receipt_hash = Get-TextSha256 (
+            $disposition | ConvertTo-Json -Compress -Depth 100
+        )
+        $disposition | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $dispositionPath -Encoding utf8
+    }
+    $replacementConsecutiveSelectionMaterial = Join-Path (
+        $replacementConsecutiveRun
+    ) 'materials/method-1-revision-1-replacement-selection.json'
+    $replacementConsecutiveAuthorizationPath = Join-Path (
+        $replacementConsecutiveRun
+    ) $revisionAuthorizationRelative
+    $replacementConsecutiveAuthorization =
+        Read-DurableReviewMilestoneRevisionAuthorization -Path (
+            $replacementConsecutiveAuthorizationPath
+        ) -RunDirectory $replacementConsecutiveRun
+    $replacementConsecutiveSelection = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+    )) -RunDirectory $replacementConsecutiveRun `
+        -AuthorizationReceiptPath $replacementConsecutiveAuthorizationPath `
+        -SelectionMaterialPath $replacementConsecutiveSelectionMaterial `
+        -SelectionKey ([string]$replacementConsecutiveAuthorization.selection_key) |
+        ConvertFrom-Json -Depth 100
+
+    $replacementRevision2Checkpoint = Join-Path $replacementConsecutiveRun (
+        'materials/checkpoint-method-1-replacement-revision-2.json'
+    )
+    $replacementRevision2Input = Join-Path $replacementConsecutiveRun (
+        'materials/input-method-1-replacement-revision-2.json'
+    )
+    $replacementRevision2ReviewPrompt = Join-Path $replacementConsecutiveRun (
+        'materials/review-replacement-revision-2.md'
+    )
+    $replacementRevision2DomainPrompt = Join-Path $replacementConsecutiveRun (
+        'materials/domain-replacement-revision-2.md'
+    )
+    $replacementRevision2Manifest = Join-Path $replacementConsecutiveRun (
+        'materials/method-1-replacement-revision-2-review-materials.json'
+    )
+    $replacementRevision2Excluded = Join-Path $replacementConsecutiveRun (
+        'materials/method-1-replacement-revision-2-excluded-evidence.json'
+    )
+    $replacementRevision2Controller = Join-Path $replacementConsecutiveRun (
+        'materials/method-1-replacement-revision-2-controller.md'
+    )
+    $replacementRevision2AcceptanceEvidence = Join-Path (
+        $replacementConsecutiveRun
+    ) 'materials/method-1-replacement-revision-2-acceptance.md'
+    $replacementRevision2Acceptance = Join-Path $replacementConsecutiveRun (
+        'materials/method-1-replacement-revision-2-acceptance.json'
+    )
+    Set-Content -LiteralPath $replacementRevision2Checkpoint `
+        -Value '{"milestone":"method-1","replacement_revision":2}'
+    Set-Content -LiteralPath $replacementRevision2Input `
+        -Value '{"scope":"method-1-replacement-revision-2"}'
+    Set-Content -LiteralPath $replacementRevision2ReviewPrompt `
+        -Value 'Continue the same replacement reviewer at revision two.'
+    Set-Content -LiteralPath $replacementRevision2DomainPrompt `
+        -Value 'Continue the same domain reviewer at revision two.'
+    @(
+        [ordered]@{
+            source_node_id = 'review'
+            material_path = 'materials/review-replacement-revision-2.md'
+        },
+        [ordered]@{
+            source_node_id = 'domain'
+            material_path = 'materials/domain-replacement-revision-2.md'
+        }
+    ) | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $replacementRevision2Manifest
+    ConvertTo-Json -InputObject @() |
+        Set-Content -LiteralPath $replacementRevision2Excluded
+    Set-Content -LiteralPath $replacementRevision2Controller `
+        -Value 'Controller authorizes the next replacement-backed revision.'
+    Set-Content -LiteralPath $replacementRevision2AcceptanceEvidence `
+        -Value 'Main owner independently accepts only after blockers close.'
+    [ordered]@{
+        schema_version = '1.0'
+        milestone_id = 'method-1'
+        main_node_id = 'integrate'
+        acceptance_key = 'controller:replacement-revision-2-acceptance'
+        evidence_material_path = [IO.Path]::GetRelativePath(
+            $replacementConsecutiveRun,
+            $replacementRevision2AcceptanceEvidence
+        ).Replace('\\', '/')
+        evidence_material_hash = (
+            Get-FileHash -LiteralPath $replacementRevision2AcceptanceEvidence `
+                -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+    } | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $replacementRevision2Acceptance
+    $replacementRevision2Authorization = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionAuthorizationReceipt.ps1'
+    )) -RunDirectory $replacementConsecutiveRun -MilestoneId 'method-1' `
+        -CheckpointMaterialPath $replacementRevision2Checkpoint `
+        -InputManifestPath $replacementRevision2Input `
+        -ReviewMaterialManifestPath $replacementRevision2Manifest `
+        -ExcludedEvidenceManifestPath $replacementRevision2Excluded `
+        -AuthorizationMaterialPath $replacementRevision2Controller `
+        -AcceptanceAuthorizationMaterialPath $replacementRevision2Acceptance `
+        -SelectionKey 'controller:select-replacement-revision-2' `
+        -ActivationKey 'controller:replacement-revision-2' |
+        ConvertFrom-Json -Depth 100
+    $replacementRevision2AuthorizationRelative = (
+        'receipts/durable-review-milestone.method-1.revision-' +
+        "$($replacementRevision2Authorization.revision_id).authorization.json"
+    )
+    foreach ($source in @(
+        @{ id = 'review'; thread = 'review-replacement-thread' },
+        @{ id = 'domain'; thread = 'domain-thread' }
+    )) {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $replacementConsecutiveRun -NodeId $source.id `
+            -Status running -ThreadId $source.thread `
+            -MilestoneRevisionAuthorizationReceiptPath (
+                $replacementRevision2AuthorizationRelative
+            ) -Message "Replacement-backed revision two for $($source.id)." `
+            -Evidence @('observation:fresh-replacement-backed-review') `
+            -IdempotencyKey "replacement-revision-2-rearm-$($source.id)" |
+            Out-Null
+    }
+    $replacementRevision2ReadyRun = Join-Path $testRoot (
+        'replacement-consecutive-revision-2-ready'
+    )
+    Copy-Item -LiteralPath $replacementConsecutiveRun `
+        -Destination $replacementRevision2ReadyRun -Recurse
+    Assert-ThrowsLike {
+        New-SourceChain -Run $replacementRevision2ReadyRun `
+            -SourceNodeId 'review' -ThreadId 'review-replacement-thread' `
+            -MilestoneId 'method-1' -CheckpointPath (
+                Join-Path $replacementRevision2ReadyRun (
+                    'materials/checkpoint-method-1-replacement-revision-2.json'
+                )
+            ) -Stem 'review.replacement-revision-2-without-authorization' `
+            -Severity 'P0' -FindingText 'baseline-review-p0' `
+            -Resolution 'open' -FindingId 'review-method-1-finding' `
+            -CanonicalFindingId 'canonical-review-method-1-finding' `
+            -ReplacementContinuityReceiptPath (Join-Path (
+                $replacementRevision2ReadyRun
+            ) 'receipts/review.replacement-continuity.json') | Out-Null
+    } 'checkpoint roll-forward receipt' (
+        'An ordinary replacement result cannot reuse a new checkpoint without ' +
+        'its exact consecutive revision authorization.'
+    )
+
+    $replacementRevision2Review = New-SourceChain `
+        -Run $replacementConsecutiveRun -SourceNodeId 'review' `
+        -ThreadId 'review-replacement-thread' -MilestoneId 'method-1' `
+        -CheckpointPath $replacementRevision2Checkpoint `
+        -Stem 'review.method-1-replacement-revision-2' -Severity 'P0' `
+        -FindingText 'baseline-review-p0' -Resolution 'open' `
+        -FindingId 'review-method-1-finding' `
+        -CanonicalFindingId 'canonical-review-method-1-finding' `
+        -AdditionalFindingId 'review-method-1-finding-r08' `
+        -AdditionalFindingText 'baseline-review-p0-second-occurrence' `
+        -AdditionalSeverity 'P0' `
+        -AdditionalCanonicalFindingId 'canonical-review-method-1-finding' `
+        -ReplacementContinuityReceiptPath (Join-Path (
+            $replacementConsecutiveRun
+        ) 'receipts/review.replacement-continuity.json') `
+        -MilestoneRevisionAuthorizationReceiptPath (Join-Path (
+            $replacementConsecutiveRun
+        ) $replacementRevision2AuthorizationRelative)
+    $replacementRevision2Domain = New-SourceChain `
+        -Run $replacementConsecutiveRun -SourceNodeId 'domain' `
+        -ThreadId 'domain-thread' -MilestoneId 'method-1' `
+        -CheckpointPath $replacementRevision2Checkpoint `
+        -Stem 'domain.method-1-replacement-revision-2' -Severity 'P0' `
+        -FindingText 'baseline-domain-p0' -Resolution 'open' `
+        -FindingId 'domain-method-1-finding' `
+        -CanonicalFindingId 'canonical-domain-method-1-finding'
+    $replacementRevision2Result = Read-ThreadResultReceipt -Path (
+        Join-Path $replacementConsecutiveRun $replacementRevision2Review.result_path
+    ) -RunDirectory $replacementConsecutiveRun -ExpectedThreadId (
+        'review-replacement-thread'
+    ) -ExpectedSourceNodeId 'review'
+    Assert-True (
+        [string]$replacementRevision2Result.schema_version -eq '1.5' -and
+        [string]$replacementRevision2Result.milestone_revision_id -eq
+            [string]$replacementRevision2Authorization.revision_id -and
+        [string]$replacementRevision2Result.replacement_continuity_receipt_hash -eq
+            [string]$replacementContinuity.receipt_hash
+    ) (
+        'A replacement result at a consecutive checkpoint must bind both its ' +
+        'parent continuity and the exact revision authorization.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ThreadResultReceipt.ps1') `
+            -RunDirectory $replacementConsecutiveRun -SourceNodeId 'review' `
+            -ThreadId 'review-replacement-thread' -HostId 'local' `
+            -ThreadReadPath (Join-Path $replacementConsecutiveRun (
+                'thread-reads/review.method-1-replacement-revision-2.json'
+            )) -OutputPath (Join-Path $replacementConsecutiveRun (
+                'receipts/review.replacement-revision-2-mixed.thread-result-receipt.json'
+            )) -MilestoneId 'method-1' `
+            -CheckpointMaterialPath $replacementRevision2Checkpoint `
+            -PendingFindingRecordsPath (Join-Path $replacementConsecutiveRun (
+                'materials/review.method-1-replacement-revision-2-findings.json'
+            )) -ReplacementContinuityReceiptPath (Join-Path (
+                $replacementConsecutiveRun
+            ) 'receipts/review.replacement-continuity.json') `
+            -ReplacementCheckpointRollForwardReceiptPath (Join-Path (
+                $replacementConsecutiveRun
+            ) 'receipts/review.replacement-continuity.json') `
+            -MilestoneRevisionAuthorizationReceiptPath (Join-Path (
+                $replacementConsecutiveRun
+            ) $replacementRevision2AuthorizationRelative) | Out-Null
+    } 'cannot be combined' (
+        'A result cannot mix checkpoint roll-forward and consecutive revision ' +
+        'authority.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ThreadResultReceipt.ps1') `
+            -RunDirectory $replacementConsecutiveRun -SourceNodeId 'review' `
+            -ThreadId 'review-replacement-thread' -HostId 'local' `
+            -ThreadReadPath (Join-Path $replacementConsecutiveRun (
+                'thread-reads/review.method-1-replacement-revision-2.json'
+            )) -OutputPath (Join-Path $replacementConsecutiveRun (
+                'receipts/review.replacement-revision-2-old-auth.thread-result-receipt.json'
+            )) -MilestoneId 'method-1' `
+            -CheckpointMaterialPath $replacementRevision2Checkpoint `
+            -PendingFindingRecordsPath (Join-Path $replacementConsecutiveRun (
+                'materials/review.method-1-replacement-revision-2-findings.json'
+            )) -ReplacementContinuityReceiptPath (Join-Path (
+                $replacementConsecutiveRun
+            ) 'receipts/review.replacement-continuity.json') `
+            -MilestoneRevisionAuthorizationReceiptPath (
+                $replacementConsecutiveAuthorizationPath
+            ) | Out-Null
+    } 'does not match its milestone or checkpoint' (
+        'A previous checkpoint authorization cannot be replayed for a new result.'
+    )
+    foreach ($source in @(
+        @{
+            id = 'review'; thread = 'review-replacement-thread'
+            result = $replacementRevision2Review.result_path
+            disposition = $replacementRevision2Review.disposition_path
+        },
+        @{
+            id = 'domain'; thread = 'domain-thread'
+            result = $replacementRevision2Domain.result_path
+            disposition = $replacementRevision2Domain.disposition_path
+        }
+    )) {
+        foreach ($status in @('completed', 'validated', 'adopted')) {
+            $pointer = if ($status -eq 'completed') {
+                "artifact:$($source.result)"
+            } else { "artifact:$($source.disposition)" }
+            & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+                -RunDirectory $replacementConsecutiveRun -NodeId $source.id `
+                -Status $status -ThreadId $source.thread `
+                -Message "Replacement-backed revision two $($source.id) $status." `
+                -Evidence @($pointer) `
+                -IdempotencyKey (
+                    "replacement-revision-2-$($source.id)-$status"
+                ) | Out-Null
+        }
+    }
+    $replacementRevision2SelectionMaterial = Join-Path (
+        $replacementConsecutiveRun
+    ) 'materials/method-1-replacement-revision-2-selection.json'
+    @(
+        [ordered]@{
+            source_node_id = 'review'
+            disposition_receipt_path =
+                $replacementRevision2Review.disposition_path
+        },
+        [ordered]@{
+            source_node_id = 'domain'
+            disposition_receipt_path =
+                $replacementRevision2Domain.disposition_path
+        }
+    ) | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $replacementRevision2SelectionMaterial
+    $replacementRevision2Selection = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+    )) -RunDirectory $replacementConsecutiveRun `
+        -AuthorizationReceiptPath (Join-Path $replacementConsecutiveRun (
+            $replacementRevision2AuthorizationRelative
+        )) -SelectionMaterialPath $replacementRevision2SelectionMaterial `
+        -SelectionKey ([string]$replacementRevision2Authorization.selection_key) |
+        ConvertFrom-Json -Depth 100
+    $replacementRevision2Lifecycle = @(
+        $replacementRevision2Selection.source_lifecycle_bindings |
+            Where-Object { [string]$_.source_node_id -eq 'review' }
+    )[0]
+    Assert-True (
+        [string]$replacementRevision2Selection.schema_version -eq '1.3' -and
+        [string]$replacementRevision2Lifecycle.source_kind -eq 'replacement' -and
+        [string]$replacementRevision2Lifecycle.authorized_thread_id -eq
+            'review-replacement-thread' -and
+        [string]$replacementRevision2Lifecycle.source_thread_id -eq
+            'review-replacement-thread' -and
+        @($replacementRevision2Lifecycle.recovery_event_bindings).Count -eq 0
+    ) (
+        'Selection must preserve the same replacement seat without creating ' +
+        'another replacement or replaying the original recovery chain.'
+    )
+    $selectedReplayOutput = Join-Path $replacementConsecutiveRun (
+        'receipts/review.replacement-revision-2-after-selection.' +
+        'thread-result-receipt.json'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'New-ThreadResultReceipt.ps1') `
+            -RunDirectory $replacementConsecutiveRun -SourceNodeId 'review' `
+            -ThreadId 'review-replacement-thread' -HostId 'local' `
+            -ThreadReadPath (Join-Path $replacementConsecutiveRun (
+                'thread-reads/review.method-1-replacement-revision-2.json'
+            )) -OutputPath $selectedReplayOutput -MilestoneId 'method-1' `
+            -CheckpointMaterialPath $replacementRevision2Checkpoint `
+            -PendingFindingRecordsPath (Join-Path $replacementConsecutiveRun (
+                'materials/review.method-1-replacement-revision-2-findings.json'
+            )) -ReplacementContinuityReceiptPath (Join-Path (
+                $replacementConsecutiveRun
+            ) 'receipts/review.replacement-continuity.json') `
+            -MilestoneRevisionAuthorizationReceiptPath (Join-Path (
+                $replacementConsecutiveRun
+            ) $replacementRevision2AuthorizationRelative) | Out-Null
+    } 'already selected' (
+        'A selected consecutive revision cannot mint another result receipt.'
+    )
+    Assert-True (-not (Test-Path -LiteralPath $selectedReplayOutput)) (
+        'Rejected selected-revision replay must fail before writing a receipt.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $replacementConsecutiveRun | Out-Null
+    } 'lacks main-owner acceptance' (
+        'A replacement-backed consecutive revision remains blocked by open ' +
+        'findings and missing final acceptance.'
+    )
+
+    foreach ($field in @(
+        'milestone_revision_authorization_receipt_hash',
+        'milestone_revision_rearm_event_hash'
+    )) {
+        $tamperRun = Join-Path $testRoot (
+            "replacement-consecutive-result-$field"
+        )
+        Copy-Item -LiteralPath $replacementConsecutiveRun `
+            -Destination $tamperRun -Recurse
+        $tamperPath = Join-Path $tamperRun (
+            $replacementRevision2Review.result_path
+        )
+        $tamper = Get-Content -LiteralPath $tamperPath -Raw |
+            ConvertFrom-Json -Depth 100
+        $tamper.$field = ('f' * 64)
+        $tamper.receipt_hash = Get-ThreadResultReceiptCanonicalHash `
+            -Receipt $tamper
+        $tamper | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $tamperPath
+        Assert-ThrowsLike {
+            Read-ThreadResultReceipt -Path $tamperPath `
+                -RunDirectory $tamperRun `
+                -ExpectedThreadId 'review-replacement-thread' `
+                -ExpectedSourceNodeId 'review' | Out-Null
+        } 'revision' (
+            "A self-rehashed $field mutation must fail closed."
+        )
+    }
 
     $resignedTailRun = Join-Path $testRoot 'revision-resigned-tail'
     Copy-Item -LiteralPath $revisionRun -Destination $resignedTailRun -Recurse

@@ -310,6 +310,36 @@ cross-role, cross-checkpoint, pre-authorization recovery, missing or reordered
 attempts, an unbound thread, and replacement-of-replacement fail before write.
 This replacement path cannot be combined with a lifecycle evidence correction.
 
+When a later consecutive revision already names that previously selected
+replacement task as its required source thread, it may continue the same seat
+without creating another replacement. Generate its result with both the parent
+continuity and the exact consecutive revision authorization:
+
+```powershell
+pwsh -File scripts/New-ThreadResultReceipt.ps1 `
+  -RunDirectory <run> -SourceNodeId <source> `
+  -ThreadId <same-replacement-thread> -HostId local `
+  -ThreadReadPath <run>/thread-reads/<final>.json `
+  -OutputPath <run>/receipts/<result>.thread-result-receipt.json `
+  -MilestoneId <same-first-milestone> `
+  -CheckpointMaterialPath <run>/materials/<new-checkpoint>.json `
+  -PendingFindingRecordsPath <run>/materials/<findings>.json `
+  -ReplacementContinuityReceiptPath <run>/receipts/<continuity>.json `
+  -MilestoneRevisionAuthorizationReceiptPath `
+    <run>/receipts/<revision-authorization>.json
+```
+
+Schema 1.5 binds the same logical source, role and replacement task, its parent
+continuity, the authorization receipt and journal event, new checkpoint/input,
+and the exact single-use `adopted -> running` re-arm. Selection schema 1.3 then
+records the authorized and selected thread as the same replacement task while
+retaining the original parent replacement bridge and an empty new recovery
+chain. This route is same-milestone only. It cannot be combined with checkpoint
+roll-forward, used without a schema 1.1 consecutive revision, replayed at an
+old checkpoint/input, moved across source/role/thread, or used to create a
+replacement-of-replacement. Open P0/P1 and missing main acceptance remain
+blocking.
+
 If and only if every source's `completed` event binds its result, every
 `adopted` event binds its disposition, and every `validated` event mistakenly
 repeats that result pointer, append one whole-source-set correction before

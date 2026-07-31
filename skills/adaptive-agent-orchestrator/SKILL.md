@@ -420,6 +420,16 @@ prior finding occurrences cannot change. A lifecycle correction cannot be
 combined with this replacement path, and replacement-of-replacement remains
 forbidden.
 
+If the source named by a later consecutive revision is already that verified
+replacement task, do not create another replacement and do not use the
+next-milestone roll-forward path. Pass the same parent continuity plus the exact
+schema 1.1 revision authorization to `New-ThreadResultReceipt.ps1`. The new
+schema 1.5 result binds the source/role/replacement task, parent continuity,
+authorization receipt/event, new checkpoint/input, and the single authorized
+`adopted -> running` re-arm. Revision selection must revalidate those bindings;
+ordinary replacement reuse, mixed roll-forward authority, replay, identity
+changes, and replacement-of-replacement remain forbidden.
+
 A replacement continuity is checkpoint-scoped; never reuse it as silent
 authorization for later work. If the same adopted replacement task must review
 the immediate next declared milestone, first create

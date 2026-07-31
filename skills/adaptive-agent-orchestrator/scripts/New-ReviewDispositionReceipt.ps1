@@ -43,10 +43,10 @@ if (-not (Test-Path -LiteralPath $decisionsFullPath -PathType Leaf)) {
 $source = Read-ThreadResultReceipt -Path $sourcePath `
     -ExpectedThreadId $SourceThreadId -ExpectedSourceNodeId $SourceNodeId `
     -RunDirectory $runRoot
-if ([string]$source.schema_version -notin @('1.3', '1.4')) {
+if ([string]$source.schema_version -notin @('1.3', '1.4', '1.5')) {
     throw (
-        'Durable review disposition requires a schema 1.3 source receipt or ' +
-        'schema 1.4 source receipt ' +
+        'Durable review disposition requires a schema 1.3 source receipt ' +
+        'or a compatible schema 1.4/1.5 source receipt ' +
         'with stable finding identity and severity. Migrate legacy receipts.'
     )
 }
