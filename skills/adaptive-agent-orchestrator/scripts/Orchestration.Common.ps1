@@ -466,6 +466,31 @@ function Get-ThreadCaptureId {
     return $first
 }
 
+function Get-TaskListRecordThreadId {
+    param([Parameter(Mandatory)][object] $Thread)
+
+    $ids = [Collections.Generic.List[string]]::new()
+    foreach ($name in @('thread_id', 'id', 'threadId')) {
+        $property = $Thread.PSObject.Properties[$name]
+        if ($null -ne $property) {
+            $ids.Add([string]$property.Value)
+        }
+    }
+    if ($ids.Count -eq 0) {
+        return ''
+    }
+    if (@($ids | Where-Object {
+        [string]::IsNullOrWhiteSpace($_)
+    }).Count -gt 0) {
+        throw 'Task-list record contains an empty thread identity.'
+    }
+    $first = [string]$ids[0]
+    if (@($ids | Where-Object { [string]$_ -cne $first }).Count -gt 0) {
+        throw 'Task-list record declares conflicting thread identities.'
+    }
+    return $first
+}
+
 function Read-ThreadReadCapture {
     param(
         [Parameter(Mandatory)][string] $Path,
@@ -4578,12 +4603,7 @@ function Read-ThreadReconciliationReceipt {
         $matches = [Collections.Generic.List[object]]::new()
         foreach ($snapshot in @($input.snapshots)) {
             foreach ($thread in @($snapshot.threads)) {
-                $threadId = if ($null -ne
-                    $thread.PSObject.Properties['thread_id']) {
-                    [string]$thread.thread_id
-                } elseif ($null -ne $thread.PSObject.Properties['id']) {
-                    [string]$thread.id
-                } else { '' }
+                $threadId = Get-TaskListRecordThreadId -Thread $thread
                 $hostId = if ($null -ne
                     $thread.PSObject.Properties['host_id']) {
                     [string]$thread.host_id

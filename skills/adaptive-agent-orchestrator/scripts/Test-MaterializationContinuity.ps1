@@ -424,6 +424,61 @@ try {
         -Message 'Multiple matching tasks must not be materialized.' `
         -Action { Invoke-Materialized -Fixture $duplicate }
 
+    $resolverConflict = New-MaterializationFixture `
+        -Name 'resolver-conflicting-record-id' -LegacyMaterializing
+    $resolverReceiptPath = Join-Path $resolverConflict.run_directory `
+        $resolverConflict.reconciliation_path
+    $resolverReceipt = Get-Content -LiteralPath $resolverReceiptPath -Raw |
+        ConvertFrom-Json -Depth 30 -DateKind String
+    $resolverInputPath = Join-Path $resolverConflict.run_directory `
+        ([string]$resolverReceipt.reconciliation_input_path)
+    $resolverInput = Get-Content -LiteralPath $resolverInputPath -Raw |
+        ConvertFrom-Json -Depth 50 -DateKind String
+    $resolverInput.snapshots[0].threads[0] | Add-Member `
+        -NotePropertyName thread_id `
+        -NotePropertyValue '019fb64b-c879-7620-8b4f-conflict00' -Force
+    $resolverInput | ConvertTo-Json -Depth 50 |
+        Set-Content -LiteralPath $resolverInputPath -Encoding utf8
+    Remove-Item -LiteralPath $resolverReceiptPath
+    Assert-RejectedWithoutJournalWrite -Fixture $resolverConflict `
+        -ExpectedMessage 'conflicting thread identities' `
+        -Message 'Resolver must reject conflicting IDs in one task-list record.' `
+        -Action {
+            & (Join-Path $scriptRoot 'Resolve-ThreadReconciliation.ps1') `
+                -InputPath $resolverInputPath -OutputPath $resolverReceiptPath
+        }
+    Assert-True (-not (Test-Path -LiteralPath $resolverReceiptPath)) (
+        'Conflicting task-list identities must not produce a receipt.'
+    )
+
+    $readerConflict = New-MaterializationFixture `
+        -Name 'reader-conflicting-record-id' -LegacyMaterializing
+    $readerReceiptPath = Join-Path $readerConflict.run_directory `
+        $readerConflict.reconciliation_path
+    $readerReceipt = Get-Content -LiteralPath $readerReceiptPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 50
+    $readerInputPath = Join-Path $readerConflict.run_directory `
+        ([string]$readerReceipt.reconciliation_input_path)
+    $readerInput = Get-Content -LiteralPath $readerInputPath -Raw |
+        ConvertFrom-Json -Depth 50 -DateKind String
+    $readerInput.snapshots[0].threads[0] | Add-Member `
+        -NotePropertyName thread_id `
+        -NotePropertyValue '019fb64b-c879-7620-8b4f-conflict00' -Force
+    $readerInput | ConvertTo-Json -Depth 50 |
+        Set-Content -LiteralPath $readerInputPath -Encoding utf8
+    $readerInputRaw = Get-Content -LiteralPath $readerInputPath -Raw
+    $readerReceipt.reconciliation_input_hash = Get-TextSha256 $readerInputRaw
+    $readerReceipt.Remove('receipt_hash')
+    $readerReceipt.receipt_hash = Get-TextSha256 (
+        $readerReceipt | ConvertTo-Json -Compress -Depth 50
+    )
+    $readerReceipt | ConvertTo-Json -Depth 50 |
+        Set-Content -LiteralPath $readerReceiptPath -Encoding utf8
+    Assert-RejectedWithoutJournalWrite -Fixture $readerConflict `
+        -ExpectedMessage 'conflicting thread identities' `
+        -Message 'Reader must reject a rehashed receipt with conflicting IDs.' `
+        -Action { Invoke-Materialized -Fixture $readerConflict }
+
     $differentId = New-MaterializationFixture -Name 'different-id' `
         -LegacyMaterializing
     Assert-RejectedWithoutJournalWrite -Fixture $differentId `
@@ -513,7 +568,7 @@ try {
         real_four_event_regression = $true
         future_first_binding = $true
         same_id_adjacent_recovery = $true
-        negative_cases = 11
+        negative_cases = 13
     } | ConvertTo-Json -Compress
 }
 finally {

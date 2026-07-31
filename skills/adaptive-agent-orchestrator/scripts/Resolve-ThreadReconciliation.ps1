@@ -154,11 +154,7 @@ foreach ($snapshot in $snapshots) {
     }
     $snapshotTimes.Add($capturedAt)
     foreach ($thread in @($snapshot.threads)) {
-        $threadId = if ($null -ne $thread.PSObject.Properties['thread_id']) {
-            [string]$thread.thread_id
-        } elseif ($null -ne $thread.PSObject.Properties['id']) {
-            [string]$thread.id
-        } else { '' }
+        $threadId = Get-TaskListRecordThreadId -Thread $thread
         $hostId = if ($null -ne $thread.PSObject.Properties['host_id']) {
             [string]$thread.host_id
         } else { '' }
