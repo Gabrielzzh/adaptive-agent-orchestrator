@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.7.14 release notes](docs/releases/v0.7.14.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.7.15 release notes](docs/releases/v0.7.15.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -263,14 +263,14 @@ state, integrates results, and performs authorized external actions.
 
 ## Validation
 
-The v0.7.14 release passes:
+The v0.7.15 release passes:
 
-- PowerShell parser validation for all 53 scripts;
+- PowerShell parser validation for all 54 scripts;
 - 45 materialization-continuity assertions, including 13 invalid cases;
 - 91 recovery-protocol assertions;
-- 106 durable-milestone, revision, and successor-run assertions;
+- 128 durable-milestone, revision, and successor-run assertions;
 - 15 run-policy activation assertions;
-- 840 self-test assertions;
+- 862 self-test assertions;
 - 59 intentionally invalid negative-test cases correctly rejected;
 - strict parsing for all 8 bundled reference JSON files;
 - plan, metadata, journal, handoff, dependency, idempotency, ownership,
@@ -327,6 +327,11 @@ The v0.7.14 release passes:
   source-specific results and dispositions. Completion stayed `BLOCKED` by the
   multi-divination product P0, seven open P1 occurrences, and missing main
   acceptance; no new Orchestrator P0/P1 was found.
+- the real checkpoint15 revision appended one whole-source lifecycle evidence
+  correction for two misbound `validated` events, then selected schema 1.2
+  without changing either adopted source or the old 35-event prefix. Completion
+  remained `BLOCKED` by one product P0, six open P1 occurrences, and missing
+  main acceptance; a resolved P1 did not reappear.
 
 Run:
 
@@ -338,6 +343,9 @@ pwsh -NoProfile -File `
 ## Current limitations
 
 - This is a governance Skill, not a standalone agent host.
+- Lifecycle evidence correction applies only when every selected source has the
+  exact `completed=result`, `validated=result`, `adopted=disposition` error
+  shape. It is not a general journal-editing or lifecycle-repair mechanism.
 - It does not fix platform `systemError` or missing-final failures; it prevents
   those states from being accepted as success and preserves verifiable recovery
   and replacement continuity.
