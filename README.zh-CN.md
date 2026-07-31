@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[English](README.md) · [v0.7.13 正式版说明](docs/releases/v0.7.13.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+[English](README.md) · [v0.7.14 正式版说明](docs/releases/v0.7.14.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
 
 ![Adaptive Agent Orchestrator v0.7.0 发布图](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -38,12 +38,20 @@
   真实身份与状态；选择角色本身不会自动创建 Worker。
 - **创建结果核对：** 后台创建调用无论返回成功还是错误，都要用任务列表
   核对真实实体；未知状态不会触发盲目重试，重复实体会被识别并停止扩张。
+- **相邻物化恢复：** 如果新任务的 ID 被调用方提前一格写入生命周期，只有
+  紧邻的 `materializing -> materialized` 才能沿用同一 ID，并且必须同时
+  具备唯一任务列表匹配、启动预留、精确握手，以及“更早历史和其他节点均未
+  使用该 ID”的证据；身份字段互相冲突时直接拒绝。
 - **结果回收门：** 独立后台 Agent 的最终回答必须被显式读取并生成哈希回执，
   否则必需节点不能通过完成门。
 - **长期审核闭环：** 长期研究或 Skill 研发可在多个里程碑复用只读领域角色
   与反方角色；主 Agent仍是唯一 Writer，并必须逐项回应每份审核发现。
 - **独立来源不可互替：** 每个审核来源保留自己的报告、证据、处置与复审义务；
   一个来源不能替代另一个，未解决 P0/P1 始终阻断完成。
+- **替代席位连续性：** 已采纳的 replacement 只有通过一次性、同来源/角色/
+  thread 的追加式推进，才能继续下一个 checkpoint。若当前两位长期审核员
+  已无法提供独立结论，只允许把全部开放问题原样转入一个 fresh run，并启用
+  两个全新的长期只读、无委派审核席位；旧任务不会被重新使用。
 - **跨里程碑审核推进：** 同一个长期审核 run 可通过追加式收据激活下一条已
   声明里程碑，精确绑定来源链并要求主 Agent重新验收；无需改写 plan，也不
   会按文件时间猜测“最新结果”。
@@ -223,13 +231,14 @@ $adaptive-agent-orchestrator。共享上下文留在主 Agent，Worker 只拿引
 
 ## 验证情况
 
-v0.7.13 正式版本通过：
+v0.7.14 正式版本通过：
 
-- 48 个 PowerShell 脚本语法解析；
-- 69 项恢复协议专项断言；
+- 53 个 PowerShell 脚本语法解析；
+- 45 项物化连续性断言，其中包含 13 个非法案例；
+- 91 项恢复协议专项断言；
 - 106 项 durable milestone、revision 与 successor-run 专项断言；
 - 15 项 run policy activation 专项断言；
-- 817 项完整自测断言；
+- 840 项完整自测断言；
 - 59 份故意构造的非法负面案例均被正确拦截；
 - 8 个 reference JSON 文件严格解析；
 - 计划、元数据、日志、handoff、依赖、幂等、所有权、上下文重叠、渐进
@@ -267,6 +276,12 @@ v0.7.13 正式版本通过：
   当前恢复仍能合法推进；原来源 3/3 耗尽后，只创建一个同角色 replacement，
   并通过独立有界恢复取得正式 final。九项问题全部保持 open，completion 继续
   正确 `BLOCKED`。
+- 独立 source-rotation 验收为 GREEN，P0/P1/P2 均为 0；真实长期审核 run
+  随后把 7/7 条开放 P1 完整带入两个全新的长期只读审核席位，没有复用旧任务。
+- 真实 fresh-review run 通过受限相邻物化路径接回一个已经创建的任务，只再
+  创建一位审核员；两份正式复审都在原任务内完成恢复，并生成各自的 result 与
+  disposition。completion 继续因 multi-divination 产品 P0、7 条开放 P1 和
+  缺少主任务最终验收而 `BLOCKED`，没有发现新的 Orchestrator P0/P1。
 
 ```powershell
 pwsh -NoProfile -File `
@@ -278,6 +293,8 @@ pwsh -NoProfile -File `
 - 这是治理 Skill，不是独立 Agent 托管平台。
 - Skill 不修复平台自身的 `systemError` 或 final 丢失；它保证这些状态不会
   被误报为成功，并使恢复与替代连续性可核验。
+- source rotation 只更换审核席位并继承控制义务，不迁移、判断或修复被审核
+  产品。
 - Skill 不迁移业务产物；policy activation 只允许既有不可变 run 采用新的
   编排合同。
 - successor adoption 只继承编排义务和身份，不复制项目文件或业务状态；

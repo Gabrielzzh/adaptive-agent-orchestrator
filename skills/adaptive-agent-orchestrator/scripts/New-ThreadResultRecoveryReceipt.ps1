@@ -10,6 +10,7 @@ param(
     [ValidateSet('original', 'replacement')]
     [string] $RecoveryStage = 'original',
     [string] $ReplacementContinuityReceiptPath,
+    [string] $ReplacementCheckpointRollForwardReceiptPath,
     [string] $MilestoneId,
     [Parameter(Mandatory)][ValidateRange(1, 3)][int] $Attempt,
     [string] $OutputPath
@@ -95,8 +96,97 @@ if ($cycleAwareOriginal) {
 } elseif (-not [string]::IsNullOrWhiteSpace($MilestoneId)) {
     throw 'MilestoneId is only valid for cycle-aware original recovery.'
 }
+$replacementRelativePath = ''
+$replacementHash = ''
+$replacementRollForwardRelativePath = ''
+$replacementRollForwardHash = ''
+$replacementRecoveryCycleId = ''
+$replacement = $null
+$replacementRollForward = $null
+if ($RecoveryStage -eq 'replacement') {
+    if (-not [string]::IsNullOrWhiteSpace($LegacySourceAdoptionReceiptPath) -or
+        [string]::IsNullOrWhiteSpace($ReplacementContinuityReceiptPath)) {
+        throw (
+            'Replacement-stage recovery requires replacement continuity and ' +
+            'cannot use legacy adoption directly.'
+        )
+    }
+    $replacementPath = Resolve-InputPath $ReplacementContinuityReceiptPath (
+        'Replacement continuity receipt'
+    )
+    $replacement = Read-ReplacementContinuityReceipt -Path $replacementPath `
+        -RunDirectory $runRoot -ExpectedSourceNodeId $SourceNodeId `
+        -ExpectedReplacementThreadId $OriginalThreadId
+    $replacementRelativePath = [IO.Path]::GetRelativePath(
+        $runRoot, $replacementPath
+    ).Replace('\', '/')
+    $replacementHash = [string]$replacement.receipt_hash
+    if (-not [string]::IsNullOrWhiteSpace(
+        $ReplacementCheckpointRollForwardReceiptPath
+    )) {
+        $replacementRollForwardPath = Resolve-InputPath `
+            $ReplacementCheckpointRollForwardReceiptPath (
+                'Replacement checkpoint roll-forward receipt'
+            )
+        $replacementRollForward =
+            Read-ReplacementCheckpointRollForwardReceipt `
+                -Path $replacementRollForwardPath -RunDirectory $runRoot `
+                -ExpectedSourceNodeId $SourceNodeId `
+                -ExpectedReplacementThreadId $OriginalThreadId
+        if ([string]$replacementRollForward.
+                replacement_continuity_receipt_hash -ne $replacementHash -or
+            [string]$replacementRollForward.checkpoint_hash -ne
+                $checkpointHash -or
+            [string]$replacementRollForward.input_manifest_hash -ne
+                $inputManifestHash) {
+            throw (
+                'Replacement recovery checkpoint, input, or continuity does ' +
+                'not match its roll-forward receipt.'
+            )
+        }
+        $replacementRollForwardRelativePath = [IO.Path]::GetRelativePath(
+            $runRoot, $replacementRollForwardPath
+        ).Replace('\', '/')
+        $replacementRollForwardHash =
+            [string]$replacementRollForward.receipt_hash
+        $replacementRecoveryCycleId = Get-TextSha256 (
+            [ordered]@{
+                run_id = [string]$run.run_id
+                source_node_id = $SourceNodeId
+                replacement_thread_id = $OriginalThreadId
+                replacement_continuity_receipt_hash = $replacementHash
+                replacement_checkpoint_roll_forward_receipt_hash =
+                    $replacementRollForwardHash
+                milestone_id =
+                    [string]$replacementRollForward.target_milestone_id
+                checkpoint_hash = $checkpointHash
+                input_manifest_hash = $inputManifestHash
+            } | ConvertTo-Json -Compress -Depth 20
+        )
+    } elseif ([string]$replacement.checkpoint_hash -ne $checkpointHash -or
+        [string]$replacement.input_manifest_hash -ne $inputManifestHash) {
+        throw (
+            'Replacement recovery at a new checkpoint requires its ' +
+            'roll-forward receipt.'
+        )
+    }
+} elseif (-not [string]::IsNullOrWhiteSpace(
+    $ReplacementContinuityReceiptPath
+) -or -not [string]::IsNullOrWhiteSpace(
+    $ReplacementCheckpointRollForwardReceiptPath
+)) {
+    throw (
+        'Original-stage recovery cannot bind replacement continuity or ' +
+        'checkpoint roll-forward.'
+    )
+}
 $expectedName = if ($RecoveryStage -eq 'replacement') {
-    "$SourceNodeId.replacement.attempt-$Attempt.result-recovery.json"
+    if (-not [string]::IsNullOrWhiteSpace($replacementRecoveryCycleId)) {
+        "$SourceNodeId.replacement-cycle-$replacementRecoveryCycleId." +
+            "attempt-$Attempt.result-recovery.json"
+    } else {
+        "$SourceNodeId.replacement.attempt-$Attempt.result-recovery.json"
+    }
 } elseif ($cycleAwareOriginal) {
     "$SourceNodeId.cycle-$([string]$cycle.recovery_cycle_id)." +
         "attempt-$Attempt.result-recovery.json"
@@ -130,31 +220,6 @@ if (Test-Path -LiteralPath $outputFullPath) {
 $evidenceSource = ''
 $legacyRelativePath = ''
 $legacyHash = ''
-$replacementRelativePath = ''
-$replacementHash = ''
-if ($RecoveryStage -eq 'replacement') {
-    if (-not [string]::IsNullOrWhiteSpace($LegacySourceAdoptionReceiptPath) -or
-        [string]::IsNullOrWhiteSpace($ReplacementContinuityReceiptPath)) {
-        throw (
-            'Replacement-stage recovery requires replacement continuity and ' +
-            'cannot use legacy adoption directly.'
-        )
-    }
-    $replacementPath = Resolve-InputPath $ReplacementContinuityReceiptPath (
-        'Replacement continuity receipt'
-    )
-    $replacement = Read-ReplacementContinuityReceipt -Path $replacementPath `
-        -RunDirectory $runRoot -ExpectedSourceNodeId $SourceNodeId `
-        -ExpectedReplacementThreadId $OriginalThreadId
-    $replacementRelativePath = [IO.Path]::GetRelativePath(
-        $runRoot, $replacementPath
-    ).Replace('\', '/')
-    $replacementHash = [string]$replacement.receipt_hash
-} elseif (-not [string]::IsNullOrWhiteSpace(
-    $ReplacementContinuityReceiptPath
-)) {
-    throw 'Original-stage recovery cannot bind replacement continuity.'
-}
 if (-not [string]::IsNullOrWhiteSpace($LegacySourceAdoptionReceiptPath)) {
     if (-not [string]::IsNullOrWhiteSpace($ThreadReadPath)) {
         throw 'Use either a platform progress capture or legacy adoption.'
@@ -226,7 +291,13 @@ $previousPath = ''
 $previousHash = ''
 if ($Attempt -gt 1) {
     $previousName = if ($RecoveryStage -eq 'replacement') {
-        "$SourceNodeId.replacement.attempt-$($Attempt - 1).result-recovery.json"
+        if (-not [string]::IsNullOrWhiteSpace($replacementRecoveryCycleId)) {
+            "$SourceNodeId.replacement-cycle-$replacementRecoveryCycleId." +
+                "attempt-$($Attempt - 1).result-recovery.json"
+        } else {
+            "$SourceNodeId.replacement.attempt-" +
+                "$($Attempt - 1).result-recovery.json"
+        }
     } elseif ($cycleAwareOriginal) {
         "$SourceNodeId.cycle-$([string]$cycle.recovery_cycle_id)." +
             "attempt-$($Attempt - 1).result-recovery.json"
@@ -248,7 +319,11 @@ if ($Attempt -gt 1) {
 
 $payload = [ordered]@{
     schema_version = if ($RecoveryStage -eq 'replacement') {
-        '1.1'
+        if (-not [string]::IsNullOrWhiteSpace($replacementRecoveryCycleId)) {
+            '1.3'
+        } else {
+            '1.1'
+        }
     } elseif ($cycleAwareOriginal) {
         '1.2'
     } else {
@@ -293,6 +368,15 @@ if ($RecoveryStage -eq 'replacement') {
     $payload['recovery_stage'] = 'replacement'
     $payload['replacement_continuity_receipt_path'] = $replacementRelativePath
     $payload['replacement_continuity_receipt_hash'] = $replacementHash
+    if (-not [string]::IsNullOrWhiteSpace($replacementRecoveryCycleId)) {
+        $payload['recovery_cycle_id'] = $replacementRecoveryCycleId
+        $payload['milestone_id'] =
+            [string]$replacementRollForward.target_milestone_id
+        $payload['replacement_checkpoint_roll_forward_receipt_path'] =
+            $replacementRollForwardRelativePath
+        $payload['replacement_checkpoint_roll_forward_receipt_hash'] =
+            $replacementRollForwardHash
+    }
 } elseif ($cycleAwareOriginal) {
     $payload['recovery_stage'] = 'original'
     $payload['recovery_cycle_id'] = [string]$cycle.recovery_cycle_id

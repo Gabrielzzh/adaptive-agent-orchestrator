@@ -981,6 +981,16 @@ if ($null -ne $successorReview) {
     $predecessorCheckpointHash = Require-Text $successorReview (
         'predecessor_checkpoint_material_hash'
     ) 'successor_review_profile'
+    $lineageKind = [string](Get-PlanProperty $successorReview 'lineage_kind')
+    if ([string]::IsNullOrWhiteSpace($lineageKind)) {
+        $lineageKind = 'thread-reuse'
+    }
+    if ($lineageKind -notin @('thread-reuse', 'source-rotation')) {
+        Add-PlanError (
+            'successor_review_profile.lineage_kind must be thread-reuse or ' +
+            'source-rotation.'
+        )
+    }
     if ($predecessorRunId -notmatch
         '^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$' -or
         $predecessorRunId -eq [string](Get-PlanProperty $plan 'run_id')) {
@@ -1019,14 +1029,55 @@ if ($null -ne $successorReview) {
             'the ordered durable source set.'
         )
     }
+    if ($lineageKind -eq 'source-rotation') {
+        $rotationTargetMilestoneId = Require-Text $successorReview (
+            'rotation_target_milestone_id'
+        ) 'successor_review_profile'
+        $rotationCheckpointHash = Require-Text $successorReview (
+            'rotation_checkpoint_material_hash'
+        ) 'successor_review_profile'
+        if ($rotationTargetMilestoneId -notmatch
+            '^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$') {
+            Add-PlanError (
+                'successor_review_profile rotation target milestone ID is invalid.'
+            )
+        }
+        if ($rotationCheckpointHash -notmatch '^[0-9a-f]{64}$') {
+            Add-PlanError (
+                'successor_review_profile rotation checkpoint requires a ' +
+                'lowercase SHA-256 digest.'
+            )
+        }
+        $successorMilestones = @(
+            Get-PlanProperty $durableReview 'milestone_ids' |
+                ForEach-Object { [string]$_ }
+        )
+        if ($successorMilestones.Count -lt 1 -or
+            [string]$successorMilestones[0] -ne $rotationTargetMilestoneId) {
+            Add-PlanError (
+                'A source-rotation successor must start at its bound target ' +
+                'milestone.'
+            )
+        }
+    }
     foreach ($sourceNodeId in $successorSourceIds) {
         if (-not $ids.ContainsKey($sourceNodeId)) { continue }
         $sourceNode = $ids[$sourceNodeId]
         $sourceContext = Get-PlanProperty $sourceNode 'context'
-        if ((Get-PlanProperty $sourceContext 'session_policy') -ne 'reuse' -or
+        if ($lineageKind -eq 'source-rotation') {
+            if ((Get-PlanProperty $sourceContext 'session_policy') -ne 'fresh' -or
+                [int](Get-PlanProperty $sourceContext 'max_prior_turns') -ne 0) {
+                Add-PlanError (
+                    "Source-rotation durable source '$sourceNodeId' must use a " +
+                    'fresh session with no prior turns.'
+                )
+            }
+        } elseif (
+            (Get-PlanProperty $sourceContext 'session_policy') -ne 'reuse' -or
             [string]::IsNullOrWhiteSpace(
                 [string](Get-PlanProperty $sourceContext 'prior_thread_id')
-            )) {
+            )
+        ) {
             Add-PlanError (
                 "Successor durable source '$sourceNodeId' must explicitly " +
                 'reuse its predecessor thread.'

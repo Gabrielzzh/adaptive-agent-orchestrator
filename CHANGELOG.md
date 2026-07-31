@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.7.14 - 2026-07-31
+
+Durable reviewer continuity and source-rotation patch release.
+
+- Let an authorized replacement reviewer continue into a later checkpoint on
+  the same logical source, role, and durable task through a one-time,
+  append-only roll-forward. The original continuity record remains unchanged,
+  and replacement-of-replacement remains forbidden.
+- Add an active-mid-run source rotation for the case where the two current
+  durable reviewers can no longer provide independent results. The old run
+  exports every open source occurrence into one fresh successor run with two
+  new read-only, nondelegating reviewer seats; old tasks are never reused.
+- Preserve source, severity, exact text/hash, canonical identity, checkpoint,
+  input, role contract, and attempt history across rotation. Missing,
+  downgraded, merged-across-source, replayed, or forked obligations fail closed.
+- Reconcile a fresh task that was actually created when its thread ID was
+  recorded one lifecycle step early. Only the immediately adjacent
+  `materializing -> materialized` transition may reuse that exact ID, and only
+  with a unique task-list match, activation reservation, and exact
+  `MATERIALIZED_WAITING_FOR_CONTINUITY` handshake.
+- Reject conflicting task identities across `thread_id`, `id`, and `threadId`
+  instead of selecting one field or blindly creating another task.
+- Validate the combined controls in the real multi-divination review run: two
+  fresh reviewers were materialized, both reviews were recovered through their
+  own tasks, formal results and dispositions were recorded, and completion
+  stayed correctly `BLOCKED` by a product P0, seven open P1 occurrences, and
+  missing main acceptance. No new Orchestrator P0/P1 was found.
+- Preserve the boundary: this release does not repair platform `systemError`,
+  judge or fix the multi-divination product finding, claim measured Token
+  savings or business accuracy, or modify multi-divination product files.
+
 ## 0.7.13 - 2026-07-31
 
 Historical recovery and immutable review-selection patch release.

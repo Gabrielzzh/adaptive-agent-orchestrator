@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.7.13 release notes](docs/releases/v0.7.13.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.7.14 release notes](docs/releases/v0.7.14.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -40,6 +40,11 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
 - **Creation reconciliation:** every background creation call is reconciled
   against the visible task list. Unknown state does not trigger blind retry,
   and duplicate materializations are detected before expansion continues.
+- **Adjacent materialization recovery:** if a newly created task ID was recorded
+  one lifecycle step early, only the immediately adjacent
+  `materializing -> materialized` transition may adopt that same ID. A unique
+  task-list match, activation reservation, exact handshake, and no earlier or
+  cross-node use are required; conflicting task identity fields fail closed.
 - **Result collection gate:** required independent-background results must be
   explicitly read and recorded in a hash-bound receipt before completion.
 - **Durable review loop:** long-running research or Skill development can keep
@@ -48,6 +53,11 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
 - **Independent-source integrity:** each review source keeps its own report,
   evidence, disposition, and re-review obligation. One source cannot replace
   another, and unresolved P0/P1 findings always block completion.
+- **Replacement-seat continuity:** an adopted replacement reviewer may move to a
+  later checkpoint only through a one-time, same-source/role/thread
+  roll-forward. If current durable reviewers can no longer provide independent
+  results, one append-only source rotation carries every open occurrence into a
+  fresh run with new read-only, nondelegating seats instead of reusing old tasks.
 - **Cross-milestone review roll-forward:** the same durable review run can
   activate its next declared milestone through an append-only receipt. Exact
   source chains and fresh main-owner acceptance replace stale fixed paths
@@ -253,13 +263,14 @@ state, integrates results, and performs authorized external actions.
 
 ## Validation
 
-The v0.7.13 release passes:
+The v0.7.14 release passes:
 
-- PowerShell parser validation for all 48 scripts;
-- 69 recovery-protocol assertions;
+- PowerShell parser validation for all 53 scripts;
+- 45 materialization-continuity assertions, including 13 invalid cases;
+- 91 recovery-protocol assertions;
 - 106 durable-milestone, revision, and successor-run assertions;
 - 15 run-policy activation assertions;
-- 817 self-test assertions;
+- 840 self-test assertions;
 - 59 intentionally invalid negative-test cases correctly rejected;
 - strict parsing for all 8 bundled reference JSON files;
 - plan, metadata, journal, handoff, dependency, idempotency, ownership,
@@ -307,6 +318,15 @@ The v0.7.13 release passes:
   original source exhausted 3/3, one authorized same-role replacement recovered
   a formal final through its own bounded epoch, all nine occurrences remained
   open, and completion stayed correctly `BLOCKED`.
+- independent source-rotation acceptance returned GREEN with P0=0, P1=0, and
+  P2=0. A real active review run then carried all 7/7 open P1 occurrences into
+  two fresh read-only reviewer seats without reusing any old task.
+- the real fresh-review run reconciled one already-created task through the
+  guarded adjacent materialization path, created only one additional reviewer,
+  recovered both formal reviews through the same two tasks, and recorded
+  source-specific results and dispositions. Completion stayed `BLOCKED` by the
+  multi-divination product P0, seven open P1 occurrences, and missing main
+  acceptance; no new Orchestrator P0/P1 was found.
 
 Run:
 
@@ -321,6 +341,8 @@ pwsh -NoProfile -File `
 - It does not fix platform `systemError` or missing-final failures; it prevents
   those states from being accepted as success and preserves verifiable recovery
   and replacement continuity.
+- Source rotation changes reviewer seats and carries control obligations; it
+  does not migrate, judge, or repair the reviewed product.
 - It does not migrate business artifacts. Policy activation only authorizes the
   existing immutable run to use the newer orchestration contract.
 - Successor adoption carries orchestration obligations and identities, not

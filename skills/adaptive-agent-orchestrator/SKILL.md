@@ -138,6 +138,10 @@ record it with `New-ThreadResultReceipt.ps1` before integration. Follow the
 exact tool, marker, collection, and failure rules in
 [platform-codex.md](references/platform-codex.md) and
 [safety-and-lifecycle.md](references/safety-and-lifecycle.md).
+If a fresh task ID was accidentally recorded on `materializing`, never recreate
+the task or edit history. Use the narrow adjacent same-ID materialization path
+from `safety-and-lifecycle.md`; it requires the original reservation, a unique
+task-list reconciliation, and the exact waiting-handshake capture.
 
 A worktree task requires a verified Git repository and usable `HEAD`. Run
 `Test-CodexWorktreePreflight.ps1` before the creation call. An unborn branch or
@@ -391,6 +395,34 @@ one same-role read-only replacement through
 `New-ReplacementContinuityReceipt.ps1`. A replacement result remains bound to
 the original logical source, is labeled `replacement`, and never claims the
 original task passed.
+
+A replacement continuity is checkpoint-scoped; never reuse it as silent
+authorization for later work. If the same adopted replacement task must review
+the immediate next declared milestone, first create
+`New-ReplacementCheckpointRollForwardReceipt.ps1`. The append-only receipt
+binds the same logical source, role and replacement task, its parent
+continuity, prior result/disposition/adopted event, active milestone epoch, new
+checkpoint/input, actual-model verification state, and controller
+authorization. Only that unused receipt permits the narrow
+`adopted -> running` transition. New results use schema 1.4 and any missing-final
+recovery uses its own schema 1.3 replacement cycle. This is not a new Worker or
+a replacement-of-replacement; missing bindings, replay, fork, or identity
+changes remain blocked.
+
+If both durable review seats become unusable during an active milestone—one
+replacement has independence-contaminated evidence and the other replacement
+has exhausted its complete 3/3 recovery chain—do not reuse either replacement,
+revive either original task, or create a replacement-of-replacement. Use the
+source-rotation protocol in [workflow-contract.md](references/workflow-contract.md):
+export the current run with
+`New-DurableReviewSourceRotationExportReceipt.ps1`, then create a fresh
+successor only through `New-OrchestrationSourceRotationSuccessorRun.ps1`. The
+new run keeps the same two logical sources and exact role contracts but starts
+two fresh, read-only, non-delegating tasks. It inherits the target checkpoint
+and every open source occurrence without omission, downgrade, canonical-only
+merging, or cross-source movement. Adoption alone never satisfies completion;
+fresh same-source dispositions and independent main acceptance are still
+required.
 
 For an older durable task that lacks machine source IDs or original input/read
 hashes, do not invent them. With controller authorization, capture the real

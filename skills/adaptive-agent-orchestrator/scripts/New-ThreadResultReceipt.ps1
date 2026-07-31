@@ -9,6 +9,7 @@ param(
     [string] $MilestoneId,
     [string] $CheckpointMaterialPath,
     [string] $ReplacementContinuityReceiptPath,
+    [string] $ReplacementCheckpointRollForwardReceiptPath,
     [string] $PendingFindingRecordsPath,
     [string[]] $PendingFindings = @(),
     [string[]] $AdoptedFindings = @(),
@@ -119,6 +120,7 @@ $final = Read-ThreadReadCapture -Path $captureFullPath `
 $sourceKind = 'original'
 $replacementRelativePath = ''
 $replacementHash = ''
+$replacement = $null
 if (-not [string]::IsNullOrWhiteSpace($ReplacementContinuityReceiptPath)) {
     $replacementFullPath = [IO.Path]::GetFullPath(
         $ReplacementContinuityReceiptPath
@@ -150,6 +152,77 @@ if (-not [string]::IsNullOrWhiteSpace($ReplacementContinuityReceiptPath)) {
     throw (
         'Replacement thread result requires its continuity receipt; it cannot ' +
         'be recorded as original.'
+    )
+}
+$replacementRollForwardRelativePath = ''
+$replacementRollForwardHash = ''
+if (-not [string]::IsNullOrWhiteSpace(
+    $ReplacementCheckpointRollForwardReceiptPath
+)) {
+    if ($sourceKind -ne 'replacement') {
+        throw (
+            'Replacement checkpoint roll-forward requires replacement ' +
+            'continuity.'
+        )
+    }
+    $rollForwardFullPath = [IO.Path]::GetFullPath(
+        $ReplacementCheckpointRollForwardReceiptPath
+    )
+    if (-not $rollForwardFullPath.StartsWith(
+        $runRoot + [IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'Replacement checkpoint roll-forward receipt must remain inside the run.'
+    }
+    $rollForward = Read-ReplacementCheckpointRollForwardReceipt `
+        -Path $rollForwardFullPath -RunDirectory $runRoot `
+        -ExpectedSourceNodeId $SourceNodeId `
+        -ExpectedReplacementThreadId $ThreadId
+    if ([string]$rollForward.replacement_continuity_receipt_hash -ne
+            [string]$replacement.receipt_hash -or
+        [string]$rollForward.target_milestone_id -ne $MilestoneId -or
+        [string]$rollForward.checkpoint_path -ne $checkpointRelativePath) {
+        throw (
+            'Replacement checkpoint roll-forward does not match the result ' +
+            'milestone, checkpoint, or continuity.'
+        )
+    }
+    $replacementRollForwardRelativePath = [IO.Path]::GetRelativePath(
+        $runRoot, $rollForwardFullPath
+    ).Replace('\', '/')
+    $replacementRollForwardHash = [string]$rollForward.receipt_hash
+    $rollForwardLifecycle = @($events | Where-Object {
+        $null -ne $_.PSObject.Properties[
+            'replacement_roll_forward_receipt_path'
+        ] -and
+        $null -ne $_.PSObject.Properties[
+            'replacement_roll_forward_receipt_hash'
+        ] -and
+        $null -ne $_.PSObject.Properties[
+            'replacement_roll_forward_id'
+        ] -and
+        [string]$_.node_id -eq $SourceNodeId -and
+        [string]$_.thread_id -eq $ThreadId -and
+        [string]$_.status -eq 'running' -and
+        [string]$_.replacement_roll_forward_receipt_path -eq
+            $replacementRollForwardRelativePath -and
+        [string]$_.replacement_roll_forward_receipt_hash -eq
+            $replacementRollForwardHash -and
+        [string]$_.replacement_roll_forward_id -eq
+            [string]$rollForward.roll_forward_id
+    })
+    if ($rollForwardLifecycle.Count -ne 1) {
+        throw (
+            'Replacement result lacks its unique adopted-to-running ' +
+            'checkpoint roll-forward lifecycle binding.'
+        )
+    }
+} elseif ($sourceKind -eq 'replacement' -and
+    -not [string]::IsNullOrWhiteSpace($checkpointHash) -and
+    [string]$replacement.checkpoint_hash -ne $checkpointHash) {
+    throw (
+        'Replacement result at a new checkpoint requires its checkpoint ' +
+        'roll-forward receipt.'
     )
 }
 $structuredPending = @()
@@ -226,6 +299,14 @@ if ($structuredPending.Count -eq 0 -and
     @($allFindings | Select-Object -Unique).Count -ne $allFindings.Count) {
     throw 'Thread result findings must be unique across disposition groups.'
 }
+if (-not [string]::IsNullOrWhiteSpace(
+    $replacementRollForwardRelativePath
+) -and $structuredPending.Count -eq 0) {
+    throw (
+        'Replacement checkpoint roll-forward results require structured ' +
+        'schema findings.'
+    )
+}
 $receiptAdopted = [object[]]@($adopted)
 $receiptRejected = [object[]]@($rejected)
 $receiptPending = [object[]]@($pending)
@@ -235,7 +316,15 @@ if ($structuredPending.Count -gt 0) {
     $receiptPending = [object[]]@($structuredPending)
 }
 $receipt = [ordered]@{
-    schema_version = if ($structuredPending.Count -gt 0) { '1.3' } else { '1.2' }
+    schema_version = if (-not [string]::IsNullOrWhiteSpace(
+        $replacementRollForwardRelativePath
+    )) {
+        '1.4'
+    } elseif ($structuredPending.Count -gt 0) {
+        '1.3'
+    } else {
+        '1.2'
+    }
     source_node_id = $SourceNodeId
     source_kind = $sourceKind
     thread_id = $ThreadId
@@ -254,6 +343,12 @@ $receipt = [ordered]@{
     adopted_findings = $receiptAdopted
     rejected_findings = $receiptRejected
     pending_findings = $receiptPending
+}
+if ([string]$receipt.schema_version -eq '1.4') {
+    $receipt['replacement_checkpoint_roll_forward_receipt_path'] =
+        $replacementRollForwardRelativePath
+    $receipt['replacement_checkpoint_roll_forward_receipt_hash'] =
+        $replacementRollForwardHash
 }
 $receipt.receipt_hash = Get-TextSha256 (
     $receipt | ConvertTo-Json -Compress -Depth 20

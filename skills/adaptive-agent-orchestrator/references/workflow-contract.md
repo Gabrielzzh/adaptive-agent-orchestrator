@@ -440,6 +440,113 @@ If the replacement has no final answer, its recovery receipts use a separate
 and remain limited to three attempts on that replacement thread. Exhaustion
 stays blocked and cannot create a replacement-of-replacement.
 
+A replacement continuity authorizes only its captured checkpoint and input. If
+the already adopted replacement task must continue the same logical source at
+the immediate next declared milestone, create an append-only seat roll-forward
+before dispatch:
+
+```powershell
+pwsh -File scripts/New-ReplacementCheckpointRollForwardReceipt.ps1 `
+  -RunDirectory <run> -SourceNodeId <source> `
+  -ReplacementThreadId <existing-replacement-thread> `
+  -ReplacementContinuityReceiptPath <run>/receipts/<continuity>.json `
+  -PriorResultReceiptPath <run>/receipts/<prior-result>.json `
+  -PriorDispositionReceiptPath <run>/receipts/<prior-disposition>.json `
+  -TargetMilestoneId <immediate-next-milestone> `
+  -CheckpointManifestPath <run>/materials/<new-checkpoint>.json `
+  -InputManifestPath <run>/materials/<new-input>.json `
+  -AuthorizationMaterialPath <run>/materials/<authorization>.md `
+  -ActivationKey controller:<stable-key>
+
+pwsh -File scripts/Add-OrchestrationEvent.ps1 `
+  -RunDirectory <run> -NodeId <source> -Status running `
+  -ThreadId <existing-replacement-thread> `
+  -ReplacementCheckpointRollForwardReceiptPath `
+    receipts/<source>.replacement-roll-forward-<id>.json `
+  -IdempotencyKey <stable-event-key>
+```
+
+The receipt binds the run, source, role, same replacement thread, parent
+continuity, prior schema result and source disposition, terminal adopted event,
+active milestone/activation, new checkpoint/input, actual-model verification
+state, and controller authorization. It is single-use and does not consume a
+new Worker slot. Only this binding permits `adopted -> running`; ordinary
+`adopted` stays terminal. The new source result is schema 1.4 and binds this
+roll-forward; a missing-final recovery uses a separate schema 1.3 replacement
+cycle under the same roll-forward. Completion and milestone selection accept
+only the bound result/disposition chain. Cross-source, role, thread,
+checkpoint, milestone or hash changes, duplicate/forked receipts, reuse of the
+original task, and replacement-of-replacement all fail closed. Open P0/P1 and
+missing main acceptance continue to block completion.
+
+If both durable review seats become unusable while a declared milestone is
+active, use source rotation only for this bounded pair of failures:
+
+- one current replacement produced independence-contaminated evidence and
+  remains at `running`;
+- the other current replacement is at `result_pending` after the exact
+  canonical 3/3 recovery chain for the target checkpoint;
+- both failed seats are replacements for the same two logical sources and role
+  contracts in the active run;
+- an immediate next declared milestone and one shared target checkpoint exist.
+
+Do not revive an original task, reuse either failed replacement, create a
+replacement-of-replacement, or relabel an ordinary successor. Capture both
+failed seats in a run-local source-rotation manifest. For each source, bind its
+logical source and role, failed replacement task, parent continuity,
+checkpoint roll-forward, input, latest lifecycle event, and exactly one failure
+class. The independence entry binds its completed raw capture. The exhausted
+entry binds the three canonical recovery receipts from one cycle, including
+the terminal `recovery-exhausted` receipt. The manifest also binds the shared
+target checkpoint.
+
+The fresh successor plan preserves the source IDs and exact role contracts but
+uses fresh, read-only, non-delegating sessions. It starts at the target
+milestone and declares:
+
+```json
+{
+  "successor_review_profile": {
+    "lineage_kind": "source-rotation",
+    "predecessor_run_id": "old-run-id",
+    "predecessor_active_milestone_id": "active-milestone",
+    "predecessor_checkpoint_material_hash": "<active-checkpoint-sha256>",
+    "rotation_target_milestone_id": "immediate-next-milestone",
+    "rotation_checkpoint_material_hash": "<target-checkpoint-sha256>",
+    "source_node_ids": ["domain-research", "adversarial-review"]
+  }
+}
+```
+
+Export and create the fresh run only through:
+
+```powershell
+pwsh -File scripts/New-DurableReviewSourceRotationExportReceipt.ps1 `
+  -PredecessorRunDirectory <old-run> `
+  -SuccessorPlanPath <fresh-plan> -SuccessorRunDirectory <fresh-run> `
+  -RotationManifestPath <old-run>/materials/<rotation-manifest>.json `
+  -AuthorizationMaterialPath <old-run>/materials/<authorization>.md `
+  -ActivationKey "controller:<stable-authority-reference>"
+
+pwsh -File scripts/New-OrchestrationSourceRotationSuccessorRun.ps1 `
+  -PlanPath <fresh-plan> -RunDirectory <fresh-run> `
+  -WorkspaceRoot <workspace> -PredecessorRunDirectory <old-run> `
+  -PredecessorExportReceiptPath `
+    <old-run>/receipts/durable-review-source-rotation.export.json
+```
+
+The append-only export binds the old plan/run/genesis, active milestone,
+journal head/count, both failed replacement identities and failure evidence,
+the target checkpoint and inputs, controller authorization, exact fresh plan
+and run identity, and every current open P1 occurrence. Export is single-use
+and cannot fork. The adoption creates two fresh seats but no result: each
+inherited occurrence must reappear under the same source with unchanged
+source finding ID, canonical ID, severity, exact text/hash, and status until a
+fresh same-source disposition resolves or retains it. Omitting, downgrading,
+canonical-only merging, moving across sources, changing roles, or replaying an
+old source/receipt fails closed. Genesis/adoption remains blocked until both
+fresh source chains and independent main acceptance satisfy the normal gates.
+
 For legacy sources, `New-LegacySourceAdoptionReceipt.ps1` captures observable
 material and explicitly lists unavailable machine fields. This migration path
 does not backfill or infer old hashes. The adoption receipt is single-use and

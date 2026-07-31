@@ -65,7 +65,19 @@ For a durable background thread:
    reservation, and receipt hashes all verify. A typed observation string alone
    is insufficient.
 10. If reconciliation is unavailable or ambiguous, stop with `unknown`; never
-   retry the same activation key.
+    retry the same activation key.
+
+If a fresh task ID was recorded one step early on `materializing`, do not create
+another task or edit the journal. The immediately adjacent `materialized` event
+may keep that exact ID only when both events share the run, node, role, and
+attempt; the launch reservation still verifies; a run-local reconciliation
+receipt re-derives exactly one matching task; and a raw `read_thread` capture
+contains the exact final marker `MATERIALIZED_WAITING_FOR_CONTINUITY`. The ID
+must not occur in any earlier event or another node. New `materializing` events
+that carry an ID must pass the same uniqueness, reconciliation, reservation, and
+handshake checks on first use. A different ID, interleaving event, partial
+evidence, duplicate match, or repeated materialization fails before journal
+append.
 
 After the run's reconciliation receipts are final, append verified,
 privacy-minimal observations once:
@@ -172,6 +184,17 @@ original source's recovery chain. That epoch binds the existing replacement
 continuity receipt, replacement thread, source role, checkpoint, and input, and
 allows at most three same-thread attempts. Exhausting it leaves completion
 blocked; it never authorizes a replacement-of-replacement.
+
+Replacement continuity is not a durable permission to review every future
+checkpoint. An adopted replacement may continue only through a single-use
+checkpoint roll-forward that binds the same run/source/role/thread, parent
+continuity, prior result/disposition/adopted event, active milestone epoch,
+immediate next declared milestone, new checkpoint/input, actual-model evidence,
+and controller authorization. That receipt permits only the narrow
+`adopted -> running` transition and does not create or consume another Worker.
+The subsequent result/disposition and any missing-final recovery must bind the
+same roll-forward. Reuse, fork, identity changes, an old original task, or a
+replacement-of-replacement fail closed.
 
 Legacy durable sources may lack machine identifiers and immutable captures that
 the current protocol requires. Never synthesize those values. A one-time legacy
