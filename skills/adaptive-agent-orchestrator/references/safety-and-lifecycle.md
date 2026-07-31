@@ -178,6 +178,15 @@ The replacement may satisfy only that source obligation and must be labeled as
 a replacement. It cannot substitute for another durable role or claim that the
 original thread passed.
 
+When the original exhausts its three attempts inside an already authorized
+first-milestone revision, selection may bridge to that one replacement without
+rewriting the authorization. The bridge must prove that all three recovery
+receipts were journaled after the revision re-arm, attempt 3 was exhausted, and
+the replacement entered one bound `replacement_pending -> running` lifecycle
+before producing its result and disposition. The authorized thread and selected
+thread are recorded separately; source, role, checkpoint, input, or recovery
+identity changes fail closed.
+
 If the replacement itself returns no final answer, it receives a separate
 `replacement` recovery epoch with filenames and hashes distinct from the
 original source's recovery chain. That epoch binds the existing replacement

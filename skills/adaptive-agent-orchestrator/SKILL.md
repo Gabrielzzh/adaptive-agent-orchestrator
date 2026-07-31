@@ -405,6 +405,16 @@ one same-role read-only replacement through
 the original logical source, is labeled `replacement`, and never claims the
 original task passed.
 
+If that 3/3 exhaustion happens after a first-milestone revision was authorized
+and re-armed, the revision may select the one verified replacement instead of
+the exhausted original thread. Selection schema 1.3 binds the authorized and
+selected thread separately, all three recovery receipts and journal events,
+the unique `replacement_pending -> running` bridge, and the replacement's
+result/disposition lifecycle. The logical source, role, checkpoint, input, and
+prior finding occurrences cannot change. A lifecycle correction cannot be
+combined with this replacement path, and replacement-of-replacement remains
+forbidden.
+
 A replacement continuity is checkpoint-scoped; never reuse it as silent
 authorization for later work. If the same adopted replacement task must review
 the immediate next declared milestone, first create

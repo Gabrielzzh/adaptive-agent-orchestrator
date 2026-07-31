@@ -13,6 +13,61 @@ function Get-TextSha256 {
     ).ToLowerInvariant()
 }
 
+function Get-ThreadResultReceiptCanonicalHash {
+    param([Parameter(Mandatory)][object] $Receipt)
+
+    $schemaVersion = [string]$Receipt.schema_version
+    $hasSourceContract = $null -ne
+        $Receipt.PSObject.Properties['source_node_id']
+    $hasPending = $null -ne $Receipt.PSObject.Properties['pending_findings']
+    $payload = [ordered]@{
+        schema_version = $schemaVersion
+    }
+    if ($hasSourceContract) {
+        $payload.source_node_id = [string]$Receipt.source_node_id
+        $payload.source_kind = [string]$Receipt.source_kind
+    }
+    $payload.thread_id = [string]$Receipt.thread_id
+    $payload.host_id = [string]$Receipt.host_id
+    $payload.collection_method = [string]$Receipt.collection_method
+    $payload.thread_read_path = [string]$Receipt.thread_read_path
+    $payload.thread_read_hash = [string]$Receipt.thread_read_hash
+    $payload.final_turn_id = [string]$Receipt.final_turn_id
+    $payload.final_status = [string]$Receipt.final_status
+    $payload.final_content_hash = [string]$Receipt.final_content_hash
+    if ($hasSourceContract) {
+        $payload.replacement_continuity_receipt_path = [string](
+            $Receipt.replacement_continuity_receipt_path
+        )
+        $payload.replacement_continuity_receipt_hash = [string](
+            $Receipt.replacement_continuity_receipt_hash
+        )
+        if ($null -ne $Receipt.PSObject.Properties['milestone_id']) {
+            $payload.milestone_id = [string]$Receipt.milestone_id
+            $payload.checkpoint_material_path = [string](
+                $Receipt.checkpoint_material_path
+            )
+            $payload.checkpoint_material_hash = [string](
+                $Receipt.checkpoint_material_hash
+            )
+        }
+    }
+    $payload.adopted_findings = @($Receipt.adopted_findings)
+    $payload.rejected_findings = @($Receipt.rejected_findings)
+    if ($hasPending) {
+        $payload.pending_findings = @($Receipt.pending_findings)
+    }
+    if ($schemaVersion -eq '1.4') {
+        $payload.replacement_checkpoint_roll_forward_receipt_path =
+            [string]$Receipt.replacement_checkpoint_roll_forward_receipt_path
+        $payload.replacement_checkpoint_roll_forward_receipt_hash =
+            [string]$Receipt.replacement_checkpoint_roll_forward_receipt_hash
+    }
+    return Get-TextSha256 (
+        $payload | ConvertTo-Json -Compress -Depth 20
+    )
+}
+
 function Get-JournalMutexName {
     param([Parameter(Mandatory)][string] $EventsPath)
     $resolved = (Resolve-Path -LiteralPath $EventsPath).Path
@@ -872,54 +927,7 @@ function Read-ThreadResultReceipt {
         $final.final_content_hash -ne [string]$receipt.final_content_hash) {
         throw 'Thread result receipt does not match its read-thread capture.'
     }
-    $payload = [ordered]@{
-        schema_version = [string]$receipt.schema_version
-    }
-    if ($hasSourceContract) {
-        $payload.source_node_id = [string]$receipt.source_node_id
-        $payload.source_kind = [string]$receipt.source_kind
-    }
-    $payload.thread_id = [string]$receipt.thread_id
-    $payload.host_id = [string]$receipt.host_id
-    $payload.collection_method = [string]$receipt.collection_method
-    $payload.thread_read_path = [string]$receipt.thread_read_path
-    $payload.thread_read_hash = [string]$receipt.thread_read_hash
-    $payload.final_turn_id = [string]$receipt.final_turn_id
-    $payload.final_status = [string]$receipt.final_status
-    $payload.final_content_hash = [string]$receipt.final_content_hash
-    if ($hasSourceContract) {
-        $payload.replacement_continuity_receipt_path = [string](
-            $receipt.replacement_continuity_receipt_path
-        )
-        $payload.replacement_continuity_receipt_hash = [string](
-            $receipt.replacement_continuity_receipt_hash
-        )
-        if ($null -ne $receipt.PSObject.Properties['milestone_id']) {
-            $payload.milestone_id = [string]$receipt.milestone_id
-            $payload.checkpoint_material_path = [string](
-                $receipt.checkpoint_material_path
-            )
-            $payload.checkpoint_material_hash = [string](
-                $receipt.checkpoint_material_hash
-            )
-        }
-    }
-    $payload.adopted_findings = @($receipt.adopted_findings)
-    $payload.rejected_findings = @($receipt.rejected_findings)
-    if ($hasPending) {
-        $payload.pending_findings = $pending
-    }
-    if ($schemaVersion -eq '1.4') {
-        $payload.replacement_checkpoint_roll_forward_receipt_path =
-            [string]$receipt.
-                replacement_checkpoint_roll_forward_receipt_path
-        $payload.replacement_checkpoint_roll_forward_receipt_hash =
-            [string]$receipt.
-                replacement_checkpoint_roll_forward_receipt_hash
-    }
-    $expectedHash = Get-TextSha256 (
-        $payload | ConvertTo-Json -Compress -Depth 20
-    )
+    $expectedHash = Get-ThreadResultReceiptCanonicalHash -Receipt $receipt
     if ([string]$receipt.receipt_hash -ne $expectedHash) {
         throw 'Thread result receipt hash mismatch.'
     }
@@ -1567,7 +1575,8 @@ function Read-ThreadResultRecoveryReceipt {
             -RunDirectory $RunDirectory `
             -ExpectedSourceNodeId $ExpectedSourceNodeId `
             -ExpectedOriginalThreadId $ExpectedOriginalThreadId `
-            -ExpectedRecoveryStage $recoveryStage
+            -ExpectedRecoveryStage $recoveryStage `
+            -SkipPeerCycleCollisionCheck:$SkipPeerCycleCollisionCheck
         if ([int]$previous.attempt -ne ($attempt - 1) -or
             [string]$previous.receipt_hash -ne
                 [string]$receipt.previous_receipt_hash -or
@@ -1625,6 +1634,15 @@ function Read-ThreadResultRecoveryReceipt {
                 }
         )
         foreach ($peerStart in $peerStarts) {
+            $peerHeader = Get-Content -LiteralPath $peerStart.FullName -Raw |
+                ConvertFrom-Json -Depth 20 -DateKind String
+            if ([string]$peerHeader.source_node_id -ne $ExpectedSourceNodeId -or
+                [string]$peerHeader.original_thread_id -ne
+                    $ExpectedOriginalThreadId -or
+                [string]$peerHeader.checkpoint_hash -ne
+                    [string]$receipt.checkpoint_hash) {
+                continue
+            }
             $peer = Read-ThreadResultRecoveryReceipt `
                 -Path $peerStart.FullName -RunDirectory $RunDirectory `
                 -ExpectedSourceNodeId $ExpectedSourceNodeId `
@@ -1908,7 +1926,8 @@ function Read-ReplacementContinuityReceipt {
         $recovery = Read-ThreadResultRecoveryReceipt -Path $recoveryPath `
             -RunDirectory $RunDirectory `
             -ExpectedSourceNodeId $ExpectedSourceNodeId `
-            -ExpectedOriginalThreadId ([string]$receipt.original_thread_id)
+            -ExpectedOriginalThreadId ([string]$receipt.original_thread_id) `
+            -SkipPeerCycleCollisionCheck
         if ([int]$recovery.attempt -ne ($index + 1) -or
             [string]$recovery.receipt_hash -ne
                 [string]$recoveryHashes[$index] -or
@@ -1920,6 +1939,16 @@ function Read-ReplacementContinuityReceipt {
         }
         $verifiedHashes.Add([string]$recovery.receipt_hash)
     }
+    # The peer-cycle collision scan is identical for all three receipts. Run it
+    # once from attempt 1 instead of recursively repeating it for every attempt.
+    $firstRecoveryPath = Get-RunLocalReceiptPath -RunDirectory $RunDirectory `
+        -RelativePath ([string]$recoveryPaths[0]) `
+        -Label 'Recovery chain first receipt'
+    $null = Read-ThreadResultRecoveryReceipt -Path $firstRecoveryPath `
+        -RunDirectory $RunDirectory `
+        -ExpectedSourceNodeId $ExpectedSourceNodeId `
+        -ExpectedOriginalThreadId ([string]$receipt.original_thread_id) `
+        -ExpectedRecoveryStage original
     if ([string]$receipt.recovery_chain_hash -ne
         (Get-TextSha256 (@($verifiedHashes) -join "`n"))) {
         throw 'Replacement recovery chain hash mismatch.'
@@ -2613,9 +2642,20 @@ function Get-DurableReviewDispositionBinding {
     $resultRelativePath = [string]$disposition.source_result_receipt_path
     $resultPath = Get-RunLocalReceiptPath -RunDirectory $RunDirectory `
         -RelativePath $resultRelativePath -Label 'Thread result receipt'
-    $result = Read-ThreadResultReceipt -Path $resultPath `
-        -ExpectedThreadId $sourceThreadId `
-        -ExpectedSourceNodeId $SourceNodeId -RunDirectory $RunDirectory
+    # The disposition reader already validated the complete source result and
+    # its recovery/replacement chain. Verify the same hash-bound receipt here
+    # without recursively walking that graph a second time.
+    $result = Get-Content -LiteralPath $resultPath -Raw |
+        ConvertFrom-Json -Depth 100 -DateKind String
+    if ([string]$result.receipt_hash -ne
+            [string]$disposition.source_result_receipt_hash -or
+        [string]$result.receipt_hash -ne (
+            Get-ThreadResultReceiptCanonicalHash -Receipt $result
+        ) -or
+        [string]$result.thread_id -ne $sourceThreadId -or
+        [string]$result.source_node_id -ne $SourceNodeId) {
+        throw 'Thread result receipt changed after disposition validation.'
+    }
 
     $checkpointPath = ''
     $checkpointHash = ''
@@ -2669,6 +2709,279 @@ function Get-DurableReviewDispositionBinding {
         disposition_file_hash = (
             Get-FileHash -LiteralPath $dispositionPath -Algorithm SHA256
         ).Hash.ToLowerInvariant()
+    }
+}
+
+function Get-DurableReviewRevisionSourceContinuityBinding {
+    param(
+        [Parameter(Mandatory)][string] $RunDirectory,
+        [Parameter(Mandatory)][object] $RequiredSource,
+        [Parameter(Mandatory)][object] $DispositionBinding,
+        [Parameter(Mandatory)][object] $Authorization,
+        [Parameter(Mandatory)][string] $AuthorizationReceiptRelativePath,
+        [Parameter(Mandatory)][object[]] $Events,
+        [Parameter(Mandatory)][int] $AuthorizationEventSequence,
+        [Parameter(Mandatory)][int] $RearmEventSequence
+    )
+
+    $sourceNodeId = [string]$RequiredSource.source_node_id
+    $roleId = [string]$RequiredSource.role_id
+    $authorizedThreadId = [string]$RequiredSource.thread_id
+    $selectedThreadId = [string]$DispositionBinding.source_thread_id
+    $resultPath = Get-RunLocalReceiptPath -RunDirectory $RunDirectory `
+        -RelativePath ([string]$DispositionBinding.result_receipt_path) `
+        -Label 'Milestone revision thread result receipt'
+    # Get-DurableReviewDispositionBinding immediately validated this result and
+    # its continuity chain. Read the same hash-bound object here instead of
+    # recursively running the expensive receipt graph a second time.
+    $result = Get-Content -LiteralPath $resultPath -Raw |
+        ConvertFrom-Json -Depth 100 -DateKind String
+    if ([string]$result.receipt_hash -ne
+            [string]$DispositionBinding.result_receipt_hash -or
+        [string]$result.thread_id -ne $selectedThreadId -or
+        [string]$result.source_node_id -ne $sourceNodeId) {
+        throw "Milestone revision source '$sourceNodeId' result changed."
+    }
+    $sourceKind = [string]$result.source_kind
+    if ($sourceKind -eq 'original') {
+        if ($selectedThreadId -ne $authorizedThreadId) {
+            throw (
+                "Milestone revision source '$sourceNodeId' changed thread " +
+                'without replacement continuity.'
+            )
+        }
+        return [pscustomobject][ordered]@{
+            source_node_id = $sourceNodeId
+            role_id = $roleId
+            source_kind = 'original'
+            authorized_thread_id = $authorizedThreadId
+            source_thread_id = $selectedThreadId
+            recovery_cycle_id = ''
+            recovery_event_bindings = @()
+            replacement_continuity_receipt_path = ''
+            replacement_continuity_receipt_hash = ''
+            replacement_pending_event_sequence = 0
+            replacement_pending_event_hash = ''
+            replacement_running_event_sequence = 0
+            replacement_running_event_hash = ''
+            lifecycle_start_sequence = $RearmEventSequence
+        }
+    }
+    if ($sourceKind -ne 'replacement' -or
+        $selectedThreadId -eq $authorizedThreadId) {
+        throw "Milestone revision source '$sourceNodeId' has invalid continuity."
+    }
+
+    # A replacement may replace the revision-authorized original exactly once.
+    # A thread that was itself introduced as a replacement cannot be replaced
+    # again through this narrow selection bridge.
+    if (@($Events | Where-Object {
+        [string]$_.node_id -eq $sourceNodeId -and
+        [string]$_.status -eq 'replacement_pending' -and
+        [string]$_.thread_id -eq $authorizedThreadId
+    }).Count -gt 0) {
+        throw (
+            "Milestone revision source '$sourceNodeId' cannot create a " +
+            'replacement of a replacement.'
+        )
+    }
+
+    $continuityRelativePath = [string](
+        $result.replacement_continuity_receipt_path
+    )
+    $continuityPath = Get-RunLocalReceiptPath -RunDirectory $RunDirectory `
+        -RelativePath $continuityRelativePath `
+        -Label 'Milestone revision replacement continuity receipt'
+    $continuity = Get-Content -LiteralPath $continuityPath -Raw |
+        ConvertFrom-Json -Depth 100 -DateKind String
+    if ([string]$continuity.receipt_hash -ne
+            [string]$result.replacement_continuity_receipt_hash -or
+        [string]$continuity.original_thread_id -ne $authorizedThreadId -or
+        [string]$continuity.replacement_thread_id -ne $selectedThreadId -or
+        [string]$continuity.role_id -ne $roleId -or
+        [string]$continuity.checkpoint_path -ne
+            [string]$Authorization.checkpoint_material_path -or
+        [string]$continuity.checkpoint_hash -ne
+            [string]$Authorization.checkpoint_material_hash -or
+        [string]$continuity.input_manifest_path -ne
+            [string]$Authorization.input_manifest_path -or
+        [string]$continuity.input_manifest_hash -ne
+            [string]$Authorization.input_manifest_hash) {
+        throw (
+            "Milestone revision source '$sourceNodeId' replacement changed " +
+            'role, thread, checkpoint, or input.'
+        )
+    }
+
+    $recoveryPaths = @($continuity.recovery_receipt_paths)
+    $recoveryHashes = @($continuity.recovery_receipt_hashes)
+    $recoveryReceipts = [Collections.Generic.List[object]]::new()
+    $recoveryEvents = [Collections.Generic.List[object]]::new()
+    for ($index = 0; $index -lt 3; $index++) {
+        $relativeRecoveryPath = [string]$recoveryPaths[$index]
+        $recoveryPath = Get-RunLocalReceiptPath -RunDirectory $RunDirectory `
+            -RelativePath $relativeRecoveryPath `
+            -Label 'Milestone revision original recovery receipt'
+        $recovery = Get-Content -LiteralPath $recoveryPath -Raw |
+            ConvertFrom-Json -Depth 100 -DateKind String
+        if ([string]$recovery.schema_version -ne '1.2' -or
+            [string]$recovery.source_node_id -ne $sourceNodeId -or
+            [string]$recovery.role_id -ne $roleId -or
+            [string]$recovery.original_thread_id -ne $authorizedThreadId -or
+            [string]$recovery.recovery_stage -ne 'original' -or
+            [int]$recovery.attempt -ne ($index + 1) -or
+            [string]$recovery.receipt_hash -ne $recoveryHashes[$index] -or
+            [string]$recovery.milestone_id -ne
+                [string]$Authorization.milestone_id -or
+            [string]$recovery.milestone_activation_receipt_path -ne
+                $AuthorizationReceiptRelativePath -or
+            [string]$recovery.milestone_activation_receipt_hash -ne
+                [string]$Authorization.receipt_hash -or
+            [string]$recovery.checkpoint_path -ne
+                [string]$Authorization.checkpoint_material_path -or
+            [string]$recovery.checkpoint_hash -ne
+                [string]$Authorization.checkpoint_material_hash -or
+            [string]$recovery.input_manifest_path -ne
+                [string]$Authorization.input_manifest_path -or
+            [string]$recovery.input_manifest_hash -ne
+                [string]$Authorization.input_manifest_hash) {
+            throw (
+                "Milestone revision source '$sourceNodeId' replacement " +
+                'recovery chain is not bound to this revision.'
+            )
+        }
+        $matches = @($Events | Where-Object {
+            [string]$_.node_id -eq $sourceNodeId -and
+            [string]$_.thread_id -eq $authorizedThreadId -and
+            [string]$_.prior_state -eq 'running' -and
+            [string]$_.status -eq 'result_pending' -and
+            [string]$_.recovery_receipt_path -eq $relativeRecoveryPath -and
+            [string]$_.recovery_receipt_hash -eq
+                [string]$recovery.receipt_hash -and
+            [int]$_.sequence -gt $AuthorizationEventSequence -and
+            [int]$_.sequence -gt $RearmEventSequence
+        })
+        if ($matches.Count -ne 1) {
+            throw (
+                "Milestone revision source '$sourceNodeId' recovery attempt " +
+                "$($index + 1) lacks one journal event."
+            )
+        }
+        $recoveryReceipts.Add($recovery)
+        $recoveryEvents.Add($matches[0])
+    }
+    if (@($recoveryReceipts | ForEach-Object {
+        [string]$_.recovery_cycle_id
+    } | Select-Object -Unique).Count -ne 1 -or
+        [string]$recoveryReceipts[2].outcome -ne 'recovery-exhausted' -or
+        [int]$recoveryEvents[0].sequence -ge [int]$recoveryEvents[1].sequence -or
+        [int]$recoveryEvents[1].sequence -ge [int]$recoveryEvents[2].sequence) {
+        throw (
+            "Milestone revision source '$sourceNodeId' replacement recovery " +
+            'is incomplete, crossed cycles, or out of order.'
+        )
+    }
+
+    $recoveryEventBindings = [Collections.Generic.List[object]]::new()
+    for ($index = 0; $index -lt 3; $index++) {
+        $resume = $null
+        if ($index -lt 2) {
+            $between = @($Events | Where-Object {
+                [string]$_.node_id -eq $sourceNodeId -and
+                [int]$_.sequence -gt [int]$recoveryEvents[$index].sequence -and
+                [int]$_.sequence -lt [int]$recoveryEvents[$index + 1].sequence
+            })
+            $resumeMatches = @($between | Where-Object {
+                [string]$_.thread_id -eq $authorizedThreadId -and
+                [string]$_.prior_state -eq 'result_pending' -and
+                [string]$_.status -eq 'running'
+            })
+            if ($between.Count -ne 1 -or $resumeMatches.Count -ne 1) {
+                throw (
+                    "Milestone revision source '$sourceNodeId' recovery " +
+                    'resume chain changed.'
+                )
+            }
+            $resume = $resumeMatches[0]
+        }
+        $recoveryEventBindings.Add([pscustomobject][ordered]@{
+            attempt = $index + 1
+            recovery_receipt_path = [string]$recoveryPaths[$index]
+            recovery_receipt_hash = [string]$recoveryHashes[$index]
+            result_pending_event_sequence = [int]$recoveryEvents[$index].sequence
+            result_pending_event_hash = [string]$recoveryEvents[$index].hash
+            resume_event_sequence = if ($null -eq $resume) {
+                0
+            } else { [int]$resume.sequence }
+            resume_event_hash = if ($null -eq $resume) {
+                ''
+            } else { [string]$resume.hash }
+        })
+    }
+
+    $pendingMatches = @($Events | Where-Object {
+        [string]$_.node_id -eq $sourceNodeId -and
+        [string]$_.thread_id -eq $selectedThreadId -and
+        [string]$_.prior_state -eq 'result_pending' -and
+        [string]$_.status -eq 'replacement_pending' -and
+        [string]$_.replacement_receipt_path -eq $continuityRelativePath -and
+        [string]$_.replacement_receipt_hash -eq
+            [string]$continuity.receipt_hash -and
+        [int]$_.sequence -gt [int]$recoveryEvents[2].sequence
+    })
+    if ($pendingMatches.Count -ne 1 -or
+        @($Events | Where-Object {
+            [string]$_.node_id -eq $sourceNodeId -and
+            [int]$_.sequence -gt [int]$recoveryEvents[2].sequence -and
+            [int]$_.sequence -lt [int]$pendingMatches[0].sequence
+        }).Count -gt 0) {
+        throw (
+            "Milestone revision source '$sourceNodeId' lacks one immediate " +
+            'replacement-pending bridge.'
+        )
+    }
+    $replacementPending = $pendingMatches[0]
+    $continuityArtifact = "artifact:replacement-continuity:$continuityRelativePath"
+    $continuityObservation = (
+        "observation:replacement-continuity-hash:" +
+        [string]$continuity.receipt_hash
+    )
+    $runningMatches = @($Events | Where-Object {
+        [string]$_.node_id -eq $sourceNodeId -and
+        [string]$_.thread_id -eq $selectedThreadId -and
+        [string]$_.prior_state -eq 'replacement_pending' -and
+        [string]$_.status -eq 'running' -and
+        [int]$_.sequence -gt [int]$replacementPending.sequence -and
+        $continuityArtifact -in @($_.evidence) -and
+        $continuityObservation -in @($_.evidence)
+    })
+    if ($runningMatches.Count -ne 1 -or
+        @($Events | Where-Object {
+            [string]$_.node_id -eq $sourceNodeId -and
+            [int]$_.sequence -gt [int]$replacementPending.sequence -and
+            [int]$_.sequence -lt [int]$runningMatches[0].sequence
+        }).Count -gt 0) {
+        throw (
+            "Milestone revision source '$sourceNodeId' lacks one immediate " +
+            'replacement running bridge.'
+        )
+    }
+    $replacementRunning = $runningMatches[0]
+    return [pscustomobject][ordered]@{
+        source_node_id = $sourceNodeId
+        role_id = $roleId
+        source_kind = 'replacement'
+        authorized_thread_id = $authorizedThreadId
+        source_thread_id = $selectedThreadId
+        recovery_cycle_id = [string]$recoveryReceipts[0].recovery_cycle_id
+        recovery_event_bindings = @($recoveryEventBindings)
+        replacement_continuity_receipt_path = $continuityRelativePath
+        replacement_continuity_receipt_hash = [string]$continuity.receipt_hash
+        replacement_pending_event_sequence = [int]$replacementPending.sequence
+        replacement_pending_event_hash = [string]$replacementPending.hash
+        replacement_running_event_sequence = [int]$replacementRunning.sequence
+        replacement_running_event_hash = [string]$replacementRunning.hash
+        lifecycle_start_sequence = [int]$replacementRunning.sequence
     }
 }
 
@@ -4031,7 +4344,7 @@ function Read-DurableReviewMilestoneRevisionSelection {
     $run = Get-Content -LiteralPath (Join-Path $runRoot 'run.json') -Raw |
         ConvertFrom-Json -Depth 30 -DateKind String
     $events = @(Read-OrchestrationJournal (Join-Path $runRoot 'events.jsonl'))
-    if ([string]$receipt.schema_version -notin @('1.1', '1.2') -or
+    if ([string]$receipt.schema_version -notin @('1.1', '1.2', '1.3') -or
         [string]$receipt.run_id -ne [string]$run.run_id -or
         [string]$receipt.plan_hash -ne [string]$run.plan_hash -or
         [int]$receipt.milestone_index -ne 0 -or
@@ -4109,6 +4422,26 @@ function Read-DurableReviewMilestoneRevisionSelection {
             $correctionEvents.Count -ne 1) {
             throw 'Milestone revision selection changed its lifecycle correction.'
         }
+    } elseif ([string]$receipt.schema_version -eq '1.3') {
+        $correctionReceiptName = (
+            "durable-review-milestone.$($receipt.milestone_id)." +
+            "revision-$($receipt.revision_id).lifecycle-correction.json"
+        )
+        $correctionReceiptPath = Join-Path (
+            Join-Path $runRoot 'receipts'
+        ) $correctionReceiptName
+        $correctionEvents = @($events | Where-Object {
+            [string]$_.event -eq
+                'milestone-revision-lifecycle-evidence-corrected' -and
+            [string]$_.milestone_revision_id -eq [string]$receipt.revision_id
+        })
+        if ((Test-Path -LiteralPath $correctionReceiptPath -PathType Leaf) -or
+            $correctionEvents.Count -gt 0) {
+            throw (
+                'Milestone revision replacement selection cannot use a ' +
+                'lifecycle evidence correction.'
+            )
+        }
     }
     foreach ($bindingName in @('source_bindings', 'source_lifecycle_bindings')) {
         $hashName = $bindingName + '_hash'
@@ -4165,6 +4498,25 @@ function Read-DurableReviewMilestoneRevisionSelection {
             $declaredLifecycle.Count -ne 1) {
             throw "Milestone revision source '$sourceNodeId' is not unique."
         }
+        if ([string]$receipt.schema_version -eq '1.3') {
+            foreach ($name in @(
+                'source_kind', 'authorized_thread_id', 'source_thread_id',
+                'recovery_cycle_id', 'recovery_event_bindings',
+                'replacement_continuity_receipt_path',
+                'replacement_continuity_receipt_hash',
+                'replacement_pending_event_sequence',
+                'replacement_pending_event_hash',
+                'replacement_running_event_sequence',
+                'replacement_running_event_hash'
+            )) {
+                if ($null -eq $declaredLifecycle[0].PSObject.Properties[$name]) {
+                    throw (
+                        "Milestone revision source '$sourceNodeId' schema 1.3 " +
+                        "lifecycle lacks '$name'."
+                    )
+                }
+            }
+        }
         $binding = Get-DurableReviewDispositionBinding `
             -RunDirectory $runRoot -Plan $plan -SourceNodeId $sourceNodeId `
             -DispositionRelativePath (
@@ -4174,8 +4526,11 @@ function Read-DurableReviewMilestoneRevisionSelection {
         if ((ConvertTo-Json -InputObject $binding -Compress -Depth 50) -ne
                 (ConvertTo-Json -InputObject $declaredBinding[0] `
                     -Compress -Depth 50) -or
-            [string]$binding.source_thread_id -ne
-                [string]$requiredSource.thread_id -or
+            ([string]$receipt.schema_version -ne '1.3' -and
+                [string]$binding.source_thread_id -ne
+                    [string]$requiredSource.thread_id) -or
+            [string]$binding.checkpoint_material_path -ne
+                [string]$receipt.checkpoint_material_path -or
             [string]$binding.checkpoint_material_hash -ne
                 [string]$receipt.checkpoint_material_hash -or
             [string]$binding.result_receipt_path -in $excludedPaths -or
@@ -4194,6 +4549,26 @@ function Read-DurableReviewMilestoneRevisionSelection {
         })
         if ($rearmCandidates.Count -ne 1) {
             throw "Milestone revision source '$sourceNodeId' re-arm changed."
+        }
+        $continuity = Get-DurableReviewRevisionSourceContinuityBinding `
+            -RunDirectory $runRoot -RequiredSource $requiredSource `
+            -DispositionBinding $binding -Authorization $authorization `
+            -AuthorizationReceiptRelativePath (
+                [string]$receipt.authorization_receipt_path
+            ) -Events $events `
+            -AuthorizationEventSequence ([int]$authorizationEvents[0].sequence) `
+            -RearmEventSequence ([int]$rearmCandidates[0].sequence)
+        if ([string]$receipt.schema_version -eq '1.3') {
+            if ([string]$continuity.source_kind -notin @(
+                'original', 'replacement'
+            )) {
+                throw "Milestone revision source '$sourceNodeId' continuity changed."
+            }
+        } elseif ([string]$continuity.source_kind -ne 'original') {
+            throw (
+                "Milestone revision source '$sourceNodeId' replacement " +
+                'requires selection schema 1.3.'
+            )
         }
         $boundEvents = [ordered]@{}
         foreach ($eventBinding in @(
@@ -4237,17 +4612,34 @@ function Read-DurableReviewMilestoneRevisionSelection {
         $completed = $boundEvents.completed
         $validated = $boundEvents.validated
         $adopted = $boundEvents.adopted
+        $selectedThreadId = [string]$continuity.source_thread_id
+        $lifecycleStartSequence = [int]$continuity.lifecycle_start_sequence
+        $continuitySequences = @(
+            @($continuity.recovery_event_bindings) | ForEach-Object {
+                @(
+                    [int]$_.result_pending_event_sequence,
+                    [int]$_.resume_event_sequence
+                )
+            }
+            [int]$continuity.replacement_pending_event_sequence
+            [int]$continuity.replacement_running_event_sequence
+        ) | Where-Object { [int]$_ -gt 0 }
         if ([int]$rearm.sequence -ne
                 [int]$rearmCandidates[0].sequence -or
             [string]$rearm.hash -ne [string]$rearmCandidates[0].hash -or
+            [string]$rearm.thread_id -ne
+                [string]$requiredSource.thread_id -or
             [string]$completed.prior_state -ne 'running' -or
             [string]$validated.prior_state -ne 'completed' -or
             [string]$adopted.prior_state -ne 'validated' -or
             [string]$completed.status -ne 'completed' -or
             [string]$validated.status -ne 'validated' -or
             [string]$adopted.status -ne 'adopted' -or
+            [string]$completed.thread_id -ne $selectedThreadId -or
+            [string]$validated.thread_id -ne $selectedThreadId -or
+            [string]$adopted.thread_id -ne $selectedThreadId -or
             [int]$authorizationEvents[0].sequence -ge [int]$rearm.sequence -or
-            [int]$rearm.sequence -ge [int]$completed.sequence -or
+            $lifecycleStartSequence -ge [int]$completed.sequence -or
             [int]$completed.sequence -ge [int]$validated.sequence -or
             [int]$validated.sequence -ge [int]$adopted.sequence -or
             @($rearm, $completed, $validated, $adopted |
@@ -4255,6 +4647,14 @@ function Read-DurableReviewMilestoneRevisionSelection {
                     [int]$_.sequence -in $excludedSequences
                 }).Count -gt 0) {
             throw "Milestone revision source '$sourceNodeId' lifecycle changed."
+        }
+        if (@($continuitySequences | Where-Object {
+            [int]$_ -in $excludedSequences
+        }).Count -gt 0) {
+            throw (
+                "Milestone revision source '$sourceNodeId' replacement used " +
+                'excluded evidence.'
+            )
         }
         $resultPointer = "artifact:$($binding.result_receipt_path)"
         $dispositionPointer =
@@ -4307,18 +4707,50 @@ function Read-DurableReviewMilestoneRevisionSelection {
                 )
             }
         }
-        $computedLifecycle = [pscustomobject][ordered]@{
-            source_node_id = $sourceNodeId
-            role_id = [string]$requiredSource.role_id
-            source_thread_id = [string]$requiredSource.thread_id
-            rearm_event_sequence = [int]$rearm.sequence
-            rearm_event_hash = [string]$rearm.hash
-            completed_event_sequence = [int]$completed.sequence
-            completed_event_hash = [string]$completed.hash
-            validated_event_sequence = [int]$validated.sequence
-            validated_event_hash = [string]$validated.hash
-            adopted_event_sequence = [int]$adopted.sequence
-            adopted_event_hash = [string]$adopted.hash
+        $computedLifecycle = if ([string]$receipt.schema_version -eq '1.3') {
+            [pscustomobject][ordered]@{
+                source_node_id = $sourceNodeId
+                role_id = [string]$requiredSource.role_id
+                source_kind = [string]$continuity.source_kind
+                authorized_thread_id = [string]$continuity.authorized_thread_id
+                source_thread_id = $selectedThreadId
+                rearm_event_sequence = [int]$rearm.sequence
+                rearm_event_hash = [string]$rearm.hash
+                recovery_cycle_id = [string]$continuity.recovery_cycle_id
+                recovery_event_bindings = @($continuity.recovery_event_bindings)
+                replacement_continuity_receipt_path =
+                    [string]$continuity.replacement_continuity_receipt_path
+                replacement_continuity_receipt_hash =
+                    [string]$continuity.replacement_continuity_receipt_hash
+                replacement_pending_event_sequence =
+                    [int]$continuity.replacement_pending_event_sequence
+                replacement_pending_event_hash =
+                    [string]$continuity.replacement_pending_event_hash
+                replacement_running_event_sequence =
+                    [int]$continuity.replacement_running_event_sequence
+                replacement_running_event_hash =
+                    [string]$continuity.replacement_running_event_hash
+                completed_event_sequence = [int]$completed.sequence
+                completed_event_hash = [string]$completed.hash
+                validated_event_sequence = [int]$validated.sequence
+                validated_event_hash = [string]$validated.hash
+                adopted_event_sequence = [int]$adopted.sequence
+                adopted_event_hash = [string]$adopted.hash
+            }
+        } else {
+            [pscustomobject][ordered]@{
+                source_node_id = $sourceNodeId
+                role_id = [string]$requiredSource.role_id
+                source_thread_id = [string]$requiredSource.thread_id
+                rearm_event_sequence = [int]$rearm.sequence
+                rearm_event_hash = [string]$rearm.hash
+                completed_event_sequence = [int]$completed.sequence
+                completed_event_hash = [string]$completed.hash
+                validated_event_sequence = [int]$validated.sequence
+                validated_event_hash = [string]$validated.hash
+                adopted_event_sequence = [int]$adopted.sequence
+                adopted_event_hash = [string]$adopted.hash
+            }
         }
         if ((ConvertTo-Json -InputObject $computedLifecycle `
                 -Compress -Depth 50) -ne

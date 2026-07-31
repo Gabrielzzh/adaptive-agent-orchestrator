@@ -132,6 +132,30 @@ function New-ThreadCapture {
         Set-Content -LiteralPath $Path -Encoding utf8
 }
 
+function New-ProgressCapture {
+    param([string] $Path, [string] $ThreadId, [string] $TurnId)
+    [ordered]@{
+        schemaVersion = 1
+        thread = [ordered]@{ id = $ThreadId }
+        page = [ordered]@{ order = 'newest_first' }
+        latestAssistantMessageId = $null
+        turns = @(
+            [ordered]@{
+                id = $TurnId
+                status = 'completed'
+                items = @(
+                    [ordered]@{
+                        type = 'agentMessage'
+                        phase = 'commentary'
+                        text = "Progress for $TurnId without a final answer."
+                    }
+                )
+            }
+        )
+    } | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $Path -Encoding utf8
+}
+
 function New-SourceChain {
     param(
         [string] $Run,
@@ -148,7 +172,8 @@ function New-SourceChain {
         [string] $AdditionalFindingId = '',
         [string] $AdditionalFindingText = '',
         [string] $AdditionalSeverity = '',
-        [string] $AdditionalCanonicalFindingId = ''
+        [string] $AdditionalCanonicalFindingId = '',
+        [string] $ReplacementContinuityReceiptPath = ''
     )
     $capturePath = Join-Path $Run "thread-reads/$Stem.json"
     New-ThreadCapture -Path $capturePath -ThreadId $ThreadId `
@@ -180,13 +205,25 @@ function New-SourceChain {
     $resultPath = Join-Path $Run (
         "receipts/$Stem.thread-result-receipt.json"
     )
+    $resultArguments = @{
+        RunDirectory = $Run
+        SourceNodeId = $SourceNodeId
+        ThreadId = $ThreadId
+        HostId = 'local'
+        ThreadReadPath = $capturePath
+        OutputPath = $resultPath
+        MilestoneId = $MilestoneId
+        CheckpointMaterialPath = $CheckpointPath
+        PendingFindingRecordsPath = $findingPath
+    }
+    if (-not [string]::IsNullOrWhiteSpace(
+        $ReplacementContinuityReceiptPath
+    )) {
+        $resultArguments.ReplacementContinuityReceiptPath =
+            $ReplacementContinuityReceiptPath
+    }
     $result = & (Join-Path $scriptRoot 'New-ThreadResultReceipt.ps1') `
-        -RunDirectory $Run -SourceNodeId $SourceNodeId `
-        -ThreadId $ThreadId -HostId 'local' `
-        -ThreadReadPath $capturePath -OutputPath $resultPath `
-        -MilestoneId $MilestoneId `
-        -CheckpointMaterialPath $CheckpointPath `
-        -PendingFindingRecordsPath $findingPath |
+        @resultArguments |
         ConvertFrom-Json -Depth 50
     $decisionPath = Join-Path $Run "materials/$Stem-decisions.json"
     $reReviewStatus = if ($Resolution -eq 'resolved') {
@@ -1520,6 +1557,425 @@ try {
         [string]$revisionSelection.schema_version -eq '1.1' -and
         @($revisionSelection.source_bindings).Count -eq 2
     ) 'A revision selection must bind both fresh source lifecycles.'
+
+    # The revision-authorized original may exhaust its exact 3/3 recovery
+    # cycle. One same-role replacement may then supply the selected result,
+    # while the authorization and fresh re-arm stay bound to the original.
+    $replacementRevisionRun = Join-Path $testRoot (
+        'first-milestone-revision-replacement'
+    )
+    Copy-Item -LiteralPath $revisionAuthorizedRun `
+        -Destination $replacementRevisionRun -Recurse
+    $replacementCheckpoint = Join-Path $replacementRevisionRun (
+        'materials/checkpoint-method-1-revision-1.json'
+    )
+    $replacementInput = Join-Path $replacementRevisionRun (
+        'materials/input-method-1-revision-1.json'
+    )
+    $replacementAuthorizationPath = Join-Path $replacementRevisionRun (
+        $revisionAuthorizationRelative
+    )
+    foreach ($source in @(
+        @{ id = 'review'; thread = 'review-thread' },
+        @{ id = 'domain'; thread = 'domain-thread' }
+    )) {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $replacementRevisionRun -NodeId $source.id `
+            -Status running -ThreadId $source.thread `
+            -Message "Fresh replacement-case review for $($source.id)." `
+            -Evidence @("artifact:$revisionAuthorizationRelative") `
+            -MilestoneRevisionAuthorizationReceiptPath (
+                $revisionAuthorizationRelative
+            ) -IdempotencyKey "replacement-case-rearm-$($source.id)" |
+            Out-Null
+    }
+    $replacementRecoveryPaths = [Collections.Generic.List[string]]::new()
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $progressPath = Join-Path $replacementRevisionRun (
+            "thread-reads/review-replacement-progress-$attempt.json"
+        )
+        New-ProgressCapture -Path $progressPath -ThreadId 'review-thread' `
+            -TurnId "review-replacement-progress-$attempt"
+        $recovery = & (Join-Path $scriptRoot (
+            'New-ThreadResultRecoveryReceipt.ps1'
+        )) -RunDirectory $replacementRevisionRun -SourceNodeId 'review' `
+            -OriginalThreadId 'review-thread' `
+            -CheckpointManifestPath $replacementCheckpoint `
+            -InputManifestPath $replacementInput -ThreadReadPath $progressPath `
+            -MilestoneId 'method-1' -Attempt $attempt |
+            ConvertFrom-Json -Depth 100
+        $recoveryPath = Join-Path $replacementRevisionRun (
+            "receipts/review.cycle-$($recovery.recovery_cycle_id)." +
+            "attempt-$attempt.result-recovery.json"
+        )
+        $replacementRecoveryPaths.Add($recoveryPath)
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $replacementRevisionRun -NodeId 'review' `
+            -Status result_pending -ThreadId 'review-thread' `
+            -Message "Replacement-case final missing attempt $attempt." `
+            -ErrorClass 'final_missing_with_progress_evidence' `
+            -RecoveryReceiptPath ([IO.Path]::GetRelativePath(
+                $replacementRevisionRun, $recoveryPath
+            )) -IdempotencyKey "replacement-case-pending-$attempt" |
+            Out-Null
+        if ($attempt -lt 3) {
+            & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+                -RunDirectory $replacementRevisionRun -NodeId 'review' `
+                -Status running -ThreadId 'review-thread' `
+                -Message "Replacement-case retry $($attempt + 1)." `
+                -IdempotencyKey "replacement-case-retry-$attempt" |
+                Out-Null
+        }
+    }
+    $replacementControllerMaterial = Join-Path $replacementRevisionRun (
+        'materials/review-replacement-controller-authorization.md'
+    )
+    Set-Content -LiteralPath $replacementControllerMaterial -Value (
+        'Controller authorizes one same-role replacement after exact 3/3.'
+    )
+    $replacementContinuityPath = Join-Path $replacementRevisionRun (
+        'receipts/review.replacement-continuity.json'
+    )
+    $replacementContinuity = & (Join-Path $scriptRoot (
+        'New-ReplacementContinuityReceipt.ps1'
+    )) -RunDirectory $replacementRevisionRun -SourceNodeId 'review' `
+        -OriginalThreadId 'review-thread' `
+        -ReplacementThreadId 'review-replacement-thread' `
+        -CheckpointManifestPath $replacementCheckpoint `
+        -InputManifestPath $replacementInput `
+        -RecoveryReceiptPaths @($replacementRecoveryPaths) `
+        -AuthorizationMaterialPath $replacementControllerMaterial `
+        -ActivationKey 'controller:revision-review-replacement' `
+        -OutputPath $replacementContinuityPath |
+        ConvertFrom-Json -Depth 100
+    $replacementContinuityRelative = [IO.Path]::GetRelativePath(
+        $replacementRevisionRun, $replacementContinuityPath
+    ).Replace('\', '/')
+    & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+        -RunDirectory $replacementRevisionRun -NodeId 'review' `
+        -Status replacement_pending -ThreadId 'review-replacement-thread' `
+        -Message 'Revision review replacement materialized.' `
+        -ReplacementContinuityReceiptPath $replacementContinuityRelative `
+        -IdempotencyKey 'revision-review-replacement-pending' | Out-Null
+    & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+        -RunDirectory $replacementRevisionRun -NodeId 'review' `
+        -Status running -ThreadId 'review-replacement-thread' `
+        -Message 'Revision review replacement running.' `
+        -Evidence @(
+            "artifact:replacement-continuity:$replacementContinuityRelative",
+            (
+                'observation:replacement-continuity-hash:' +
+                [string]$replacementContinuity.receipt_hash
+            )
+        ) `
+        -IdempotencyKey 'revision-review-replacement-running' | Out-Null
+
+    $replacementReview = New-SourceChain -Run $replacementRevisionRun `
+        -SourceNodeId 'review' -ThreadId 'review-replacement-thread' `
+        -MilestoneId 'method-1' -CheckpointPath $replacementCheckpoint `
+        -Stem 'review.method-1-revision-1-replacement' -Severity 'P0' `
+        -FindingText 'baseline-review-p0' -Resolution 'resolved' `
+        -FindingId 'review-method-1-finding' `
+        -CanonicalFindingId 'canonical-review-method-1-finding' `
+        -AdditionalFindingId 'review-method-1-finding-r08' `
+        -AdditionalFindingText 'baseline-review-p0-second-occurrence' `
+        -AdditionalSeverity 'P0' `
+        -AdditionalCanonicalFindingId 'canonical-review-method-1-finding' `
+        -ReplacementContinuityReceiptPath $replacementContinuityPath
+    $replacementDomain = New-SourceChain -Run $replacementRevisionRun `
+        -SourceNodeId 'domain' -ThreadId 'domain-thread' `
+        -MilestoneId 'method-1' -CheckpointPath $replacementCheckpoint `
+        -Stem 'domain.method-1-revision-1-replacement' -Severity 'P0' `
+        -FindingText 'baseline-domain-p0' -Resolution 'resolved' `
+        -FindingId 'domain-method-1-finding' `
+        -CanonicalFindingId 'canonical-domain-method-1-finding'
+    foreach ($source in @(
+        @{
+            id = 'review'; thread = 'review-replacement-thread'
+            result = $replacementReview.result_path
+            disposition = $replacementReview.disposition_path
+        },
+        @{
+            id = 'domain'; thread = 'domain-thread'
+            result = $replacementDomain.result_path
+            disposition = $replacementDomain.disposition_path
+        }
+    )) {
+        foreach ($status in @('completed', 'validated', 'adopted')) {
+            $pointer = if ($status -eq 'completed') {
+                "artifact:$($source.result)"
+            } else { "artifact:$($source.disposition)" }
+            & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+                -RunDirectory $replacementRevisionRun -NodeId $source.id `
+                -Status $status -ThreadId $source.thread `
+                -Message "Replacement revision $($source.id) $status." `
+                -Evidence @($pointer) `
+                -IdempotencyKey "replacement-revision-$($source.id)-$status" |
+                Out-Null
+        }
+    }
+    $replacementSelectionMaterial = Join-Path $replacementRevisionRun (
+        'materials/method-1-revision-1-replacement-selection.json'
+    )
+    @(
+        [ordered]@{
+            source_node_id = 'review'
+            disposition_receipt_path = $replacementReview.disposition_path
+        },
+        [ordered]@{
+            source_node_id = 'domain'
+            disposition_receipt_path = $replacementDomain.disposition_path
+        }
+    ) | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $replacementSelectionMaterial
+    $replacementReadyRun = Join-Path $testRoot (
+        'first-milestone-revision-replacement-ready'
+    )
+    Copy-Item -LiteralPath $replacementRevisionRun `
+        -Destination $replacementReadyRun -Recurse
+    $replacementPreSelectionEvents = @(
+        Read-OrchestrationJournal (
+            Join-Path $replacementRevisionRun 'events.jsonl'
+        )
+    )
+    $replacementSelection = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+    )) -RunDirectory $replacementRevisionRun `
+        -AuthorizationReceiptPath $replacementAuthorizationPath `
+        -SelectionMaterialPath $replacementSelectionMaterial `
+        -SelectionKey $authorizedSelectionKey |
+        ConvertFrom-Json -Depth 100
+    $replacementLifecycle = @(
+        $replacementSelection.source_lifecycle_bindings | Where-Object {
+            [string]$_.source_node_id -eq 'review'
+        }
+    )[0]
+    Assert-True (
+        [string]$replacementSelection.schema_version -eq '1.3' -and
+        [string]$replacementLifecycle.source_kind -eq 'replacement' -and
+        [string]$replacementLifecycle.authorized_thread_id -eq
+            'review-thread' -and
+        [string]$replacementLifecycle.source_thread_id -eq
+            'review-replacement-thread' -and
+        @($replacementLifecycle.recovery_event_bindings).Count -eq 3 -and
+        [int]$replacementLifecycle.replacement_pending_event_sequence -gt 0 -and
+        [int]$replacementLifecycle.replacement_running_event_sequence -gt
+            [int]$replacementLifecycle.replacement_pending_event_sequence
+    ) (
+        'A revision selection must bind the authorized original, its exact ' +
+        '3/3 recovery, and the one same-role replacement lifecycle.'
+    )
+    $replacementSelectionPath = Join-Path $replacementRevisionRun (
+        "receipts/durable-review-milestone.method-1.revision-" +
+        "$($revisionAuthorization.revision_id).selection.json"
+    )
+    $replacementReadback = Read-DurableReviewMilestoneRevisionSelection `
+        -Path $replacementSelectionPath -RunDirectory $replacementRevisionRun
+    Assert-True (
+        [string]$replacementReadback.receipt_hash -eq
+            [string]$replacementSelection.receipt_hash -and
+        @(Read-OrchestrationJournal (
+            Join-Path $replacementRevisionRun 'events.jsonl'
+        )).Count -eq ($replacementPreSelectionEvents.Count + 1)
+    ) 'The replacement selection must read back and append exactly one event.'
+
+    foreach ($resultCompatibilityCase in @('property-order', 'extension-field')) {
+        $compatibilityRun = Join-Path $testRoot (
+            "revision-replacement-result-$resultCompatibilityCase"
+        )
+        Copy-Item -LiteralPath $replacementReadyRun `
+            -Destination $compatibilityRun -Recurse
+        $compatibilityResultPath = Join-Path $compatibilityRun (
+            [string]$replacementReview.result_path
+        )
+        $compatibilityResult = Get-Content -LiteralPath (
+            $compatibilityResultPath
+        ) -Raw | ConvertFrom-Json -Depth 100 -DateKind String
+        if ($resultCompatibilityCase -eq 'property-order') {
+            $propertyNames = @(
+                $compatibilityResult.PSObject.Properties.Name
+            )
+            [array]::Reverse($propertyNames)
+            $reorderedResult = [ordered]@{}
+            foreach ($propertyName in $propertyNames) {
+                $reorderedResult[$propertyName] =
+                    $compatibilityResult.$propertyName
+            }
+            $compatibilityResult = [pscustomobject]$reorderedResult
+        } else {
+            $compatibilityResult | Add-Member -NotePropertyName (
+                'compatible_extension'
+            ) -NotePropertyValue 'ignored-by-schema-reader'
+        }
+        $compatibilityResult | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $compatibilityResultPath
+        $compatibilityPlan = Get-Content -LiteralPath (
+            Join-Path $compatibilityRun 'plan.json'
+        ) -Raw | ConvertFrom-Json -Depth 100 -DateKind String
+        $compatibilityBinding = Get-DurableReviewDispositionBinding `
+            -RunDirectory $compatibilityRun -Plan $compatibilityPlan `
+            -SourceNodeId 'review' `
+            -DispositionRelativePath $replacementReview.disposition_path `
+            -ExpectedMilestoneId 'method-1' `
+            -RequireResultMilestoneBinding
+        Assert-True (
+            [string]$compatibilityBinding.source_thread_id -eq
+                'review-replacement-thread'
+        ) (
+            'Schema-aware result hashing must preserve compatibility for ' +
+            "$resultCompatibilityCase without weakening disposition binding."
+        )
+    }
+
+    foreach ($selectionAttack in @(
+        @{
+            name = 'authorized-thread-binding'
+            mutate = {
+                param($lifecycle)
+                $lifecycle.authorized_thread_id = 'domain-thread'
+            }
+        },
+        @{
+            name = 'recovery-event-binding'
+            mutate = {
+                param($lifecycle)
+                $lifecycle.recovery_event_bindings[0].result_pending_event_hash =
+                    ('f' * 64)
+            }
+        }
+    )) {
+        $selectionAttackRun = Join-Path $testRoot (
+            "revision-replacement-selection-$($selectionAttack.name)"
+        )
+        Copy-Item -LiteralPath $replacementRevisionRun `
+            -Destination $selectionAttackRun -Recurse
+        $selectionAttackPath = Join-Path $selectionAttackRun (
+            "receipts/durable-review-milestone.method-1.revision-" +
+            "$($revisionAuthorization.revision_id).selection.json"
+        )
+        $selectionAttackReceipt = Get-Content -LiteralPath (
+            $selectionAttackPath
+        ) -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+        $selectionAttackLifecycle = @(
+            $selectionAttackReceipt.source_lifecycle_bindings |
+                Where-Object { [string]$_.source_node_id -eq 'review' }
+        )[0]
+        & $selectionAttack.mutate $selectionAttackLifecycle
+        $selectionAttackReceipt.source_lifecycle_bindings_hash =
+            Get-TextSha256 (
+                ConvertTo-Json -InputObject @(
+                    $selectionAttackReceipt.source_lifecycle_bindings
+                ) -Compress -Depth 100
+            )
+        $selectionAttackPayload = [ordered]@{}
+        foreach ($key in $selectionAttackReceipt.Keys | Where-Object {
+            $_ -ne 'receipt_hash'
+        }) { $selectionAttackPayload[$key] = $selectionAttackReceipt[$key] }
+        $selectionAttackReceipt.receipt_hash = Get-TextSha256 (
+            $selectionAttackPayload | ConvertTo-Json -Compress -Depth 100
+        )
+        $selectionAttackReceipt | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $selectionAttackPath
+        $selectionAttackEventsPath = Join-Path $selectionAttackRun (
+            'events.jsonl'
+        )
+        $selectionAttackEvents = @(
+            Get-Content -LiteralPath $selectionAttackEventsPath | ForEach-Object {
+                $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+            }
+        )
+        $selectionAttackEvent = $selectionAttackEvents[-1]
+        $selectionAttackEvent.milestone_activation_receipt_hash =
+            [string]$selectionAttackReceipt.receipt_hash
+        $selectionAttackEvent.request_fingerprint =
+            [string]$selectionAttackReceipt.receipt_hash
+        $selectionAttackEvent.Remove('hash')
+        $selectionAttackEvent.hash = Get-OrchestrationEventHash (
+            [pscustomobject]$selectionAttackEvent
+        )
+        @($selectionAttackEvents | ForEach-Object {
+            $_ | ConvertTo-Json -Compress -Depth 100
+        }) | Set-Content -LiteralPath $selectionAttackEventsPath
+        Assert-ThrowsLike {
+            Read-DurableReviewMilestoneRevisionSelection `
+                -Path $selectionAttackPath -RunDirectory $selectionAttackRun |
+                Out-Null
+        } 'lifecycle binding changed' (
+            "A self-rehashed $($selectionAttack.name) mutation must fail closed."
+        )
+    }
+
+    foreach ($attack in @(
+        @{
+            name = 'changed-original-thread'
+            expected = 'does not match its source'
+            mutate = {
+                param($receipt)
+                $receipt.original_thread_id = 'domain-thread'
+            }
+        },
+        @{
+            name = 'changed-checkpoint'
+            expected = 'Checkpoint manifest is missing or changed'
+            mutate = {
+                param($receipt)
+                $receipt.checkpoint_hash = ('0' * 64)
+            }
+        },
+        @{
+            name = 'replacement-of-replacement'
+            expected = 'does not match its source'
+            mutate = {
+                param($receipt)
+                $receipt.original_thread_id = 'review-replacement-thread'
+                $receipt.replacement_thread_id = 'second-replacement-thread'
+            }
+        }
+    )) {
+        $attackRun = Join-Path $testRoot (
+            "revision-replacement-$($attack.name)"
+        )
+        Copy-Item -LiteralPath $replacementReadyRun -Destination $attackRun `
+            -Recurse
+        $attackContinuityPath = Join-Path $attackRun (
+            'receipts/review.replacement-continuity.json'
+        )
+        $attackContinuity = Get-Content -LiteralPath $attackContinuityPath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        & $attack.mutate $attackContinuity
+        $attackPayload = [ordered]@{}
+        foreach ($key in $attackContinuity.Keys | Where-Object {
+            $_ -ne 'receipt_hash'
+        }) { $attackPayload[$key] = $attackContinuity[$key] }
+        $attackContinuity.receipt_hash = Get-TextSha256 (
+            $attackPayload | ConvertTo-Json -Compress -Depth 100
+        )
+        $attackContinuity | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $attackContinuityPath
+        $attackJournal = Join-Path $attackRun 'events.jsonl'
+        $beforeAttackHash = (
+            Get-FileHash -LiteralPath $attackJournal -Algorithm SHA256
+        ).Hash
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+            )) -RunDirectory $attackRun `
+                -AuthorizationReceiptPath (
+                    Join-Path $attackRun $revisionAuthorizationRelative
+                ) -SelectionMaterialPath (
+                    Join-Path $attackRun (
+                        'materials/method-1-revision-1-replacement-selection.json'
+                    )
+                ) -SelectionKey $authorizedSelectionKey | Out-Null
+        } ([string]$attack.expected) (
+            "A $($attack.name) replacement continuity mutation must fail closed."
+        )
+        Assert-True (
+            $beforeAttackHash -eq (
+                Get-FileHash -LiteralPath $attackJournal -Algorithm SHA256
+            ).Hash
+        ) 'Rejected replacement continuity attacks must not mutate the journal.'
+    }
     $laterLifecycleRun = Join-Path $testRoot (
         'revision-selection-with-later-source-lifecycle'
     )

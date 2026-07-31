@@ -298,6 +298,18 @@ produce fresh post-anchor `completed -> validated -> adopted` chains, select
 them once with
 `New-DurableReviewMilestoneRevisionSelectionReceipt.ps1`.
 
+If an authorized source instead exhausts an original schema 1.2 recovery cycle
+after that re-arm, the same revision may select exactly one verified same-role
+replacement. Selection schema 1.3 preserves the authorization's logical
+source, role, checkpoint and input while distinguishing the authorized thread
+from the selected replacement thread. It hash-binds all three original
+recovery receipt/event pairs and intervening resumes, the unique
+`replacement_pending -> running` bridge, and the replacement's
+`completed -> validated -> adopted` result/disposition chain. Cross-source,
+cross-role, cross-checkpoint, pre-authorization recovery, missing or reordered
+attempts, an unbound thread, and replacement-of-replacement fail before write.
+This replacement path cannot be combined with a lifecycle evidence correction.
+
 If and only if every source's `completed` event binds its result, every
 `adopted` event binds its disposition, and every `validated` event mistakenly
 repeats that result pointer, append one whole-source-set correction before
