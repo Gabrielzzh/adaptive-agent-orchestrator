@@ -10,9 +10,16 @@ file binds those classes to the current Codex surface.
 | Class | Default Codex model / effort |
 | --- | --- |
 | `economy` | `gpt-5.6-luna` / `medium` |
-| `standard` | `gpt-5.6-sol` / `medium` |
+| `standard` | `gpt-5.6-luna` / `max` |
 | `strong` | `gpt-5.6-sol` / `high` |
 | `ultra` | `gpt-5.6-sol` / `ultra` |
+
+Use `standard` for bounded ordinary execution where Luna's lower-cost route is
+appropriate and `max` effort preserves reasoning depth. Formal domain/dissent
+review, adversarial acceptance, architecture, and ambiguous debugging use at
+least `strong`; a standard node cannot silently become a durable reviewer.
+Overriding an `economy` or `standard` Luna default with Sol is an escalation and
+requires the normal user or bounded-policy evidence.
 
 `gpt-5.6-terra` remains experimental: explicit user request only, never an
 automatic selection or fallback. `Resolve-WorkerModel.ps1`,

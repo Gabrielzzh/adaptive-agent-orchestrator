@@ -382,11 +382,11 @@ foreach ($node in $nodes) {
                     }
                 }
             }
-            if ($capability -eq 'economy' -and
+            if ($capability -in @('economy', 'standard') -and
                 $model -eq 'gpt-5.6-sol' -and
                 $modelAuthorization -notin @('user-confirmed', 'policy-confirmed')) {
                 Add-PlanError (
-                    "Agent node '$id' economy-to-Sol selection requires " +
+                    "Agent node '$id' Luna-default-to-Sol selection requires " +
                     'confirmed escalation.'
                 )
             }
@@ -940,6 +940,17 @@ if ($null -ne $durableReview) {
             Add-PlanError (
                 "Durable review node '$reviewNodeId' must be a read-only " +
                 'background-thread agent with delegation disabled.'
+            )
+        }
+        if ((Get-PlanProperty $reviewNode 'model') -ne 'gpt-5.6-sol' -or
+            (Get-PlanProperty $reviewNode 'capability') -notin @(
+                'strong', 'ultra'
+            ) -or (Get-PlanProperty $reviewNode 'effort') -notin @(
+                'high', 'xhigh', 'max', 'ultra'
+            )) {
+            Add-PlanError (
+                "Durable review node '$reviewNodeId' requires strong Sol " +
+                'review routing.'
             )
         }
         $reviewRole = $roles[[string](Get-PlanProperty $reviewNode 'role_id')]

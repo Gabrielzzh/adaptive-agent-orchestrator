@@ -254,8 +254,10 @@ run, or resolution fails, do not launch; keep the work in the main agent.
 Before every launch, use
 `Resolve-WorkerCapacity.ps1` with observed active persistent and transient
 counts; registered but idle agents do not count. Automatically use the
-`economy` class only for bounded mechanical work and `standard` for ordinary
-judgment, implementation, writing, or review. Resolve concrete model IDs with
+`economy` class only for bounded mechanical work and `standard` for bounded
+ordinary implementation, research, writing, or testing. Architecture,
+ambiguous debugging, formal domain/dissent review, and adversarial acceptance
+use `strong`. Resolve concrete model IDs with
 [platform-codex.md](references/platform-codex.md). Treat experimental models as
 explicit-request-only. Terra additionally requires a concrete `user:` request
 pointer in the resolver call; a role description, cost rationale, or automatic

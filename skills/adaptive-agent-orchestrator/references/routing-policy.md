@@ -108,8 +108,8 @@ Use capability classes in plans so the skill remains portable:
 | Class | Intent |
 | --- | --- |
 | `economy` | extraction, classification, formatting, broad scans |
-| `standard` | normal implementation, research, drafting, testing |
-| `strong` | architecture, ambiguous debugging, adversarial review |
+| `standard` | bounded ordinary implementation, research, drafting, testing |
+| `strong` | architecture, ambiguous debugging, formal domain or adversarial review |
 | `ultra` | one exceptional escalation or final high-risk adjudication |
 
 Resolve a class to a currently available model with
@@ -139,6 +139,12 @@ Do not inherit the main agent's model as a default. If the selected capability
 model is unavailable, keep the work in the main agent or request confirmation
 for a model actually exposed by the destination. Do not silently escalate a
 mechanical node to a high-cost model.
+
+On the Codex surface, `standard` deliberately uses Luna at maximum supported
+reasoning effort for cost-aware execution. This is not a review downgrade:
+durable domain/dissent roles and other formal acceptance reviewers require the
+`strong` Sol route. A low-risk sampled check may remain standard only when it is
+not the run's formal independent acceptance source.
 
 `ultra` requires all of the following:
 

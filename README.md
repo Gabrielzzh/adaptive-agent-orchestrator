@@ -113,8 +113,9 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
 - **Protected active capacity:** target six active Workers while keeping two
   transient-subagent slots available beside four active persistent Workers;
   actual capacity is clamped to the runtime.
-- **Static model routing:** Luna handles bounded mechanical work; Sol handles
-  judgment, writing, implementation, and review. Terra remains
+- **Cost-aware static model routing:** Luna handles bounded mechanical work and
+  ordinary implementation/testing at maximum effort; Sol handles architecture,
+  ambiguous debugging, and formal domain or adversarial review. Terra remains
   explicit-request-only, and no benchmark Agent is launched before work.
   Requested and actual models remain separate when the platform does not expose
   the runtime model.

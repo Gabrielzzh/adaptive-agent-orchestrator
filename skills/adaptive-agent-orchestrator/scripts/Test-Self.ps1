@@ -857,9 +857,31 @@ try {
     $standardModel = & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
         -PlatformBindingPath $platformBindingPath `
         -Capability standard -AvailableModelIds $modelIds | ConvertFrom-Json
-    Assert-True ($standardModel.model -eq 'gpt-5.6-sol') (
-        'Standard judgment should resolve to Sol, not Terra.'
+    Assert-True (
+        $standardModel.model -eq 'gpt-5.6-luna' -and
+        $standardModel.effort -eq 'max'
+    ) (
+        'Standard bounded execution should resolve to Luna max.'
     )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+            -PlatformBindingPath $platformBindingPath `
+            -Capability standard -RequestedModel 'gpt-5.6-sol' `
+            -AvailableModelIds $modelIds | Out-Null
+    } 'requires explicit user confirmation' (
+        'A standard Luna-to-Sol override must require confirmation.'
+    )
+    $confirmedStandardSol = & (
+        Join-Path $scriptRoot 'Resolve-WorkerModel.ps1'
+    ) -PlatformBindingPath $platformBindingPath `
+        -Capability standard -RequestedModel 'gpt-5.6-sol' `
+        -UserConfirmedEscalation `
+        -AuthorizationEvidence 'user:explicit-standard-sol-escalation' `
+        -AvailableModelIds $modelIds | ConvertFrom-Json
+    Assert-True (
+        $confirmedStandardSol.model -eq 'gpt-5.6-sol' -and
+        $confirmedStandardSol.authorization -eq 'escalation-confirmed'
+    ) 'Explicit user evidence should permit standard-to-Sol escalation.'
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
         -PlatformBindingPath $platformBindingPath `
@@ -3166,6 +3188,16 @@ try {
     Assert-True $durableReviewValidation.valid (
         'A bounded durable domain-and-dissent profile should validate.'
     )
+
+    $weakDurableReviewRoute = Get-Content `
+        -LiteralPath $durableReviewPlanPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $weakDurableReviewRoute.nodes[-1].capability = 'standard'
+    $weakDurableReviewRoute.nodes[-1].model = 'gpt-5.6-luna'
+    $weakDurableReviewRoute.nodes[-1].effort = 'max'
+    Assert-InvalidPlan $weakDurableReviewRoute (
+        'durable-review-weak-model-route'
+    ) 'requires strong Sol review routing'
 
     $missingDurableDisposition = Get-Content `
         -LiteralPath $durableReviewPlanPath -Raw |
