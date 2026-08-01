@@ -399,6 +399,39 @@ appended. Completion overlays only the terminal valid first-milestone revision
 bindings. Open P0/P1 still block overall completion. A selected revision does
 not itself provide final main-owner acceptance.
 
+If a same-milestone revision has been authorized and both required sources have
+been re-armed, but no result, disposition, lifecycle, or selection evidence has
+been written and the revision's control material is self-contradictory, abandon
+that pending revision exactly once. This is not a result or selection receipt:
+it appends one abandonment event and one `running -> cancelled` event per
+source, marks raw captures as non-adoptable evidence, and preserves the last
+legitimate selection as the next authorization's previous selection. The
+abandonment receipt must bind the authorization/event, journal head/count/file
+hash, both re-arm events, the run-local input and mismatch audit, and the full
+source occurrence inventory. Both the declared control-path object and the
+object whose hash was declared must be existing, distinct run-local files; each
+actual SHA-256 is checked against the corresponding declaration.
+
+```powershell
+pwsh -File scripts/New-DurableReviewMilestoneRevisionAbandonmentReceipt.ps1 `
+  -RunDirectory <run> `
+  -AuthorizationReceiptPath <run>/receipts/<pending-authorization>.json `
+  -InvalidityAuditMaterialPath <run>/materials/<mismatch-audit>.json `
+  -AbandonmentKey "controller:<stable-abandonment-reference>"
+```
+
+The audit finding must bind its exact pending finding material (or the exact
+prior source decision), while the cumulative inventory must conserve every
+source occurrence independently. A pending revision that already has any
+formal result, disposition, lifecycle, or selection cannot use this path;
+neither can a partial source set, repeated/forked key, changed journal head,
+cross-run/source/thread/checkpoint input, or a severity/text/status change.
+Only after the abandonment reader verifies the full chain may a new same-
+milestone authorization bind `previous_abandonment_*` while retaining the last
+valid `previous_revision_selection_*`; it must start fresh review from the same
+two source seats. Completion remains blocked until the new dual-source result,
+disposition, selection, open-finding, and main-owner gates pass.
+
 ```json
 [
   {

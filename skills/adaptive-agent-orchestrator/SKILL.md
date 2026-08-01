@@ -356,6 +356,18 @@ cannot change an existing or restored finding's identity, severity, text/hash,
 status, or evidence, and it cannot be combined with lifecycle correction.
 The activation must also bind controller material that fixes the later
 main-owner acceptance key and evidence path/hash.
+If a same-milestone revision is already authorized and both sources are
+re-armed, but no result, disposition, lifecycle, or selection exists and its
+control material is internally contradictory, use the one-shot
+`New-DurableReviewMilestoneRevisionAbandonmentReceipt.ps1` path documented in
+the workflow contract. It appends an abandonment plus per-source cancellation,
+marks raw evidence non-adoptable, and preserves the last valid selection; it
+never creates a result or completion signal. The receipt and shared reader
+revalidate the journal boundary, both re-arms, mismatch audit, and complete
+source inventory. The declared control file and its declared-hash object must
+be distinct existing run-local files whose actual SHA-256 values match. Any
+formal result/disposition/lifecycle/selection, partial source set, replay,
+identity drift, or finding change is rejected before journal write.
 If a reviewed milestone intentionally retains P0/P1 work assigned to the next
 declared milestone, do not falsely mark it finally accepted and do not stop the
 sequence. First append

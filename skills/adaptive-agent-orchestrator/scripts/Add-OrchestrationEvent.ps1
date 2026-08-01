@@ -1138,7 +1138,7 @@ try {
         }
         $isRecoveryCycleReentry = $true
     }
-    if ($priorState -eq 'adopted' -and $Status -eq 'running') {
+    if ($priorState -in @('adopted', 'cancelled') -and $Status -eq 'running') {
         if ($null -ne $replacementRollForwardReceipt) {
             if ($null -ne $revisionAuthorization) {
                 throw (
@@ -1217,6 +1217,72 @@ try {
                     'Milestone revision authorization is not pending or was ' +
                     'already used.'
                 )
+            }
+            if ($priorState -eq 'cancelled') {
+                $abandonmentSourceEvents = @($history | Where-Object {
+                    [string]$_.prior_state -eq 'running' -and
+                    [string]$_.status -eq 'cancelled' -and
+                    -not [string]::IsNullOrWhiteSpace(
+                        [string]$_.milestone_revision_abandonment_receipt_path
+                    ) -and
+                    -not [string]::IsNullOrWhiteSpace(
+                        [string]$_.milestone_revision_abandonment_receipt_hash
+                    )
+                })
+                if ($abandonmentSourceEvents.Count -ne 1) {
+                    throw (
+                        'Cancelled revision source requires one exact invalid-pending ' +
+                        'revision abandonment event before it can be re-armed.'
+                    )
+                }
+                $abandonmentSourceEvent = $abandonmentSourceEvents[0]
+                $abandonmentPath = Get-RunLocalReceiptPath `
+                    -RunDirectory $RunDirectory -RelativePath (
+                        [string]$abandonmentSourceEvent.
+                            milestone_revision_abandonment_receipt_path
+                    ) -Label 'Milestone revision abandonment receipt'
+                if (-not (Test-Path -LiteralPath $abandonmentPath -PathType Leaf)) {
+                    throw 'Milestone revision abandonment receipt is missing.'
+                }
+                $null = Read-DurableReviewMilestoneRevisionAbandonment `
+                    -Path $abandonmentPath -RunDirectory $RunDirectory
+                $abandonment = Get-Content -LiteralPath $abandonmentPath -Raw |
+                    ConvertFrom-Json -Depth 100 -DateKind String
+                $abandonmentPayload = [ordered]@{}
+                foreach ($property in $abandonment.PSObject.Properties) {
+                    if ($property.Name -ne 'receipt_hash') {
+                        $abandonmentPayload[$property.Name] = $property.Value
+                    }
+                }
+                $abandonmentEvent = @($events | Where-Object {
+                    [string]$_.event -eq 'milestone-revision-abandoned' -and
+                    [string]$_.milestone_revision_id -eq
+                        [string]$abandonment.revision_id -and
+                    [string]$_.milestone_revision_abandonment_receipt_hash -eq
+                        [string]$abandonment.receipt_hash
+                })
+                $abandonmentSourceBinding = @(
+                    $abandonment.source_rearm_events | Where-Object {
+                        [string]$_.source_node_id -eq $NodeId -and
+                        [string]$_.role_id -eq [string]$node.role_id -and
+                        [string]$_.thread_id -eq $ThreadId
+                    }
+                )
+                if ([string]$abandonment.run_id -ne [string]$runMetadata.run_id -or
+                    [string]$abandonment.decision -ne 'abandoned' -or
+                    [bool]$abandonment.completion_eligible -or
+                    [string]$abandonment.receipt_hash -ne (
+                        Get-TextSha256 (
+                            $abandonmentPayload | ConvertTo-Json -Compress -Depth 100
+                        )
+                    ) -or
+                    $abandonmentEvent.Count -ne 1 -or
+                    $abandonmentSourceBinding.Count -ne 1 -or
+                    [string]$abandonmentSourceEvent.
+                        milestone_revision_abandonment_receipt_hash -ne
+                        [string]$abandonment.receipt_hash) {
+                    throw 'Milestone revision abandonment continuity is invalid.'
+                }
             }
             $isMilestoneRevisionRearm = $true
         }

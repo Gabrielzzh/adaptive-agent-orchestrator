@@ -6026,6 +6026,625 @@ try {
         'Copying a predecessor directory cannot replay its export.'
     )
 
+    # A pending revision whose control material is self-contradictory may be
+    # abandoned exactly once.  The audit must bind two run-local objects and
+    # the full prior source inventory before any cancellation event is written.
+    $abandonmentRun = Join-Path $testRoot 'pending-revision-abandonment'
+    Copy-Item -LiteralPath $revision2ReadyRun -Destination $abandonmentRun -Recurse
+    $abandonmentCheckpoint = Join-Path $abandonmentRun (
+        'materials/checkpoint-method-1-abandonment.json'
+    )
+    $abandonmentInput = Join-Path $abandonmentRun (
+        'materials/input-method-1-abandonment.json'
+    )
+    $abandonmentReviewManifest = Join-Path $abandonmentRun (
+        'materials/method-1-revision-2-review-materials.json'
+    )
+    $abandonmentExcludedManifest = Join-Path $abandonmentRun (
+        'materials/method-1-revision-2-excluded-evidence.json'
+    )
+    $abandonmentAuthorizationMaterial = Join-Path $abandonmentRun (
+        'materials/method-1-revision-2-controller-authorization.md'
+    )
+    $abandonmentAcceptanceAuthorization = Join-Path $abandonmentRun (
+        'materials/method-1-revision-2-acceptance-authorization.json'
+    )
+    $abandonmentActualMatrix = Join-Path $abandonmentRun (
+        'materials/abandonment-matrix.json'
+    )
+    $abandonmentDeclaredMatrix = Join-Path $abandonmentRun (
+        'references/abandonment-declared-matrix.json'
+    )
+    Set-Content -LiteralPath $abandonmentCheckpoint `
+        -Value '{"milestone":"method-1","revision":"abandonment"}'
+    Set-Content -LiteralPath $abandonmentActualMatrix `
+        -Value '{"object":"actual-run-local-matrix"}'
+    $null = New-Item -ItemType Directory -Force -Path (
+        Split-Path -Parent $abandonmentDeclaredMatrix
+    )
+    Set-Content -LiteralPath $abandonmentDeclaredMatrix `
+        -Value '{"object":"declared-hash-object"}'
+    $abandonmentDeclaredHash = (
+        Get-FileHash -LiteralPath $abandonmentDeclaredMatrix -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    $abandonmentActualHash = (
+        Get-FileHash -LiteralPath $abandonmentActualMatrix -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    [ordered]@{
+        scope = 'method-1-abandonment'
+        matrix_path = 'materials/abandonment-matrix.json'
+        matrix_hash = $abandonmentDeclaredHash
+    } | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $abandonmentInput
+    $abandonmentAuthorization = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionAuthorizationReceipt.ps1'
+    )) -RunDirectory $abandonmentRun -MilestoneId 'method-1' `
+        -CheckpointMaterialPath $abandonmentCheckpoint `
+        -InputManifestPath $abandonmentInput `
+        -ReviewMaterialManifestPath $abandonmentReviewManifest `
+        -ExcludedEvidenceManifestPath $abandonmentExcludedManifest `
+        -AuthorizationMaterialPath $abandonmentAuthorizationMaterial `
+        -AcceptanceAuthorizationMaterialPath $abandonmentAcceptanceAuthorization `
+        -SelectionKey 'controller:select-method-1-abandonment' `
+        -ActivationKey 'controller:method-1-abandonment' |
+        ConvertFrom-Json -Depth 100
+    $abandonmentAuthorizationRelative = (
+        'receipts/durable-review-milestone.method-1.revision-' +
+        "$($abandonmentAuthorization.revision_id).authorization.json"
+    )
+    foreach ($source in @($abandonmentAuthorization.required_sources)) {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $abandonmentRun `
+            -NodeId ([string]$source.source_node_id) -Status running `
+            -ThreadId ([string]$source.thread_id) `
+            -MilestoneRevisionAuthorizationReceiptPath $abandonmentAuthorizationRelative `
+            -Message "Re-armed $($source.source_node_id) for abandonment test." `
+            -Evidence @("artifact:$abandonmentAuthorizationRelative") `
+            -IdempotencyKey "abandonment-rearm-$($source.source_node_id)" |
+            Out-Null
+    }
+    $abandonmentEventsBefore = @(
+        Read-OrchestrationJournal (Join-Path $abandonmentRun 'events.jsonl')
+    )
+    $firstAbandonmentSource = @(
+        $abandonmentAuthorization.previous_source_bindings
+    )[0]
+    $firstAbandonmentDisposition = Get-Content -LiteralPath (
+        Join-Path $abandonmentRun $firstAbandonmentSource.disposition_receipt_path
+    ) -Raw | ConvertFrom-Json -Depth 100
+    $firstAbandonmentDecision = @(
+        $firstAbandonmentDisposition.decisions
+    )[0]
+    $inventory = [ordered]@{}
+    $descriptorInventory = [Collections.Generic.List[object]]::new()
+    $inventoryTotal = 0
+    foreach ($source in @($abandonmentAuthorization.previous_source_bindings)) {
+        $disposition = Get-Content -LiteralPath (
+            Join-Path $abandonmentRun $source.disposition_receipt_path
+        ) -Raw | ConvertFrom-Json -Depth 100
+        $inventory[[string]$source.source_node_id] = @(
+            $disposition.decisions | ForEach-Object {
+                [string]$_.source_finding_id
+            }
+        )
+        foreach ($decision in @($disposition.decisions)) {
+            $descriptorInventory.Add(
+                (New-DurableReviewOccurrenceDescriptor `
+                    -SourceNodeId ([string]$source.source_node_id) `
+                    -Decision $decision)
+            )
+        }
+        $inventoryTotal += @($disposition.decisions).Count
+    }
+    $inventory.total_source_occurrences = $inventoryTotal
+    $abandonmentAudit = Join-Path $abandonmentRun (
+        'materials/method-1-abandonment-audit.json'
+    )
+    $abandonmentPendingFinding = Join-Path $abandonmentRun (
+        'materials/method-1-abandonment-pending-finding.json'
+    )
+    @([ordered]@{
+        finding_id = [string]$firstAbandonmentDecision.source_finding_id
+        severity = [string]$firstAbandonmentDecision.severity
+        text = [string]$firstAbandonmentDecision.finding
+    }) | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $abandonmentPendingFinding
+    [ordered]@{
+        failed_input_binding = [ordered]@{
+            input_manifest_path = 'materials/input-method-1-abandonment.json'
+            input_manifest_sha256 = (
+                Get-FileHash -LiteralPath $abandonmentInput -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+            declared_matrix_path = 'materials/abandonment-matrix.json'
+            actual_declared_matrix_path_sha256 = $abandonmentActualHash
+            declared_matrix_hash = $abandonmentDeclaredHash
+            actual_object_for_declared_matrix_hash =
+                'references/abandonment-declared-matrix.json'
+            failure_class = 'matrix_path_hash_object_mismatch'
+        }
+        source_finding = [ordered]@{
+            source_node_id = [string]$firstAbandonmentSource.source_node_id
+            source_finding_id = [string]$firstAbandonmentDecision.source_finding_id
+            canonical_finding_id = [string]$firstAbandonmentDecision.canonical_finding_id
+            severity = [string]$firstAbandonmentDecision.severity
+            status = [string]$firstAbandonmentDecision.resolution_status
+            exact_text = [string]$firstAbandonmentDecision.finding
+            finding_hash = Get-TextSha256 ([string]$firstAbandonmentDecision.finding)
+            pending_finding_material_path =
+                'materials/method-1-abandonment-pending-finding.json'
+            pending_finding_material_sha256 = (
+                Get-FileHash -LiteralPath $abandonmentPendingFinding -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+        }
+        cumulative_source_inventory = $inventory
+        cumulative_source_occurrence_descriptors = @($descriptorInventory)
+    } | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $abandonmentAudit
+    $abandonmentPreRun = Join-Path $testRoot 'pending-revision-abandonment-pre'
+    Copy-Item -LiteralPath $abandonmentRun -Destination $abandonmentPreRun -Recurse
+    $abandonmentReceipt = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionAbandonmentReceipt.ps1'
+    )) -RunDirectory $abandonmentRun `
+        -AuthorizationReceiptPath (Join-Path $abandonmentRun $abandonmentAuthorizationRelative) `
+        -InvalidityAuditMaterialPath $abandonmentAudit `
+        -AbandonmentKey 'controller:method-1-abandonment' |
+        ConvertFrom-Json -Depth 100
+    $abandonmentEventsAfter = @(
+        Read-OrchestrationJournal (Join-Path $abandonmentRun 'events.jsonl')
+    )
+    Assert-True (
+        [string]$abandonmentReceipt.decision -eq 'abandoned' -and
+        [bool]$abandonmentReceipt.invalidity_audit.raw_evidence_non_adoptable -and
+        $abandonmentEventsAfter.Count -eq ($abandonmentEventsBefore.Count + 3)
+    ) 'A contradictory pending revision must append one abandonment and two cancellations.'
+    $abandonmentReceiptPath = Join-Path $abandonmentRun (
+        'receipts/durable-review-milestone.method-1.revision-' +
+        "$($abandonmentAuthorization.revision_id).abandonment.json"
+    )
+    $abandonmentReadback = Read-DurableReviewMilestoneRevisionAbandonment `
+        -Path $abandonmentReceiptPath -RunDirectory $abandonmentRun
+    Assert-True (
+        [string]$abandonmentReadback.receipt_hash -eq
+            [string]$abandonmentReceipt.receipt_hash
+    ) 'Abandonment receipt must survive full pure-reader validation.'
+    $abandonmentJournalHash = (
+        Get-FileHash -LiteralPath (Join-Path $abandonmentRun 'events.jsonl') `
+            -Algorithm SHA256
+    ).Hash
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionAbandonmentReceipt.ps1'
+        )) -RunDirectory $abandonmentRun `
+            -AuthorizationReceiptPath (Join-Path $abandonmentRun $abandonmentAuthorizationRelative) `
+            -InvalidityAuditMaterialPath $abandonmentAudit `
+            -AbandonmentKey 'controller:duplicate-abandonment' | Out-Null
+    } 'not-yet-abandoned' (
+        'A pending revision may be abandoned only once.'
+    )
+    Assert-True (
+        $abandonmentJournalHash -eq (
+            Get-FileHash -LiteralPath (Join-Path $abandonmentRun 'events.jsonl') `
+                -Algorithm SHA256
+        ).Hash
+    ) 'A duplicate abandonment must not append to the journal.'
+
+    function Assert-AbandonmentAuditMutationRejected {
+        param(
+            [string] $Name,
+            [scriptblock] $Mutation,
+            [string] $Expected
+        )
+        $mutationRun = Join-Path $testRoot "abandonment-$Name"
+        Copy-Item -LiteralPath $abandonmentPreRun -Destination $mutationRun -Recurse
+        $mutationAudit = Join-Path $mutationRun 'materials/method-1-abandonment-audit.json'
+        $audit = Get-Content -LiteralPath $abandonmentAudit -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        & $Mutation $audit
+        $audit | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $mutationAudit
+        $before = (Get-FileHash -LiteralPath (Join-Path $mutationRun 'events.jsonl') -Algorithm SHA256).Hash
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-DurableReviewMilestoneRevisionAbandonmentReceipt.ps1'
+            )) -RunDirectory $mutationRun `
+                -AuthorizationReceiptPath (Join-Path $mutationRun $abandonmentAuthorizationRelative) `
+                -InvalidityAuditMaterialPath $mutationAudit `
+                -AbandonmentKey "controller:abandonment-$Name" | Out-Null
+        } $Expected "Abandonment audit mutation '$Name' must fail before journal write."
+        Assert-True (
+            $before -eq (Get-FileHash -LiteralPath (Join-Path $mutationRun 'events.jsonl') -Algorithm SHA256).Hash
+        ) "Abandonment audit mutation '$Name' must not change the journal."
+    }
+    Assert-AbandonmentAuditMutationRejected -Name 'outside-object' -Expected 'existing file inside the run' -Mutation {
+        param($audit)
+        $audit.failed_input_binding.actual_object_for_declared_matrix_hash = 'C:\outside-declared-object.json'
+    }
+    Assert-AbandonmentAuditMutationRejected -Name 'actual-hash-drift' -Expected 'actual control hash changed' -Mutation {
+        param($audit)
+        $audit.failed_input_binding.actual_declared_matrix_path_sha256 = ('0' * 64)
+    }
+    Assert-AbandonmentAuditMutationRejected -Name 'partial-inventory' -Expected 'cumulative source inventory' -Mutation {
+        param($audit)
+        $audit.cumulative_source_inventory[[string]$firstAbandonmentSource.source_node_id] = @(
+            $audit.cumulative_source_inventory[[string]$firstAbandonmentSource.source_node_id] |
+                Select-Object -Skip 1
+        )
+        $audit.cumulative_source_inventory.total_source_occurrences =
+            [int]$audit.cumulative_source_inventory.total_source_occurrences - 1
+    }
+    Assert-AbandonmentAuditMutationRejected -Name 'missing-simple-inventory' `
+        -Expected 'simple cumulative source inventory' -Mutation {
+        param($audit)
+        $audit.Remove('cumulative_source_inventory')
+    }
+
+    function Assert-AbandonmentReaderMutationRejected {
+        param(
+            [string] $Name,
+            [scriptblock] $Mutation,
+            [string] $Expected
+        )
+        $mutationRun = Join-Path $testRoot "abandonment-reader-$Name"
+        Copy-Item -LiteralPath $abandonmentRun -Destination $mutationRun -Recurse
+        $mutationReceiptPath = Join-Path $mutationRun (
+            'receipts/durable-review-milestone.method-1.revision-' +
+            "$($abandonmentAuthorization.revision_id).abandonment.json"
+        )
+        $receipt = Get-Content -LiteralPath $mutationReceiptPath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        & $Mutation $mutationRun $receipt
+        $receiptPayload = [ordered]@{}
+        foreach ($key in $receipt.Keys) {
+            if ($key -ne 'receipt_hash') { $receiptPayload[$key] = $receipt[$key] }
+        }
+        $receipt.receipt_hash = Get-TextSha256 (
+            $receiptPayload | ConvertTo-Json -Compress -Depth 100
+        )
+        $receipt | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $mutationReceiptPath
+        # Keep the copied journal internally consistent with the mutated
+        # receipt so the reader reaches the specific binding under test.
+        $mutationEvents = @(
+            Read-OrchestrationJournal (Join-Path $mutationRun 'events.jsonl')
+        )
+        $abandonmentEventIndex = [int]$receipt.source_journal_event_count
+        if ($abandonmentEventIndex -lt $mutationEvents.Count) {
+            $mutationEvents[$abandonmentEventIndex].
+                milestone_revision_abandonment_receipt_hash =
+                [string]$receipt.receipt_hash
+            $previousHash = $null
+            foreach ($mutationEvent in $mutationEvents) {
+                $mutationEvent.prev_hash = $previousHash
+                $mutationEvent.hash = Get-OrchestrationEventHash $mutationEvent
+                $previousHash = [string]$mutationEvent.hash
+            }
+            $mutationEvents | ForEach-Object {
+                $_ | ConvertTo-Json -Compress -Depth 100
+            } | Set-Content -LiteralPath (Join-Path $mutationRun 'events.jsonl')
+        }
+        $before = (Get-FileHash -LiteralPath (Join-Path $mutationRun 'events.jsonl') `
+            -Algorithm SHA256).Hash
+        Assert-ThrowsLike {
+            Read-DurableReviewMilestoneRevisionAbandonment `
+                -Path $mutationReceiptPath -RunDirectory $mutationRun | Out-Null
+        } $Expected "Reader mutation '$Name' must fail closed."
+        Assert-True (
+            $before -eq (Get-FileHash -LiteralPath (Join-Path $mutationRun 'events.jsonl') `
+                -Algorithm SHA256).Hash
+        ) "Reader mutation '$Name' must not change the journal."
+    }
+    Assert-AbandonmentReaderMutationRejected -Name 'authorization-binding-rehash' `
+        -Expected 'authorization binding changed' -Mutation {
+        param($mutationRun, $receipt)
+        $receipt.authorization_receipt_hash = '0' * 64
+    }
+    Assert-AbandonmentReaderMutationRejected -Name 'prior-disposition-rehash' `
+        -Expected 'identity, text hash, and severity' -Mutation {
+        param($mutationRun, $receipt)
+        $previous = @($abandonmentAuthorization.previous_source_bindings)[0]
+        $dispositionPath = Join-Path $mutationRun $previous.disposition_receipt_path
+        $disposition = Get-Content -LiteralPath $dispositionPath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        $decision = $disposition.decisions[0]
+        $decision.finding = 'mutated prior occurrence text'
+        $decision.finding_hash = Get-TextSha256 ([string]$decision.finding)
+        $dispositionPayload = [ordered]@{
+            schema_version = [string]$disposition.schema_version
+            run_id = [string]$disposition.run_id
+            milestone_id = [string]$disposition.milestone_id
+            source_node_id = [string]$disposition.source_node_id
+            source_thread_id = [string]$disposition.source_thread_id
+            source_result_receipt_path = [string]$disposition.source_result_receipt_path
+            source_result_receipt_hash = [string]$disposition.source_result_receipt_hash
+            decisions = $disposition.decisions
+            blocking_open = $disposition.blocking_open
+            created_at_utc = [string]$disposition.created_at_utc
+        }
+        $disposition.receipt_hash = Get-TextSha256 (
+            $dispositionPayload | ConvertTo-Json -Compress -Depth 50
+        )
+        $disposition | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $dispositionPath
+    }
+    Assert-AbandonmentReaderMutationRejected -Name 'missing-simple-inventory' `
+        -Expected 'lacks the simple cumulative source inventory' -Mutation {
+        param($mutationRun, $receipt)
+        $auditPath = Join-Path $mutationRun $receipt.invalidity_audit_material_path
+        $audit = Get-Content -LiteralPath $auditPath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        $audit.Remove('cumulative_source_inventory')
+        $audit | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $auditPath
+        $receipt.invalidity_audit_material_hash = (
+            Get-FileHash -LiteralPath $auditPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+    }
+    Assert-AbandonmentReaderMutationRejected -Name 'rehashed-simple-inventory' `
+        -Expected 'invalidity audit inventory changed' -Mutation {
+        param($mutationRun, $receipt)
+        $auditPath = Join-Path $mutationRun $receipt.invalidity_audit_material_path
+        $audit = Get-Content -LiteralPath $auditPath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        $sourceKey = [string]$firstAbandonmentSource.source_node_id
+        $audit.cumulative_source_inventory[$sourceKey][0] = 'mutated-same-slot'
+        $audit | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $auditPath
+        $receipt.invalidity_audit_material_hash = (
+            Get-FileHash -LiteralPath $auditPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+    }
+
+    # The abandoned pending revision is non-adoptable evidence only.  A fresh
+    # same-milestone authorization must bind the abandonment and start both
+    # original source seats again with new result/disposition artifacts.
+    $freshAfterAbandonmentCheckpoint = Join-Path $abandonmentRun (
+        'materials/checkpoint-method-1-after-abandonment.json'
+    )
+    $freshAfterAbandonmentInput = Join-Path $abandonmentRun (
+        'materials/input-method-1-after-abandonment.json'
+    )
+    Set-Content -LiteralPath $freshAfterAbandonmentCheckpoint `
+        -Value '{"milestone":"method-1","revision":"after-abandonment"}'
+    Set-Content -LiteralPath $freshAfterAbandonmentInput `
+        -Value '{"scope":"method-1-after-abandonment"}'
+    $freshReviewPrompt = Join-Path $abandonmentRun `
+        'materials/review-after-abandonment.md'
+    $freshDomainPrompt = Join-Path $abandonmentRun `
+        'materials/domain-after-abandonment.md'
+    Set-Content -LiteralPath $freshReviewPrompt `
+        -Value 'Fresh review after the invalid pending revision was abandoned.'
+    Set-Content -LiteralPath $freshDomainPrompt `
+        -Value 'Fresh domain audit after the invalid pending revision was abandoned.'
+    $freshReviewManifest = Join-Path $abandonmentRun `
+        'materials/method-1-after-abandonment-review-materials.json'
+    @(
+        [ordered]@{
+            source_node_id = 'review'
+            material_path = 'materials/review-after-abandonment.md'
+        },
+        [ordered]@{
+            source_node_id = 'domain'
+            material_path = 'materials/domain-after-abandonment.md'
+        }
+    ) | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $freshReviewManifest
+    $freshExcludedManifest = Join-Path $abandonmentRun `
+        'materials/method-1-after-abandonment-excluded-evidence.json'
+    $freshEventsForInventory = @(
+        Read-OrchestrationJournal (Join-Path $abandonmentRun 'events.jsonl')
+    )
+    $freshExcludedInventory = Get-MilestoneRevisionExcludedInventory `
+        -RunDirectory $abandonmentRun -Events $freshEventsForInventory `
+        -RequiredSourceIds @('domain', 'review') `
+        -CheckpointHash (
+            Get-FileHash -LiteralPath $freshAfterAbandonmentCheckpoint `
+                -Algorithm SHA256
+        ).Hash.ToLowerInvariant() `
+        -EventCount $freshEventsForInventory.Count
+    $freshExcludedEntries = [Collections.Generic.List[object]]::new()
+    foreach ($sourceNodeId in @('domain', 'review')) {
+        $freshExcludedEntries.Add([ordered]@{
+            source_node_id = $sourceNodeId
+            reason = 'caller-timing-error/non-completion evidence'
+            event_bindings = @($freshExcludedInventory.events | Where-Object {
+                [string]$_.source_node_id -eq $sourceNodeId
+            } | ForEach-Object {
+                [ordered]@{
+                    sequence = [int]$_.event_sequence
+                    event_hash = [string]$_.event_hash
+                }
+            })
+            artifacts = @($freshExcludedInventory.artifacts | Where-Object {
+                [string]$_.source_node_id -eq $sourceNodeId
+            } | ForEach-Object {
+                [ordered]@{
+                    type = [string]$_.type
+                    path = [string]$_.path
+                    file_hash = [string]$_.file_hash
+                    internal_hash = [string]$_.internal_hash
+                }
+            })
+        })
+    }
+    @($freshExcludedEntries) | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $freshExcludedManifest
+    $freshAuthorizationMaterial = Join-Path $abandonmentRun `
+        'materials/method-1-after-abandonment-controller-authorization.md'
+    Set-Content -LiteralPath $freshAuthorizationMaterial `
+        -Value 'Controller authorizes one fresh same-milestone review after abandonment.'
+    $freshAcceptanceEvidence = Join-Path $abandonmentRun `
+        'materials/method-1-after-abandonment-main-acceptance.md'
+    Set-Content -LiteralPath $freshAcceptanceEvidence `
+        -Value 'Main owner acceptance remains independent and is intentionally absent.'
+    $freshAcceptanceAuthorization = Join-Path $abandonmentRun `
+        'materials/method-1-after-abandonment-acceptance-authorization.json'
+    [ordered]@{
+        schema_version = '1.0'
+        milestone_id = 'method-1'
+        main_node_id = 'integrate'
+        acceptance_key = 'controller:method-1-after-abandonment-acceptance'
+        evidence_material_path = [IO.Path]::GetRelativePath(
+            $abandonmentRun, $freshAcceptanceEvidence
+        ).Replace('\', '/')
+        evidence_material_hash = (
+            Get-FileHash -LiteralPath $freshAcceptanceEvidence -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+    } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $freshAcceptanceAuthorization
+    $freshAuthorization = & (Join-Path $scriptRoot `
+        'New-DurableReviewMilestoneRevisionAuthorizationReceipt.ps1') `
+        -RunDirectory $abandonmentRun -MilestoneId 'method-1' `
+        -CheckpointMaterialPath $freshAfterAbandonmentCheckpoint `
+        -InputManifestPath $freshAfterAbandonmentInput `
+        -ReviewMaterialManifestPath $freshReviewManifest `
+        -ExcludedEvidenceManifestPath $freshExcludedManifest `
+        -AuthorizationMaterialPath $freshAuthorizationMaterial `
+        -AcceptanceAuthorizationMaterialPath $freshAcceptanceAuthorization `
+        -SelectionKey 'controller:select-method-1-after-abandonment' `
+        -ActivationKey 'controller:method-1-after-abandonment' |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [int]$freshAuthorization.revision_index -gt
+            [int]$abandonmentAuthorization.revision_index -and
+        [string]$freshAuthorization.previous_abandonment_revision_id -eq
+            [string]$abandonmentAuthorization.revision_id
+    ) 'A fresh authorization must bind the abandoned pending revision.'
+    $freshAuthorizationRelative = (
+        'receipts/durable-review-milestone.method-1.revision-' +
+        "$($freshAuthorization.revision_id).authorization.json"
+    )
+    foreach ($source in @(
+        @{ id = 'review'; thread = 'review-thread' },
+        @{ id = 'domain'; thread = 'domain-thread' }
+    )) {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $abandonmentRun -NodeId $source.id -Status running `
+            -ThreadId $source.thread `
+            -MilestoneRevisionAuthorizationReceiptPath $freshAuthorizationRelative `
+            -Message "Fresh post-abandonment review for $($source.id)." `
+            -Evidence @('observation:fresh-post-abandonment-review') `
+            -IdempotencyKey "fresh-after-abandonment-rearm-$($source.id)" |
+            Out-Null
+    }
+    $freshReview = New-SourceChain -Run $abandonmentRun `
+        -SourceNodeId 'review' -ThreadId 'review-thread' `
+        -MilestoneId 'method-1' -CheckpointPath $freshAfterAbandonmentCheckpoint `
+        -Stem 'review.method-1-after-abandonment' -Severity 'P0' `
+        -FindingText 'baseline-review-p0' -Resolution 'open' `
+        -FindingId 'review-method-1-finding' `
+        -CanonicalFindingId 'canonical-review-method-1-finding' `
+        -AdditionalFindingId 'review-method-1-finding-r08' `
+        -AdditionalFindingText 'baseline-review-p0-second-occurrence' `
+        -AdditionalSeverity 'P0' `
+        -AdditionalCanonicalFindingId 'canonical-review-method-1-finding'
+    $freshDomain = New-SourceChain -Run $abandonmentRun `
+        -SourceNodeId 'domain' -ThreadId 'domain-thread' `
+        -MilestoneId 'method-1' -CheckpointPath $freshAfterAbandonmentCheckpoint `
+        -Stem 'domain.method-1-after-abandonment' -Severity 'P0' `
+        -FindingText 'baseline-domain-p0' -Resolution 'open' `
+        -FindingId 'domain-method-1-finding' `
+        -CanonicalFindingId 'canonical-domain-method-1-finding'
+    foreach ($source in @(
+        @{ id = 'review'; thread = 'review-thread'; result = $freshReview.result_path; disposition = $freshReview.disposition_path },
+        @{ id = 'domain'; thread = 'domain-thread'; result = $freshDomain.result_path; disposition = $freshDomain.disposition_path }
+    )) {
+        foreach ($status in @('completed', 'validated', 'adopted')) {
+            $pointer = if ($status -eq 'completed') {
+                "artifact:$($source.result)"
+            } else {
+                "artifact:$($source.disposition)"
+            }
+            & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+                -RunDirectory $abandonmentRun -NodeId $source.id `
+                -Status $status -ThreadId $source.thread `
+                -Message "Fresh post-abandonment $($source.id) $status." `
+                -Evidence @($pointer) `
+                -IdempotencyKey "fresh-after-abandonment-$($source.id)-$status" |
+                Out-Null
+        }
+    }
+    Assert-True (
+        [string]$freshReview.result_path -ne [string]$firstAbandonmentSource.result_receipt_path -and
+        [string]$freshDomain.result_path -ne [string]$firstAbandonmentSource.result_receipt_path
+    ) 'Fresh review must not reuse the abandoned revision result artifacts.'
+    $freshSelectionMaterial = Join-Path $abandonmentRun `
+        'materials/method-1-after-abandonment-selection.json'
+    @(
+        [ordered]@{ source_node_id = 'review'; disposition_receipt_path = $freshReview.disposition_path },
+        [ordered]@{ source_node_id = 'domain'; disposition_receipt_path = $freshDomain.disposition_path }
+    ) | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $freshSelectionMaterial
+    $freshSelection = & (Join-Path $scriptRoot `
+        'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1') `
+        -RunDirectory $abandonmentRun `
+        -AuthorizationReceiptPath (Join-Path $abandonmentRun $freshAuthorizationRelative) `
+        -SelectionMaterialPath $freshSelectionMaterial `
+        -SelectionKey ([string]$freshAuthorization.selection_key) |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$freshSelection.schema_version -in @('1.1', '1.2', '1.3', '1.4') -and
+        [string]$freshSelection.revision_id -eq [string]$freshAuthorization.revision_id
+    ) 'A fresh post-abandonment result/disposition pair must be selectable.'
+    $freshEvents = @(Read-OrchestrationJournal (Join-Path $abandonmentRun 'events.jsonl'))
+    $freshAuthorizationEvent = @($freshEvents | Where-Object {
+        [string]$_.event -eq 'milestone-revision-authorized' -and
+        [string]$_.milestone_revision_id -eq [string]$freshAuthorization.revision_id
+    })[0]
+    $freshDomainSource = @($freshAuthorization.required_sources | Where-Object {
+        [string]$_.source_node_id -eq 'domain'
+    })[0]
+    $ordinaryCancelledAuthorization = $freshAuthorization |
+        ConvertTo-Json -Depth 100 | ConvertFrom-Json -Depth 100
+    foreach ($name in @(
+        'previous_abandonment_receipt_path',
+        'previous_abandonment_receipt_hash',
+        'previous_abandonment_event_sequence',
+        'previous_abandonment_event_hash',
+        'previous_abandonment_revision_id'
+    )) {
+        $ordinaryCancelledAuthorization.PSObject.Properties.Remove($name)
+    }
+    Assert-ThrowsLike {
+        Get-DurableReviewMilestoneRevisionRearmEvent `
+            -RunDirectory $abandonmentRun -Events $freshEvents `
+            -Authorization $ordinaryCancelledAuthorization `
+            -RequiredSource $freshDomainSource `
+            -AuthorizationEventSequence ([int]$freshAuthorizationEvent.sequence) |
+            Out-Null
+    } 'lacks one fresh re-arm' (
+        'An ordinary cancelled source cannot re-arm without abandonment continuity.'
+    )
+    $wrongAbandonmentAuthorization = $freshAuthorization |
+        ConvertTo-Json -Depth 100 | ConvertFrom-Json -Depth 100
+    $wrongAbandonmentAuthorization.previous_abandonment_receipt_hash =
+        ('0' * 64)
+    Assert-ThrowsLike {
+        Get-DurableReviewMilestoneRevisionRearmEvent `
+            -RunDirectory $abandonmentRun -Events $freshEvents `
+            -Authorization $wrongAbandonmentAuthorization `
+            -RequiredSource $freshDomainSource `
+            -AuthorizationEventSequence ([int]$freshAuthorizationEvent.sequence) |
+            Out-Null
+    } 'abandonment binding changed' (
+        'A cancelled re-arm with the wrong abandonment receipt must fail closed.'
+    )
+    $crossSource = [pscustomobject]@{
+        source_node_id = 'domain'
+        role_id = 'adversarial-reviewer'
+        thread_id = 'review-thread'
+    }
+    Assert-ThrowsLike {
+        Get-DurableReviewMilestoneRevisionRearmEvent `
+            -RunDirectory $abandonmentRun -Events $freshEvents `
+            -Authorization $freshAuthorization `
+            -RequiredSource $crossSource `
+            -AuthorizationEventSequence ([int]$freshAuthorizationEvent.sequence) |
+            Out-Null
+    } 'abandonment source binding changed' (
+        'A cancelled re-arm cannot borrow another source or thread.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $abandonmentRun | Out-Null
+    } 'main' (
+        'Fresh selection must not satisfy independent main acceptance.'
+    )
+
     [pscustomobject]@{
         pass = $true
         assertions = $script:assertions

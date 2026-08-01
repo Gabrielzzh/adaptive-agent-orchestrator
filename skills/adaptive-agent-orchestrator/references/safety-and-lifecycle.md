@@ -214,6 +214,27 @@ replacement bridge. Missing or mixed authority, replay, identity drift, or a
 second replacement fails closed; the result does not resolve findings or supply
 main-owner acceptance by itself.
 
+### Abandoning an invalid pending revision
+
+When a same-milestone revision has only its authorization and both source
+re-arms, and its control material is contradictory, use the one-shot
+`New-DurableReviewMilestoneRevisionAbandonmentReceipt.ps1` path. It is
+append-only: the receipt binds the authorization, journal boundary, both
+re-arms, the run-local mismatch audit, and the complete source occurrence
+inventory, then appends the abandonment and per-source cancellation events.
+It marks raw captures as non-adoptable evidence and never produces a result,
+disposition, selection, or completion signal. The declared control-path file
+and the file whose hash was declared must both exist inside the run, be
+distinct, and match their actual SHA-256 declarations.
+
+No result, disposition, lifecycle, or selection may already exist for the
+pending revision. Partial sources, changed identities or artifacts, repeated
+keys, journal drift, cross-run/source/thread/checkpoint reuse, and severity,
+text, or status changes fail closed. A later authorization must preserve the
+last valid selection as `previous_revision_selection_*`, bind the abandonment
+as `previous_abandonment_*`, and re-review both original logical source seats;
+open P0/P1 and main acceptance remain blocking.
+
 Legacy durable sources may lack machine identifiers and immutable captures that
 the current protocol requires. Never synthesize those values. A one-time legacy
 adoption receipt assigns a new stable source/role identity while binding the

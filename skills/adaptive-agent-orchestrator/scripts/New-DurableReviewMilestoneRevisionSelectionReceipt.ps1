@@ -163,18 +163,12 @@ foreach ($requiredSource in $requiredSources) {
         [string]$_.node_id -eq $sourceNodeId -and
         [int]$_.sequence -gt [int]$authorizationEvent[0].sequence
     })
-    $rearms = @($sourceEvents | Where-Object {
-        [string]$_.prior_state -eq 'adopted' -and
-        [string]$_.status -eq 'running' -and
-        [string]$_.thread_id -eq [string]$requiredSource.thread_id -and
-        [string]$_.milestone_revision_id -eq
-            [string]$authorization.revision_id -and
-        [string]$_.milestone_revision_authorization_receipt_hash -eq
-            [string]$authorization.receipt_hash
-    })
-    if ($rearms.Count -ne 1) {
-        throw "Milestone revision source '$sourceNodeId' lacks one fresh re-arm."
-    }
+    $rearms = @(
+        Get-DurableReviewMilestoneRevisionRearmEvent `
+            -RunDirectory $runRoot -Events $events `
+            -Authorization $authorization -RequiredSource $requiredSource `
+            -AuthorizationEventSequence ([int]$authorizationEvent[0].sequence)
+    )
     $continuity = Get-DurableReviewRevisionSourceContinuityBinding `
         -RunDirectory $runRoot -RequiredSource $requiredSource `
         -DispositionBinding $binding -Authorization $authorization `
