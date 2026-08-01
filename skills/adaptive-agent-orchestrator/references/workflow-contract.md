@@ -466,8 +466,12 @@ cross-run/source/thread/checkpoint input, or a severity/text/status change.
 Only after the abandonment reader verifies the full chain may a new same-
 milestone authorization bind `previous_abandonment_*` while retaining the last
 valid `previous_revision_selection_*`; it must start fresh review from the same
-two source seats. Completion remains blocked until the new dual-source result,
-disposition, selection, open-finding, and main-owner gates pass.
+two source seats. Every authorization occupies one immutable revision ordinal:
+an abandoned revision consumes its ordinal even though it has no selection, and
+later selections are validated against their bound authorization ordinal rather
+than the smaller number of selection events. Completion remains blocked until
+the new dual-source result, disposition, selection, open-finding, and main-owner
+gates pass.
 
 ```json
 [

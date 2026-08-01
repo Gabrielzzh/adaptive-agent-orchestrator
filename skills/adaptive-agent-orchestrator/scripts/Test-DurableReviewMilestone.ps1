@@ -3347,6 +3347,14 @@ try {
             }
         },
         @{
+            name = 'revision-index-rewrite'
+            expected = 'predecessor state is invalid'
+            mutate = {
+                param($receipt)
+                $receipt.revision_index = [int]$receipt.revision_index + 1
+            }
+        },
+        @{
             name = 'cross-run-replay'
             expected = 'run or milestone binding is invalid'
             mutate = {
@@ -3364,6 +3372,11 @@ try {
         Resign-RevisionAuthorizationTail -Run $mutationRun `
             -ReceiptRelativePath $revision2AuthorizationRelative `
             -ReceiptMutation $mutation.mutate
+        $mutationJournalPath = Join-Path $mutationRun 'events.jsonl'
+        $mutationEventsBefore = @(Read-OrchestrationJournal $mutationJournalPath)
+        $mutationJournalHashBefore = (
+            Get-FileHash -LiteralPath $mutationJournalPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
         Assert-ThrowsLike {
             Read-DurableReviewMilestoneRevisionAuthorization -Path (
                 Join-Path $mutationRun $revision2AuthorizationRelative
@@ -3371,6 +3384,14 @@ try {
         } ([string]$mutation.expected) (
             "A re-signed $([string]$mutation.name) must fail closed."
         )
+        $mutationEventsAfter = @(Read-OrchestrationJournal $mutationJournalPath)
+        Assert-True (
+            $mutationEventsAfter.Count -eq $mutationEventsBefore.Count -and
+            [string]$mutationEventsAfter[-1].hash -eq
+                [string]$mutationEventsBefore[-1].hash -and
+            (Get-FileHash -LiteralPath $mutationJournalPath -Algorithm SHA256).
+                Hash.ToLowerInvariant() -eq $mutationJournalHashBefore
+        ) "Rejected $([string]$mutation.name) must not mutate the journal."
     }
 
     foreach ($source in @(
@@ -7413,6 +7434,82 @@ try {
         [string]$freshSelection.schema_version -in @('1.1', '1.2', '1.3', '1.4') -and
         [string]$freshSelection.revision_id -eq [string]$freshAuthorization.revision_id
     ) 'A fresh post-abandonment result/disposition pair must be selectable.'
+
+    # An abandoned revision still consumes its authorization ordinal.  The
+    # next authorization must follow the selected revision's bound
+    # authorization, not the smaller count of selection events.
+    $postAbandonmentCheckpoint = Join-Path $abandonmentRun (
+        'materials/checkpoint-method-1-post-abandonment-selection.json'
+    )
+    $postAbandonmentInput = Join-Path $abandonmentRun (
+        'materials/input-method-1-post-abandonment-selection.json'
+    )
+    Set-Content -LiteralPath $postAbandonmentCheckpoint `
+        -Value '{"milestone":"method-1","revision":"post-abandonment-selection"}'
+    Set-Content -LiteralPath $postAbandonmentInput `
+        -Value '{"scope":"method-1-post-abandonment-selection"}'
+    $postAbandonmentEvents = @(
+        Read-OrchestrationJournal (Join-Path $abandonmentRun 'events.jsonl')
+    )
+    $postAbandonmentInventory = Get-MilestoneRevisionExcludedInventory `
+        -RunDirectory $abandonmentRun -Events $postAbandonmentEvents `
+        -RequiredSourceIds @('domain', 'review') `
+        -CheckpointHash (
+            Get-FileHash -LiteralPath $postAbandonmentCheckpoint -Algorithm SHA256
+        ).Hash.ToLowerInvariant() -EventCount $postAbandonmentEvents.Count
+    $postAbandonmentExcludedEntries = [Collections.Generic.List[object]]::new()
+    foreach ($sourceNodeId in @('domain', 'review')) {
+        $postAbandonmentExcludedEntries.Add([ordered]@{
+            source_node_id = $sourceNodeId
+            reason = 'caller-timing-error/non-completion evidence'
+            event_bindings = @($postAbandonmentInventory.events | Where-Object {
+                [string]$_.source_node_id -eq $sourceNodeId
+            } | ForEach-Object {
+                [ordered]@{
+                    sequence = [int]$_.event_sequence
+                    event_hash = [string]$_.event_hash
+                }
+            })
+            artifacts = @($postAbandonmentInventory.artifacts | Where-Object {
+                [string]$_.source_node_id -eq $sourceNodeId
+            } | ForEach-Object {
+                [ordered]@{
+                    type = [string]$_.type
+                    path = [string]$_.path
+                    file_hash = [string]$_.file_hash
+                    internal_hash = [string]$_.internal_hash
+                }
+            })
+        })
+    }
+    $postAbandonmentExcludedManifest = Join-Path $abandonmentRun (
+        'materials/method-1-post-abandonment-selection-excluded-evidence.json'
+    )
+    @($postAbandonmentExcludedEntries) | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $postAbandonmentExcludedManifest
+    $postAbandonmentAuthorizationMaterial = Join-Path $abandonmentRun (
+        'materials/method-1-post-abandonment-selection-controller-authorization.md'
+    )
+    Set-Content -LiteralPath $postAbandonmentAuthorizationMaterial -Value (
+        'Controller authorizes the revision after a selected post-abandonment review.'
+    )
+    $postAbandonmentAuthorization = & (Join-Path $scriptRoot `
+        'New-DurableReviewMilestoneRevisionAuthorizationReceipt.ps1') `
+        -RunDirectory $abandonmentRun -MilestoneId 'method-1' `
+        -CheckpointMaterialPath $postAbandonmentCheckpoint `
+        -InputManifestPath $postAbandonmentInput `
+        -ReviewMaterialManifestPath $freshReviewManifest `
+        -ExcludedEvidenceManifestPath $postAbandonmentExcludedManifest `
+        -AuthorizationMaterialPath $postAbandonmentAuthorizationMaterial `
+        -AcceptanceAuthorizationMaterialPath $freshAcceptanceAuthorization `
+        -SelectionKey 'controller:select-method-1-post-abandonment-selection' `
+        -ActivationKey 'controller:method-1-post-abandonment-selection' |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [int]$postAbandonmentAuthorization.revision_index -eq
+            ([int]$freshAuthorization.revision_index + 1)
+    ) 'An abandoned revision ordinal must not deadlock the next authorization.'
+
     $freshEvents = @(Read-OrchestrationJournal (Join-Path $abandonmentRun 'events.jsonl'))
     $freshAuthorizationEvent = @($freshEvents | Where-Object {
         [string]$_.event -eq 'milestone-revision-authorized' -and

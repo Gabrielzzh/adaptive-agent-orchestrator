@@ -4425,6 +4425,23 @@ function Read-DurableReviewMilestoneRevisionAuthorization {
         $previousSelection = Read-DurableReviewMilestoneRevisionSelection `
             -Path $previousSelectionPath -RunDirectory $runRoot
         $previousSelectionEvent = $prefixSelections[-1]
+        $previousSelectionAuthorizationOrdinals = @(
+            for ($authorizationIndex = 0;
+                $authorizationIndex -lt $prefixAuthorizations.Count;
+                $authorizationIndex++) {
+                $authorizationEvent = $prefixAuthorizations[$authorizationIndex]
+                if ([string]$authorizationEvent.milestone_id -eq
+                        [string]$receipt.milestone_id -and
+                    [string]$authorizationEvent.milestone_revision_id -eq
+                        [string]$previousSelectionEvent.milestone_revision_id -and
+                    [string]$authorizationEvent.milestone_revision_authorization_receipt_path -eq
+                        [string]$previousSelectionEvent.milestone_revision_authorization_receipt_path -and
+                    [string]$authorizationEvent.milestone_revision_authorization_receipt_hash -eq
+                        [string]$previousSelectionEvent.milestone_revision_authorization_receipt_hash) {
+                    $authorizationIndex + 1
+                }
+            }
+        )
         $expectedPreviousRelative = [IO.Path]::GetRelativePath(
             $runRoot, $previousSelectionPath
         ).Replace('\', '/')
@@ -4444,8 +4461,9 @@ function Read-DurableReviewMilestoneRevisionAuthorization {
                 $expectedPreviousRelative -or
             [string]$previousSelectionEvent.milestone_activation_receipt_hash -ne
                 [string]$previousSelection.receipt_hash -or
+            $previousSelectionAuthorizationOrdinals.Count -ne 1 -or
             [int]$previousSelection.revision_index -ne
-                [int]$prefixSelections.Count -or
+                [int]$previousSelectionAuthorizationOrdinals[0] -or
             [string]$previousSelection.milestone_id -ne
                 [string]$receipt.milestone_id -or
             [string]$receipt.previous_source_bindings_hash -ne

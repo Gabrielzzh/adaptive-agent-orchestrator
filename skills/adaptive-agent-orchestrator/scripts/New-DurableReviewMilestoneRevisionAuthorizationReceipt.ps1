@@ -134,12 +134,36 @@ if ($selectedEvents.Count -gt 0) {
     }
     $previousSelection = $chain.activation_receipt
     $previousSelectionEvent = $selectedEvents[-1]
+    $previousSelectionAuthorizationOrdinals = @(
+        for ($authorizationIndex = 0;
+            $authorizationIndex -lt $authorizedEvents.Count;
+            $authorizationIndex++) {
+            $authorizationEvent = $authorizedEvents[$authorizationIndex]
+            if ([string]$authorizationEvent.milestone_id -eq $MilestoneId -and
+                [string]$authorizationEvent.milestone_revision_id -eq
+                    [string]$previousSelectionEvent.milestone_revision_id -and
+                [string]$authorizationEvent.milestone_revision_authorization_receipt_path -eq
+                    [string]$previousSelectionEvent.milestone_revision_authorization_receipt_path -and
+                [string]$authorizationEvent.milestone_revision_authorization_receipt_hash -eq
+                    [string]$previousSelectionEvent.milestone_revision_authorization_receipt_hash) {
+                $authorizationIndex + 1
+            }
+        }
+    )
     if ($null -eq $previousSelection -or
+        $previousSelectionAuthorizationOrdinals.Count -ne 1 -or
+        [string]$previousSelection.revision_id -ne
+            [string]$previousSelectionEvent.milestone_revision_id -or
+        [string]$previousSelection.authorization_receipt_path -ne
+            [string]$previousSelectionEvent.milestone_revision_authorization_receipt_path -or
+        [string]$previousSelection.authorization_receipt_hash -ne
+            [string]$previousSelectionEvent.milestone_revision_authorization_receipt_hash -or
         [string]$chain.activation_receipt_path -ne
             [string]$previousSelectionEvent.milestone_activation_receipt_path -or
         [string]$chain.activation_receipt_hash -ne
             [string]$previousSelectionEvent.milestone_activation_receipt_hash -or
-        [int]$previousSelection.revision_index -ne $selectedEvents.Count) {
+        [int]$previousSelection.revision_index -ne
+            [int]$previousSelectionAuthorizationOrdinals[0]) {
         throw 'The previous first-milestone revision selection is incomplete.'
     }
     $previousOpenInventory = Get-MilestoneRevisionOpenOccurrenceInventory `
