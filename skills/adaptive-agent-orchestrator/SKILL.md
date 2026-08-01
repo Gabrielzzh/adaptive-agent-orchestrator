@@ -435,9 +435,11 @@ the exhausted original thread. Selection schema 1.3 binds the authorized and
 selected thread separately, all three recovery receipts and journal events,
 the unique `replacement_pending -> running` bridge, and the replacement's
 result/disposition lifecycle. The logical source, role, checkpoint, input, and
-prior finding occurrences cannot change. A lifecycle correction cannot be
-combined with this replacement path, and replacement-of-replacement remains
-forbidden.
+prior finding occurrences cannot change. Ordinary replacement selection remains
+schema 1.3 and cannot consume a lifecycle correction. If the same authorized
+revision also has a complete whole-source lifecycle correction, only dedicated
+selection schema 1.5 may consume both after revalidating every correction and
+replacement binding; replacement-of-replacement remains forbidden.
 
 If the source named by a later consecutive revision is already that verified
 replacement task, do not create another replacement and do not use the

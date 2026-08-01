@@ -5369,9 +5369,7 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
                 [string]$selection[0].disposition_receipt_path
             ) -ExpectedMilestoneId ([string]$Authorization.milestone_id) `
             -RequireResultMilestoneBinding
-        if ([string]$binding.source_thread_id -ne
-                [string]$requiredSource.thread_id -or
-            [string]$binding.checkpoint_material_hash -ne
+        if ([string]$binding.checkpoint_material_hash -ne
                 [string]$Authorization.checkpoint_material_hash -or
             [string]$binding.result_receipt_path -in $excludedPaths -or
             [string]$binding.disposition_receipt_path -in $excludedPaths) {
@@ -5388,8 +5386,18 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
             Get-DurableReviewMilestoneRevisionRearmEvent `
                 -RunDirectory $runRoot -Events $Events `
                 -Authorization $Authorization -RequiredSource $requiredSource `
-                -AuthorizationEventSequence ([int]$authorizationEvents[0].sequence)
+            -AuthorizationEventSequence ([int]$authorizationEvents[0].sequence)
         )
+        $continuity = Get-DurableReviewRevisionSourceContinuityBinding `
+            -RunDirectory $runRoot -RequiredSource $requiredSource `
+            -DispositionBinding $binding -Authorization $Authorization `
+            -AuthorizationReceiptRelativePath (
+                [string]$authorizationEvents[0].
+                    milestone_revision_authorization_receipt_path
+            ) -Events $Events `
+            -AuthorizationEventSequence ([int]$authorizationEvents[0].sequence) `
+            -RearmEventSequence ([int]$rearms[0].sequence)
+        $selectedThreadId = [string]$continuity.source_thread_id
         if ($declaredMode) {
             foreach ($name in @(
                 'source_node_id', 'role_id', 'source_thread_id',
@@ -5463,9 +5471,9 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
             [string]$completed.role_id -ne [string]$requiredSource.role_id -or
             [string]$validated.role_id -ne [string]$requiredSource.role_id -or
             [string]$adopted.role_id -ne [string]$requiredSource.role_id -or
-            [string]$completed.thread_id -ne [string]$requiredSource.thread_id -or
-            [string]$validated.thread_id -ne [string]$requiredSource.thread_id -or
-            [string]$adopted.thread_id -ne [string]$requiredSource.thread_id -or
+            [string]$completed.thread_id -ne $selectedThreadId -or
+            [string]$validated.thread_id -ne $selectedThreadId -or
+            [string]$adopted.thread_id -ne $selectedThreadId -or
             [string]$completed.prior_state -ne 'running' -or
             [string]$completed.status -ne 'completed' -or
             [string]$validated.prior_state -ne 'completed' -or
@@ -5496,8 +5504,7 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
             (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne
                 [string]$binding.result_file_hash -or
             [string]$resultReceipt.source_node_id -ne $sourceNodeId -or
-            [string]$resultReceipt.thread_id -ne
-                [string]$requiredSource.thread_id -or
+            [string]$resultReceipt.thread_id -ne $selectedThreadId -or
             [string]::IsNullOrWhiteSpace(
                 [string]$resultReceipt.thread_read_path
             )) {
@@ -5568,7 +5575,7 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
         $computed = [pscustomobject][ordered]@{
             source_node_id = $sourceNodeId
             role_id = [string]$requiredSource.role_id
-            source_thread_id = [string]$requiredSource.thread_id
+            source_thread_id = $selectedThreadId
             rearm_event_sequence = [int]$rearm.sequence
             rearm_event_hash = [string]$rearm.hash
             completed_event_sequence = [int]$completed.sequence
@@ -6423,7 +6430,7 @@ function Read-DurableReviewMilestoneRevisionSelection {
         'acceptance_evidence_material_hash', 'selection_key', 'activation_key',
         'created_at_utc', 'receipt_hash'
     )
-    if ([string]$receipt.schema_version -eq '1.2') {
+    if ([string]$receipt.schema_version -in @('1.2', '1.5')) {
         $required += @(
             'lifecycle_correction_receipt_path',
             'lifecycle_correction_receipt_hash',
@@ -6449,7 +6456,7 @@ function Read-DurableReviewMilestoneRevisionSelection {
         ConvertFrom-Json -Depth 30 -DateKind String
     $events = @(Read-OrchestrationJournal (Join-Path $runRoot 'events.jsonl'))
     if ([string]$receipt.schema_version -notin @(
-            '1.1', '1.2', '1.3', '1.4'
+            '1.1', '1.2', '1.3', '1.4', '1.5'
         ) -or
         [string]$receipt.run_id -ne [string]$run.run_id -or
         [string]$receipt.plan_hash -ne [string]$run.plan_hash -or
@@ -6517,7 +6524,7 @@ function Read-DurableReviewMilestoneRevisionSelection {
         [string]$_.event -eq 'milestone-revision-inventory-superseded' -and
         [string]$_.milestone_revision_id -eq [string]$receipt.revision_id
     })
-    if ([string]$receipt.schema_version -eq '1.2') {
+    if ([string]$receipt.schema_version -in @('1.2', '1.5')) {
         $correctionPath = Get-RunLocalReceiptPath -RunDirectory $runRoot `
             -RelativePath (
                 [string]$receipt.lifecycle_correction_receipt_path
@@ -6667,7 +6674,7 @@ function Read-DurableReviewMilestoneRevisionSelection {
             $declaredLifecycle.Count -ne 1) {
             throw "Milestone revision source '$sourceNodeId' is not unique."
         }
-        if ([string]$receipt.schema_version -in @('1.3', '1.4')) {
+        if ([string]$receipt.schema_version -in @('1.3', '1.4', '1.5')) {
             foreach ($name in @(
                 'source_kind', 'authorized_thread_id', 'source_thread_id',
                 'recovery_cycle_id', 'recovery_event_bindings',
@@ -6695,7 +6702,7 @@ function Read-DurableReviewMilestoneRevisionSelection {
         if ((ConvertTo-Json -InputObject $binding -Compress -Depth 50) -ne
                 (ConvertTo-Json -InputObject $declaredBinding[0] `
                     -Compress -Depth 50) -or
-            ([string]$receipt.schema_version -notin @('1.3', '1.4') -and
+            ([string]$receipt.schema_version -notin @('1.3', '1.4', '1.5') -and
                 [string]$binding.source_thread_id -ne
                     [string]$requiredSource.thread_id) -or
             [string]$binding.checkpoint_material_path -ne
@@ -6720,7 +6727,7 @@ function Read-DurableReviewMilestoneRevisionSelection {
             ) -Events $events `
             -AuthorizationEventSequence ([int]$authorizationEvents[0].sequence) `
             -RearmEventSequence ([int]$rearmCandidates[0].sequence)
-        if ([string]$receipt.schema_version -in @('1.3', '1.4')) {
+        if ([string]$receipt.schema_version -in @('1.3', '1.4', '1.5')) {
             if ([string]$continuity.source_kind -notin @(
                 'original', 'replacement'
             )) {
@@ -6889,7 +6896,7 @@ function Read-DurableReviewMilestoneRevisionSelection {
             }
         }
         $computedLifecycle = if ([string]$receipt.schema_version -in @(
-            '1.3', '1.4'
+            '1.3', '1.4', '1.5'
         )) {
             [pscustomobject][ordered]@{
                 source_node_id = $sourceNodeId

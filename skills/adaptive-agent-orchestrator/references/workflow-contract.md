@@ -396,6 +396,14 @@ cross-run/source/thread/revision/checkpoint, artifact-drifted, or differently
 shaped corrections fail before journal write. Selection schema 1.2 binds and
 revalidates this correction together with the original events.
 
+When the same authorized revision legitimately selects a verified replacement,
+the correction may be consumed only by the dedicated selection schema 1.5.
+That schema must additionally revalidate the replacement continuity/recovery/
+re-arm chain and bind the selected replacement thread, lifecycle events, and
+correction receipt/event exactly. Ordinary replacement selection remains schema
+1.3 and still rejects any lifecycle correction; correction and inventory
+supersession cannot be combined.
+
 Selection rejects partial source sets, excluded chains, cross-source/thread or
 cross-checkpoint substitutions, and any prior occurrence that disappears or
 changes `source_finding_id`, severity, exact text/hash, or canonical ID.

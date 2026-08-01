@@ -177,12 +177,6 @@ foreach ($requiredSource in $requiredSources) {
         -AuthorizationEventSequence ([int]$authorizationEvent[0].sequence) `
         -RearmEventSequence ([int]$rearms[0].sequence)
     if ([string]$continuity.source_kind -eq 'replacement') {
-        if ($null -ne $lifecycleCorrection) {
-            throw (
-                'Milestone revision replacement selection cannot use a ' +
-                'lifecycle evidence correction.'
-            )
-        }
         $hasReplacement = $true
     }
     $selectedThreadId = [string]$continuity.source_thread_id
@@ -411,6 +405,8 @@ $relative = {
 $payload = [ordered]@{
     schema_version = if ($null -ne $inventorySupersession) {
         '1.4'
+    } elseif ($hasReplacement -and $null -ne $lifecycleCorrection) {
+        '1.5'
     } elseif ($hasReplacement) {
         '1.3'
     } elseif ($null -eq $lifecycleCorrection) { '1.1' } else { '1.2' }

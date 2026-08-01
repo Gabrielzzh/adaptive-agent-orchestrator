@@ -2101,6 +2101,246 @@ try {
     )
     Copy-Item -LiteralPath $replacementRevisionRun `
         -Destination $replacementReadyRun -Recurse
+
+    # A legitimate same-revision replacement can need the narrow validated
+    # evidence correction. The correction still has to cover every source and
+    # the replacement must retain its full continuity/recovery/re-arm chain.
+    $replacementCorrectionRun = Join-Path $testRoot (
+        'first-milestone-revision-replacement-lifecycle-correction'
+    )
+    Copy-Item -LiteralPath $replacementReadyRun `
+        -Destination $replacementCorrectionRun -Recurse
+    $replacementCorrectionEventsPath = Join-Path $replacementCorrectionRun (
+        'events.jsonl'
+    )
+    $replacementCorrectionEvents = @(
+        Get-Content -LiteralPath $replacementCorrectionEventsPath |
+            ForEach-Object {
+                $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+            }
+    )
+    foreach ($source in @(
+        @{ id = 'review'; result = $replacementReview.result_path },
+        @{ id = 'domain'; result = $replacementDomain.result_path }
+    )) {
+        $validatedIndex = [Array]::FindLastIndex(
+            [object[]]$replacementCorrectionEvents,
+            [Predicate[object]]{
+                param($event)
+                [string]$event.node_id -eq [string]$source.id -and
+                [string]$event.status -eq 'validated'
+            }
+        )
+        Assert-True ($validatedIndex -ge 0) (
+            "The replacement correction fixture needs '$($source.id)' validated."
+        )
+        $replacementCorrectionEvents[$validatedIndex].evidence = @(
+            "artifact:$($source.result)"
+        )
+    }
+    for ($eventIndex = 0; $eventIndex -lt $replacementCorrectionEvents.Count;
+        $eventIndex++) {
+        $replacementCorrectionEvents[$eventIndex].prev_hash = if (
+            $eventIndex -eq 0
+        ) { $null } else {
+            [string]$replacementCorrectionEvents[$eventIndex - 1].hash
+        }
+        $replacementCorrectionEvents[$eventIndex].Remove('hash')
+        $replacementCorrectionEvents[$eventIndex].hash =
+            Get-OrchestrationEventHash (
+                [pscustomobject]$replacementCorrectionEvents[$eventIndex]
+            )
+    }
+    @($replacementCorrectionEvents | ForEach-Object {
+        $_ | ConvertTo-Json -Compress -Depth 100
+    }) | Set-Content -LiteralPath $replacementCorrectionEventsPath
+    $replacementCorrectionJournalHash = (
+        Get-FileHash -LiteralPath $replacementCorrectionEventsPath `
+            -Algorithm SHA256
+    ).Hash
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+        )) -RunDirectory $replacementCorrectionRun `
+            -AuthorizationReceiptPath (
+                Join-Path $replacementCorrectionRun $revisionAuthorizationRelative
+            ) -SelectionMaterialPath (
+                Join-Path $replacementCorrectionRun (
+                    'materials/method-1-revision-1-replacement-selection.json'
+                )
+            ) -SelectionKey $authorizedSelectionKey | Out-Null
+    } 'lifecycle does not bind' (
+        'A replacement selection still requires the whole-source correction.'
+    )
+    Assert-True (
+        $replacementCorrectionJournalHash -eq (
+            Get-FileHash -LiteralPath $replacementCorrectionEventsPath `
+                -Algorithm SHA256
+        ).Hash
+    ) 'A rejected pre-correction replacement selection must not mutate the journal.'
+    $replacementCorrectionAuthorization = Join-Path $replacementCorrectionRun (
+        'materials/replacement-lifecycle-correction-authorization.md'
+    )
+    Set-Content -LiteralPath $replacementCorrectionAuthorization -Value (
+        'Controller authorizes only the whole-source validated evidence correction.'
+    )
+    $replacementCorrection = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+    )) -RunDirectory $replacementCorrectionRun `
+        -AuthorizationReceiptPath (
+            Join-Path $replacementCorrectionRun $revisionAuthorizationRelative
+        ) -SelectionMaterialPath (
+            Join-Path $replacementCorrectionRun (
+                'materials/method-1-revision-1-replacement-selection.json'
+            )
+        ) -AuthorizationMaterialPath $replacementCorrectionAuthorization `
+        -CorrectionKey 'controller:replacement-lifecycle-correction' |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        @($replacementCorrection.source_corrections).Count -eq 2 -and
+        [string](@($replacementCorrection.source_corrections | Where-Object {
+            [string]$_.source_node_id -eq 'review'
+        })[0].source_thread_id) -eq 'review-replacement-thread'
+    ) 'A replacement correction must bind the selected replacement thread.'
+    $replacementCorrectionPendingRun = Join-Path $testRoot (
+        'first-milestone-revision-replacement-corrected-pending-selection'
+    )
+    Copy-Item -LiteralPath $replacementCorrectionRun `
+        -Destination $replacementCorrectionPendingRun -Recurse
+    $replacementCorrectionPreSelectionEvents = @(
+        Read-OrchestrationJournal (
+            Join-Path $replacementCorrectionRun 'events.jsonl'
+        )
+    )
+    $replacementCorrectionSelection = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+    )) -RunDirectory $replacementCorrectionRun `
+        -AuthorizationReceiptPath (
+            Join-Path $replacementCorrectionRun $revisionAuthorizationRelative
+        ) -SelectionMaterialPath (
+            Join-Path $replacementCorrectionRun (
+                'materials/method-1-revision-1-replacement-selection.json'
+            )
+        ) -SelectionKey $authorizedSelectionKey |
+        ConvertFrom-Json -Depth 100
+    $replacementCorrectionLifecycle = @(
+        $replacementCorrectionSelection.source_lifecycle_bindings | Where-Object {
+            [string]$_.source_node_id -eq 'review'
+        }
+    )[0]
+    Assert-True (
+        [string]$replacementCorrectionSelection.schema_version -eq '1.5' -and
+        [string]$replacementCorrectionSelection.
+            lifecycle_correction_receipt_hash -eq
+            [string]$replacementCorrection.receipt_hash -and
+        [string]$replacementCorrectionLifecycle.source_kind -eq 'replacement' -and
+        [string]$replacementCorrectionLifecycle.source_thread_id -eq
+            'review-replacement-thread' -and
+        @($replacementCorrectionLifecycle.recovery_event_bindings).Count -eq 3 -and
+        [int]$replacementCorrectionLifecycle.replacement_running_event_sequence -gt
+            [int]$replacementCorrectionLifecycle.
+                replacement_pending_event_sequence -and
+        @(Read-OrchestrationJournal (
+            Join-Path $replacementCorrectionRun 'events.jsonl'
+        )).Count -eq ($replacementCorrectionPreSelectionEvents.Count + 1)
+    ) (
+        'One schema 1.5 selection must bind the complete correction and the ' +
+        'same replacement continuity chain.'
+    )
+    $replacementCorrectionSelectionPath = Join-Path $replacementCorrectionRun (
+        "receipts/durable-review-milestone.method-1.revision-" +
+        "$($revisionAuthorization.revision_id).selection.json"
+    )
+    $replacementCorrectionReadback =
+        Read-DurableReviewMilestoneRevisionSelection `
+            -Path $replacementCorrectionSelectionPath `
+            -RunDirectory $replacementCorrectionRun
+    Assert-True (
+        [string]$replacementCorrectionReadback.receipt_hash -eq
+            [string]$replacementCorrectionSelection.receipt_hash
+    ) 'A schema 1.5 replacement correction selection must read back.'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+        )) -RunDirectory $replacementCorrectionRun `
+            -AuthorizationReceiptPath (
+                Join-Path $replacementCorrectionRun $revisionAuthorizationRelative
+            ) -SelectionMaterialPath (
+                Join-Path $replacementCorrectionRun (
+                    'materials/method-1-revision-1-replacement-selection.json'
+                )
+            ) -SelectionKey $authorizedSelectionKey | Out-Null
+    } 'already selected' (
+        'A corrected replacement revision cannot create a duplicate selection.'
+    )
+
+    foreach ($correctionAttack in @(
+        @{
+            name = 'partial-source-set'
+            expected = 'source set is incomplete'
+            mutate = {
+                param($receipt)
+                $receipt.source_corrections = @(
+                    $receipt.source_corrections | Select-Object -First 1
+                )
+            }
+        },
+        @{
+            name = 'cross-thread'
+            expected = 'lifecycle correction source'
+            mutate = {
+                param($receipt)
+                @($receipt.source_corrections | Where-Object {
+                    [string]$_.source_node_id -eq 'review'
+                })[0].source_thread_id = 'domain-thread'
+            }
+        },
+        @{
+            name = 'completed-hash'
+            expected = 'lifecycle correction source'
+            mutate = {
+                param($receipt)
+                @($receipt.source_corrections | Where-Object {
+                    [string]$_.source_node_id -eq 'review'
+                })[0].completed_event_hash = ('0' * 64)
+            }
+        }
+    )) {
+        $correctionAttackRun = Join-Path $testRoot (
+            "revision-replacement-correction-$($correctionAttack.name)"
+        )
+        Copy-Item -LiteralPath $replacementCorrectionPendingRun `
+            -Destination $correctionAttackRun -Recurse
+        Resign-RevisionLifecycleCorrectionTail -Run $correctionAttackRun `
+            -ReceiptMutation $correctionAttack.mutate
+        $correctionAttackJournal = Join-Path $correctionAttackRun 'events.jsonl'
+        $correctionAttackJournalHash = (
+            Get-FileHash -LiteralPath $correctionAttackJournal -Algorithm SHA256
+        ).Hash
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+            )) -RunDirectory $correctionAttackRun `
+                -AuthorizationReceiptPath (
+                    Join-Path $correctionAttackRun $revisionAuthorizationRelative
+                ) -SelectionMaterialPath (
+                    Join-Path $correctionAttackRun (
+                        'materials/method-1-revision-1-replacement-selection.json'
+                    )
+                ) -SelectionKey $authorizedSelectionKey | Out-Null
+        } ([string]$correctionAttack.expected) (
+            "A $($correctionAttack.name) replacement correction must fail closed."
+        )
+        Assert-True (
+            $correctionAttackJournalHash -eq (
+                Get-FileHash -LiteralPath $correctionAttackJournal `
+                    -Algorithm SHA256
+            ).Hash
+        ) (
+            "A rejected $($correctionAttack.name) replacement correction " +
+            'must not mutate the journal.'
+        )
+    }
     $replacementPreSelectionEvents = @(
         Read-OrchestrationJournal (
             Join-Path $replacementRevisionRun 'events.jsonl'
