@@ -26,8 +26,10 @@ missing final main acceptance.
 
 - Parent commit: `61d5ab9cd00e3298a5fb466c9fcc2f8e97188596`
 - Fixed commit: `d5c99b3bec9bab865ee67388770d8c043b27df89`
-- Fixed archive: `adaptive-agent-orchestrator-same-revision-inventory-d5c99b3.zip`
-- Fixed archive SHA-256: `45b00cb7200b45b502c9602b14e732a14b2d07eed936af9fac7efb2dc210f2de`
+- Independently accepted functional archive: `adaptive-agent-orchestrator-same-revision-inventory-d5c99b3.zip`
+- Independently accepted functional archive SHA-256: `45b00cb7200b45b502c9602b14e732a14b2d07eed936af9fac7efb2dc210f2de`
+- v0.7.17 release archive: `adaptive-agent-orchestrator-v0.7.17.zip`
+- v0.7.17 release archive SHA-256: `dc7805ae4102dcbf3289f5f28bdfe35efd60adaf40888ac70cf7237be4d2f558`
 - Installable Skill files: 74
 - Archive versus Git blobs: 74/74 after Windows CRLF normalization
 
