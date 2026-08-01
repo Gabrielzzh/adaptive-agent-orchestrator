@@ -17,30 +17,31 @@ selected inventory. It cannot change source, canonical ID, severity, exact
 text/hash, status, or evidence; it cannot overwrite old receipts or lifecycle
 events; and it can be consumed by selection only once.
 
-Schema 1.4 selection revalidates the supersession, authorization/selection key,
-journal head, checkpoint/input, both source identities, and both
-result/disposition lifecycle chains. Completion still blocks on open P0/P1 and
-missing final main acceptance.
+The standalone inventory-supersession contract remains separate. When the run
+also has a lifecycle-evidence correction, the dedicated cumulative receipt
+uses its own schema 1.0 fields/event, and schema 1.6 selection revalidates both
+receipts. Legacy fields, paths, and events are rejected before journal write.
+Completion still blocks on open P0/P1 and missing final main acceptance.
 
 ## Fixed candidate
 
-- Parent commit: `61d5ab9cd00e3298a5fb466c9fcc2f8e97188596`
-- Fixed commit: `d5c99b3bec9bab865ee67388770d8c043b27df89`
-- Independently accepted functional archive: `adaptive-agent-orchestrator-same-revision-inventory-d5c99b3.zip`
-- Independently accepted functional archive SHA-256: `45b00cb7200b45b502c9602b14e732a14b2d07eed936af9fac7efb2dc210f2de`
-- v0.7.17 release archive: `adaptive-agent-orchestrator-v0.7.17.zip`
-- v0.7.17 release archive SHA-256: `dc7805ae4102dcbf3289f5f28bdfe35efd60adaf40888ac70cf7237be4d2f558`
-- Installable Skill files: 74
-- Archive versus Git blobs: 74/74 after Windows CRLF normalization
+- Parent commit: `a0a79b3af960d7a471920e2cedb50210e5cfac11`
+- Fixed commit: `ef6d619fecc26bfe0556261ef46b2808a51d81d4`
+- Independently accepted functional archive: `adaptive-agent-orchestrator-dedicated-cumulative-correction-ef6d619.zip`
+- Independently accepted functional archive SHA-256: recorded after final archive build
+- v0.7.17 release archive: `adaptive-agent-orchestrator-v0.7.17.zip` (built from the final release commit)
+- v0.7.17 release archive SHA-256: recorded with the final archive asset
+- Installable Skill files: 76
+- Archive versus Git blobs: 76/76 after Windows CRLF normalization
 
 ## Repository and archive gates
 
-- PowerShell scripts parsed: 55/55
-- Durable milestone assertions: 191 passed
+- PowerShell scripts parsed: 57/57
+- Durable milestone assertions: 273 passed
 - Recovery assertions: 91 passed
 - Materialization assertions: 45 passed; 13 negative cases passed
 - Run-policy assertions: 15 passed
-- Self-test assertions: 932 passed
+- Self-test assertions: 1014 passed
 - Intentional invalid cases: 60 rejected
 - Reference JSON files: 8/8 parsed
 - Skill Creator: `Skill is valid!`
@@ -58,22 +59,22 @@ absolute run path. The path check remains fail closed and was not relaxed.
 
 Run: `multi-divination-liuyao-p1-source-rotation-checkpoint14-v1`
 
-- Supersession schema 1.0 internal hash:
-  `607fed782a49e55589a6837846ce2f77d87aec7a82941fd2986994378515c49a`
-- Supersession file SHA-256:
-  `a9ffce32602d435980c42740b8b520256ed449493d5690f746c9e501d4429fa8`
-- Supersession event: sequence `109`, hash
-  `7ca1077f8820970851e188c343889e0c4ec9df8e59961d7f16342d9f4f2257f2`
-- Selection schema 1.4 internal hash:
-  `709dca7feb3adbef1b14ab6f76df185d55a97f9a1fd61f211e90201c923e50a6`
+- Cumulative correction receipt hash:
+  `e79d67c2288b09c0beabae9f4c83eb7fe02c62b678fb0d738163d2e46b942eeb`
+- Cumulative correction file SHA-256:
+  `b9f2bfed5474ff199da189f425f6a7f3201a0a3a7da5551597bee3fb0deeb39c`
+- Cumulative correction event: sequence `127`, hash
+  `02dc1419247340b625015dc0bab407a56f2007746659a2eb9ce29b13d052b0fd`
+- Selection schema 1.6 receipt hash:
+  `ea720650dc3d6c4d768155357cb8d948f668d60742c61a5909aa1f3a8a4f0672`
 - Selection file SHA-256:
-  `5094fe522efbfc21d0a6681e7ac343fa28df0f7442aae7bac658db60acd43b61`
-- Selection event: sequence `110`, hash
-  `633ca09707247af3a610a08143166982872601936f825a59827de6facc156b14`
-- Journal: 109 -> 111 events; final file SHA-256
-  `6c7b29ed7238e45078f32192aaeb0d02cd55861e5ba9cfb5f1fa9f2c664e1690` as recorded by the source task
-- Original 109-event prefix SHA-256:
-  `0d18215f5ff76b6def8cc289b691ab0f68cd2f7ad765ae7530392245e4ae2c7f`
+  `f757960c936b86a37c84735eaa8f625cf272128f66f54eb5e572c97ed4782f44`
+- Selection event: sequence `128`, hash
+  `9a97d6dda29df9b8653a65d857482c5f7752e01bc1860e91e3d85363997a5078`
+- Journal: 127 -> 129 events; final file SHA-256
+  `6503f853dcde54c0beef9168b9e76fdb29e7b43460e97939e32eca520cf4b2b7`
+- Original 127-event prefix SHA-256:
+  `6d1d9d26a059f76baef429427eb9e0d8fd0c0aa836c68b020a125d4f9fdc65a2`
 
 Completion exited non-zero and remained safely `BLOCKED`. It reported only
 missing main validation/evidence, missing main-owner acceptance, and
@@ -85,10 +86,10 @@ unchanged.
 ## Installed copy
 
 - Install path: `C:\Users\Administrator\.codex\skills\adaptive-agent-orchestrator`
-- Backup: `C:\Users\Administrator\.codex\skill-backups\adaptive-agent-orchestrator-before-d5c99b3-20260801-094115`
-- Source/install comparison: 74/74; missing/extra/different = 0/0/0
-- Installed parse55, Milestone191, Recovery91, Materialization45/negative13,
-  Policy15, Self932/invalid60, JSON8, and Skill Creator all passed.
+- Backup: `C:\Users\Administrator\.codex\skill-backups\adaptive-agent-orchestrator-before-ef6d619-20260801-194248`
+- Source/install comparison: 76/76; missing/extra/different = 0/0/0
+- Installed parse57, Milestone273, Recovery91, Materialization45/negative13,
+  Policy15, Self1014/invalid60, JSON8, and Skill Creator all passed.
 
 ## Boundaries
 
