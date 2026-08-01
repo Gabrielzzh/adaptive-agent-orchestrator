@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[English](README.md) · [v0.7.16 正式版说明](docs/releases/v0.7.16.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+[English](README.md) · [v0.7.17 正式版说明](docs/releases/v0.7.17.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
 
 ![Adaptive Agent Orchestrator v0.7.0 发布图](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -62,6 +62,9 @@
 - **首里程碑版本复审：** 在推进下一里程碑前，可事先授权一次版本复审，
   让每个必需的只读来源重新审查，并只采用一组精确、完整的新结论；旧证据
   继续保留，但不能事后冒充本轮正式结果。
+- **累计问题清单补回：** 如果新 checkpoint 的合法结果只列了当前开放问题，
+  一次预绑定、覆盖全部来源的 supersession 可以机械补回之前遗漏的来源问题。
+  它不能改变来源、严重度、原文/哈希、状态或证据，且只能被选择一次。
 - **可审计 successor run：** 最后一条预声明里程碑用完后，新 run 可通过
   哈希绑定的 predecessor export 与 successor adoption 精确继承全部未解决
   P1。旧 run 保持不可变，来源/thread 连续性不丢失；同一来源完成处置和复审

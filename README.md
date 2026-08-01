@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.7.16 release notes](docs/releases/v0.7.16.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.7.17 release notes](docs/releases/v0.7.17.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -71,6 +71,11 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   one pre-authorized revision may re-arm every required read-only source and
   select one exact set of fresh cumulative results. Older evidence remains
   retained but cannot be retroactively promoted into the selected review.
+- **Cumulative inventory repair:** if a valid new checkpoint accidentally lists
+  only its currently open findings, one pre-bound all-source supersession may
+  mechanically restore omitted prior occurrences. It cannot change their
+  source, severity, text/hash, status, or evidence, and selection can consume it
+  only once.
 - **Auditable successor runs:** after the final declared milestone, a new run
   can inherit every unresolved P1 through a hash-bound predecessor export and
   successor adoption. The old run stays immutable, source/thread continuity is
