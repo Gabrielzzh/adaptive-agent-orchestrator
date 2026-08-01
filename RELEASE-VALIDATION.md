@@ -28,9 +28,9 @@ Completion still blocks on open P0/P1 and missing final main acceptance.
 - Parent commit: `a0a79b3af960d7a471920e2cedb50210e5cfac11`
 - Fixed commit: `ef6d619fecc26bfe0556261ef46b2808a51d81d4`
 - Independently accepted functional archive: `adaptive-agent-orchestrator-dedicated-cumulative-correction-ef6d619.zip`
-- Independently accepted functional archive SHA-256: recorded after final archive build
+- Independently accepted functional archive SHA-256: `cdde835a6d28ecc678459a9df7eb20c41d8dc375445beeac05716dddee9d1015`
 - v0.7.17 release archive: `adaptive-agent-orchestrator-v0.7.17.zip` (built from the final release commit)
-- v0.7.17 release archive SHA-256: recorded with the final archive asset
+- v0.7.17 release archive SHA-256: `cdde835a6d28ecc678459a9df7eb20c41d8dc375445beeac05716dddee9d1015`
 - Installable Skill files: 76
 - Archive versus Git blobs: 76/76 after Windows CRLF normalization
 
