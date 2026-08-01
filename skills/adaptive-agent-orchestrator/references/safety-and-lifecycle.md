@@ -323,8 +323,11 @@ For the separate cumulative-inventory omission shape, append one full-source
 inventory supersession and its non-state event. It may only copy omitted
 occurrences exactly from the prior selected receipts into new cumulative
 artifacts; current objects, old receipts, lifecycle state, and open blockers
-remain unchanged. Lifecycle correction and inventory supersession are mutually
-exclusive for a revision.
+remain unchanged. If the same run also has the narrowly defined lifecycle
+evidence correction, use the dedicated cumulative-correction command: it
+consumes that correction, appends one additional non-state supersession event,
+and emits the only combined selection material. The older standalone inventory
+command remains mutually exclusive with lifecycle correction.
 
 The journal uses ordered sequence numbers and a SHA-256 hash chain. Treat a
 sequence gap or hash mismatch as corruption and stop recovery. `unknown` is

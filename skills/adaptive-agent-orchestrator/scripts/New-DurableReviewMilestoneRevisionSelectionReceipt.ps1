@@ -75,33 +75,68 @@ if ((Test-Path -LiteralPath $correctionReceiptPath -PathType Leaf) -or
         Read-DurableReviewMilestoneRevisionLifecycleCorrection `
             -Path $correctionReceiptPath -RunDirectory $runRoot
 }
-$supersessionReceiptName = (
+$standaloneSupersessionReceiptName = (
     "durable-review-milestone.$($authorization.milestone_id)." +
     "revision-$($authorization.revision_id).inventory-supersession.json"
 )
+$combinedSupersessionReceiptName = (
+    "durable-review-milestone.$($authorization.milestone_id)." +
+    "revision-$($authorization.revision_id).cumulative-correction.json"
+)
+$useCombinedSupersession = $null -ne $lifecycleCorrection
+$supersessionReceiptName = if ($useCombinedSupersession) {
+    $combinedSupersessionReceiptName
+} else {
+    $standaloneSupersessionReceiptName
+}
 $supersessionReceiptPath = Join-Path (
     Join-Path $runRoot 'receipts'
 ) $supersessionReceiptName
+$supersessionEventName = if ($useCombinedSupersession) {
+    'milestone-revision-cumulative-corrected'
+} else {
+    'milestone-revision-inventory-superseded'
+}
 $supersessionEvents = @($events | Where-Object {
+    [string]$_.event -eq $supersessionEventName -and
+    [string]$_.milestone_revision_id -eq [string]$authorization.revision_id
+})
+$legacySupersessionPath = Join-Path (Join-Path $runRoot 'receipts') `
+    $standaloneSupersessionReceiptName
+$dedicatedSupersessionPath = Join-Path (Join-Path $runRoot 'receipts') `
+    $combinedSupersessionReceiptName
+$legacySupersessionEvents = @($events | Where-Object {
     [string]$_.event -eq 'milestone-revision-inventory-superseded' -and
     [string]$_.milestone_revision_id -eq [string]$authorization.revision_id
 })
+$dedicatedSupersessionEvents = @($events | Where-Object {
+    [string]$_.event -eq 'milestone-revision-cumulative-corrected' -and
+    [string]$_.milestone_revision_id -eq [string]$authorization.revision_id
+})
+if ($useCombinedSupersession -and
+    ((Test-Path -LiteralPath $legacySupersessionPath -PathType Leaf) -or
+        $legacySupersessionEvents.Count -gt 0)) {
+    throw 'Combined revision selection cannot consume a standalone inventory supersession.'
+}
+if (-not $useCombinedSupersession -and
+    ((Test-Path -LiteralPath $dedicatedSupersessionPath -PathType Leaf) -or
+        $dedicatedSupersessionEvents.Count -gt 0)) {
+    throw 'Standalone revision selection cannot consume a cumulative correction.'
+}
 $inventorySupersession = $null
 if ((Test-Path -LiteralPath $supersessionReceiptPath -PathType Leaf) -or
     $supersessionEvents.Count -gt 0) {
-    if ($null -ne $lifecycleCorrection) {
-        throw (
-            'Milestone revision selection cannot combine lifecycle correction ' +
-            'and inventory supersession.'
-        )
-    }
     if (-not (Test-Path -LiteralPath $supersessionReceiptPath -PathType Leaf) -or
         $supersessionEvents.Count -ne 1) {
         throw 'Milestone revision inventory supersession is missing or forked.'
     }
-    $inventorySupersession =
+    $inventorySupersession = if ($useCombinedSupersession) {
+        Read-DurableReviewMilestoneRevisionCumulativeCorrection `
+            -Path $supersessionReceiptPath -RunDirectory $runRoot
+    } else {
         Read-DurableReviewMilestoneRevisionInventorySupersession `
             -Path $supersessionReceiptPath -RunDirectory $runRoot
+    }
     $supersededSelectionPath = Get-RunLocalReceiptPath `
         -RunDirectory $runRoot -RelativePath (
             [string]$inventorySupersession.superseded_selection_material_path
@@ -281,17 +316,17 @@ foreach ($requiredSource in $requiredSources) {
             [string]$sourceCorrection[0].adopted_event_hash -ne
                 [string]$adopted.hash -or
             [string]$sourceCorrection[0].result_receipt_path -ne
-                [string]$binding.result_receipt_path -or
+                [string]$evidenceBinding.result_receipt_path -or
             [string]$sourceCorrection[0].result_receipt_hash -ne
-                [string]$binding.result_receipt_hash -or
+                [string]$evidenceBinding.result_receipt_hash -or
             [string]$sourceCorrection[0].result_file_hash -ne
-                [string]$binding.result_file_hash -or
+                [string]$evidenceBinding.result_file_hash -or
             [string]$sourceCorrection[0].disposition_receipt_path -ne
-                [string]$binding.disposition_receipt_path -or
+                [string]$evidenceBinding.disposition_receipt_path -or
             [string]$sourceCorrection[0].disposition_receipt_hash -ne
-                [string]$binding.disposition_receipt_hash -or
+                [string]$evidenceBinding.disposition_receipt_hash -or
             [string]$sourceCorrection[0].disposition_file_hash -ne
-                [string]$binding.disposition_file_hash) {
+                [string]$evidenceBinding.disposition_file_hash) {
             throw (
                 "Milestone revision source '$sourceNodeId' correction " +
                 'does not bind the selected lifecycle and receipts.'
@@ -403,7 +438,9 @@ $relative = {
     [IO.Path]::GetRelativePath($runRoot, $Path).Replace('\', '/')
 }
 $payload = [ordered]@{
-    schema_version = if ($null -ne $inventorySupersession) {
+    schema_version = if ($null -ne $inventorySupersession -and $null -ne $lifecycleCorrection) {
+        '1.6'
+    } elseif ($null -ne $inventorySupersession) {
         '1.4'
     } elseif ($hasReplacement -and $null -ne $lifecycleCorrection) {
         '1.5'
@@ -467,14 +504,25 @@ if ($null -ne $lifecycleCorrection) {
         [string]$correctionEvents[0].hash
 }
 if ($null -ne $inventorySupersession) {
-    $payload.inventory_supersession_receipt_path =
-        "receipts/$supersessionReceiptName"
-    $payload.inventory_supersession_receipt_hash =
-        [string]$inventorySupersession.receipt_hash
-    $payload.inventory_supersession_event_sequence =
-        [int]$supersessionEvents[0].sequence
-    $payload.inventory_supersession_event_hash =
-        [string]$supersessionEvents[0].hash
+    if ($useCombinedSupersession) {
+        $payload.cumulative_correction_receipt_path =
+            "receipts/$supersessionReceiptName"
+        $payload.cumulative_correction_receipt_hash =
+            [string]$inventorySupersession.receipt_hash
+        $payload.cumulative_correction_event_sequence =
+            [int]$supersessionEvents[0].sequence
+        $payload.cumulative_correction_event_hash =
+            [string]$supersessionEvents[0].hash
+    } else {
+        $payload.inventory_supersession_receipt_path =
+            "receipts/$supersessionReceiptName"
+        $payload.inventory_supersession_receipt_hash =
+            [string]$inventorySupersession.receipt_hash
+        $payload.inventory_supersession_event_sequence =
+            [int]$supersessionEvents[0].sequence
+        $payload.inventory_supersession_event_hash =
+            [string]$supersessionEvents[0].hash
+    }
 }
 $receipt = [ordered]@{}
 foreach ($key in $payload.Keys) { $receipt[$key] = $payload[$key] }

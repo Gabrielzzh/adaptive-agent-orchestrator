@@ -353,7 +353,10 @@ the workflow contract before selection. It derives one full-source, non-state
 replacement set from the prior selected and current signed receipts without
 overwriting either set. It may only restore omitted occurrences exactly; it
 cannot change an existing or restored finding's identity, severity, text/hash,
-status, or evidence, and it cannot be combined with lifecycle correction.
+status, or evidence. If a lifecycle correction is already present, use the
+dedicated cumulative-correction command instead; it consumes the correction,
+adds one non-state supersession event, and emits a combined selection material.
+The standalone inventory command cannot be combined with lifecycle correction.
 The activation must also bind controller material that fixes the later
 main-owner acceptance key and evidence path/hash.
 If a same-milestone revision is already authorized and both sources are

@@ -553,19 +553,45 @@ function Resign-RevisionInventorySupersessionTail {
         [Parameter(Mandatory)][string] $Run,
         [Parameter(Mandatory)][scriptblock] $ReceiptMutation
     )
-    $receiptFiles = @(
+    $legacyReceiptFiles = @(
         Get-ChildItem -LiteralPath (Join-Path $Run 'receipts') -File |
             Where-Object { $_.Name -like '*.inventory-supersession.json' }
     )
-    if ($receiptFiles.Count -ne 1) {
+    $dedicatedReceiptFiles = @(
+        Get-ChildItem -LiteralPath (Join-Path $Run 'receipts') -File |
+            Where-Object { $_.Name -like '*.cumulative-correction.json' }
+    )
+    if (($legacyReceiptFiles.Count -eq 1) -and
+        ($dedicatedReceiptFiles.Count -eq 0)) {
+        $dedicated = $false
+        $receiptPath = $legacyReceiptFiles[0].FullName
+    } elseif (($legacyReceiptFiles.Count -eq 0) -and
+        ($dedicatedReceiptFiles.Count -eq 1)) {
+        $dedicated = $true
+        $receiptPath = $dedicatedReceiptFiles[0].FullName
+    } else {
         throw 'Inventory supersession fixture needs exactly one receipt.'
     }
-    $receiptPath = $receiptFiles[0].FullName
     $receipt = Get-Content -LiteralPath $receiptPath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 100
     & $ReceiptMutation $receipt
-    $receipt.source_supersessions_hash = Get-TextSha256 (
-        ConvertTo-Json -InputObject @($receipt.source_supersessions) `
+    $sourceField = if ($dedicated) {
+        'cumulative_correction_sources'
+    } else {
+        'source_supersessions'
+    }
+    $sourceHashField = if ($dedicated) {
+        'cumulative_correction_sources_hash'
+    } else {
+        'source_supersessions_hash'
+    }
+    $keyField = if ($dedicated) {
+        'cumulative_correction_key'
+    } else {
+        'supersession_key'
+    }
+    $receipt[$sourceHashField] = Get-TextSha256 (
+        ConvertTo-Json -InputObject @($receipt[$sourceField]) `
             -Compress -Depth 100
     )
     $receipt.Remove('receipt_hash')
@@ -585,8 +611,11 @@ function Resign-RevisionInventorySupersessionTail {
         [object[]]$events,
         [Predicate[object]]{
             param($event)
-            [string]$event.event -eq
+            [string]$event.event -eq $(if ($dedicated) {
+                'milestone-revision-cumulative-corrected'
+            } else {
                 'milestone-revision-inventory-superseded'
+            })
         }
     )
     if ($eventIndex -ne ($events.Count - 1)) {
@@ -602,7 +631,7 @@ function Resign-RevisionInventorySupersessionTail {
         [string]$receipt.input_manifest_hash
     $events[$eventIndex].milestone_revision_selection_key =
         [string]$receipt.selection_key
-    $events[$eventIndex].idempotency_key = [string]$receipt.supersession_key
+    $events[$eventIndex].idempotency_key = [string]$receipt[$keyField]
     $events[$eventIndex].request_fingerprint = [string]$receipt.receipt_hash
     $events[$eventIndex].Remove('hash')
     $events[$eventIndex].hash = Get-OrchestrationEventHash (
@@ -1661,6 +1690,274 @@ try {
             ) -Algorithm SHA256
         ).Hash
     ) 'A rejected duplicate correction must not mutate the journal.'
+
+    # A valid lifecycle correction and a later result that omits previously
+    # resolved source occurrences must compose through one non-state cumulative
+    # supersession.  Old receipts/events remain immutable and the combined
+    # selection still cannot satisfy independent main acceptance.
+    $combinedCumulativeRun = Join-Path $testRoot (
+        'revision-lifecycle-plus-cumulative-supersession'
+    )
+    Copy-Item -LiteralPath $evidenceCorrectionBeforeRun `
+        -Destination $combinedCumulativeRun -Recurse
+    $combinedResultPath = Join-Path $combinedCumulativeRun $revisionReview.result_path
+    $combinedResult = Get-Content -LiteralPath $combinedResultPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $combinedOmittedFindingId = 'review-method-1-finding-r08'
+    $combinedResult.pending_findings = @(
+        $combinedResult.pending_findings | Where-Object {
+            [string]$_.finding_id -ne $combinedOmittedFindingId
+        }
+    )
+    $combinedResult.Remove('receipt_hash')
+    $combinedResult.receipt_hash = Get-ThreadResultReceiptCanonicalHash `
+        -Receipt ([pscustomobject]$combinedResult)
+    $combinedResult | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $combinedResultPath -Encoding utf8
+    $combinedDispositionPath = Join-Path $combinedCumulativeRun `
+        $revisionReview.disposition_path
+    $combinedDisposition = Get-Content -LiteralPath $combinedDispositionPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $combinedDisposition.source_result_receipt_hash =
+        [string]$combinedResult.receipt_hash
+    $combinedDisposition.decisions = @(
+        $combinedDisposition.decisions | Where-Object {
+            [string]$_.source_finding_id -ne $combinedOmittedFindingId
+        }
+    )
+    $combinedDisposition.blocking_open = @(
+        $combinedDisposition.decisions | Where-Object {
+            [string]$_.severity -in @('P0', 'P1') -and
+            [string]$_.resolution_status -ne 'resolved'
+        } | ForEach-Object { [string]$_.finding }
+    )
+    $combinedDisposition.Remove('receipt_hash')
+    $combinedDisposition.receipt_hash = Get-TextSha256 (
+        $combinedDisposition | ConvertTo-Json -Compress -Depth 100
+    )
+    $combinedDisposition | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $combinedDispositionPath -Encoding utf8
+    $combinedEventsPath = Join-Path $combinedCumulativeRun 'events.jsonl'
+    $combinedEventsBefore = @(Read-OrchestrationJournal $combinedEventsPath)
+    $combinedPrefixHash = (Get-FileHash -LiteralPath $combinedEventsPath `
+        -Algorithm SHA256).Hash
+    $combinedOldResultHash = (Get-FileHash -LiteralPath $combinedResultPath `
+        -Algorithm SHA256).Hash
+    $combinedOldDispositionHash = (Get-FileHash -LiteralPath $combinedDispositionPath `
+        -Algorithm SHA256).Hash
+    $combinedAuthorizationPath = Join-Path $combinedCumulativeRun `
+        $revisionAuthorizationRelative
+    $combinedSelectionPath = Join-Path $combinedCumulativeRun `
+        'materials/method-1-revision-1-selection.json'
+    $combinedAuthorizationMaterial = Join-Path $combinedCumulativeRun `
+        'materials/revision-lifecycle-correction-authorization.md'
+    $combinedEvents = @(
+        Get-Content -LiteralPath $combinedEventsPath | ForEach-Object {
+            $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+        }
+    )
+    foreach ($source in @(
+        @{ id = 'review'; result = $revisionReview.result_path; disposition = $revisionReview.disposition_path },
+        @{ id = 'domain'; result = $revisionDomain.result_path; disposition = $revisionDomain.disposition_path }
+    )) {
+        $resultReceipt = Get-Content -LiteralPath (
+            Join-Path $combinedCumulativeRun $source.result
+        ) -Raw | ConvertFrom-Json -Depth 100
+        $completedIndex = [Array]::FindLastIndex(
+            [object[]]$combinedEvents,
+            [Predicate[object]]{
+                param($event)
+                [string]$event.node_id -eq [string]$source.id -and
+                [string]$event.status -eq 'completed'
+            }
+        )
+        $validatedIndex = [Array]::FindLastIndex(
+            [object[]]$combinedEvents,
+            [Predicate[object]]{
+                param($event)
+                [string]$event.node_id -eq [string]$source.id -and
+                [string]$event.status -eq 'validated'
+            }
+        )
+        $adoptedIndex = [Array]::FindLastIndex(
+            [object[]]$combinedEvents,
+            [Predicate[object]]{
+                param($event)
+                [string]$event.node_id -eq [string]$source.id -and
+                [string]$event.status -eq 'adopted'
+            }
+        )
+        $combinedEvents[$completedIndex].evidence = @(
+            "artifact:$($source.result)",
+            "artifact:$($resultReceipt.thread_read_path)"
+        )
+        $combinedEvents[$validatedIndex].evidence = @(
+            "artifact:$($source.result)",
+            "test:combined-lifecycle-$($source.id)",
+            "source:combined-lifecycle-$($source.id)",
+            "observation:combined-lifecycle-$($source.id)"
+        )
+        $combinedEvents[$adoptedIndex].evidence = @(
+            "artifact:$($source.disposition)",
+            "observation:combined-adopted-$($source.id)"
+        )
+    }
+    for ($eventIndex = 0; $eventIndex -lt $combinedEvents.Count; $eventIndex++) {
+        $combinedEvents[$eventIndex].prev_hash = if ($eventIndex -eq 0) {
+            $null
+        } else { [string]$combinedEvents[$eventIndex - 1].hash }
+        $combinedEvents[$eventIndex].hash = Get-OrchestrationEventHash (
+            [pscustomobject]$combinedEvents[$eventIndex]
+        )
+    }
+    @($combinedEvents | ForEach-Object {
+        [pscustomobject]$_ | ConvertTo-Json -Compress -Depth 100
+    }) | Set-Content -LiteralPath $combinedEventsPath
+    $combinedLifecycleCorrection = & (Join-Path $scriptRoot `
+        'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1') `
+        -RunDirectory $combinedCumulativeRun `
+        -AuthorizationReceiptPath $combinedAuthorizationPath `
+        -SelectionMaterialPath $combinedSelectionPath `
+        -AuthorizationMaterialPath $combinedAuthorizationMaterial `
+            -CorrectionKey 'controller:revision-1-combined-lifecycle-correction' |
+        ConvertFrom-Json -Depth 100
+    $combinedSupersession = & (Join-Path $scriptRoot `
+        'New-DurableReviewMilestoneRevisionCumulativeCorrectionReceipt.ps1') `
+        -RunDirectory $combinedCumulativeRun `
+        -AuthorizationReceiptPath $combinedAuthorizationPath `
+        -SelectionMaterialPath $combinedSelectionPath `
+        -AuthorizationMaterialPath $combinedAuthorizationMaterial `
+        -CumulativeCorrectionKey 'controller:revision-1-combined-supersession' |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$combinedSupersession.schema_version -eq '1.0' -and
+        @($combinedSupersession.cumulative_correction_sources).Count -eq 2 -and
+        (@($combinedSupersession.cumulative_correction_sources |
+            ForEach-Object { [int]$_.restored_occurrence_count }) |
+            Measure-Object -Sum).Sum -eq 1 -and
+        $combinedEventsBefore.Count + 2 -eq @(
+            Read-OrchestrationJournal $combinedEventsPath
+        ).Count
+    ) 'Lifecycle correction plus cumulative supersession must restore one exact occurrence.'
+    Assert-True (
+        (Get-FileHash -LiteralPath $combinedResultPath -Algorithm SHA256).Hash -eq
+            $combinedOldResultHash -and
+        (Get-FileHash -LiteralPath $combinedDispositionPath -Algorithm SHA256).Hash -eq
+            $combinedOldDispositionHash -and
+        $combinedPrefixHash -ne (Get-FileHash -LiteralPath $combinedEventsPath `
+            -Algorithm SHA256).Hash
+    ) 'Combined supersession must preserve current receipts and append one event.'
+    $combinedSupersessionEvent = @(
+        Read-OrchestrationJournal $combinedEventsPath | Where-Object {
+            [string]$_.event -eq 'milestone-revision-cumulative-corrected'
+        }
+    )
+    Assert-True (
+        $combinedSupersessionEvent.Count -eq 1 -and
+        $null -eq $combinedSupersessionEvent[0].node_id -and
+        [string]$combinedSupersessionEvent[0].status -eq 'planned'
+    ) 'Combined supersession must remain non-state.'
+    $combinedSelectionPathEffective = Join-Path $combinedCumulativeRun `
+        ([string]$combinedSupersession.effective_selection_material_path)
+    $combinedSelection = & (Join-Path $scriptRoot `
+        'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1') `
+        -RunDirectory $combinedCumulativeRun `
+        -AuthorizationReceiptPath $combinedAuthorizationPath `
+        -SelectionMaterialPath $combinedSelectionPathEffective `
+        -SelectionKey $authorizedSelectionKey |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$combinedSelection.schema_version -eq '1.6' -and
+        [string]$combinedSelection.lifecycle_correction_receipt_hash -eq
+            [string]$combinedLifecycleCorrection.receipt_hash -and
+        [string]$combinedSelection.cumulative_correction_receipt_hash -eq
+            [string]$combinedSupersession.receipt_hash
+    ) 'Combined selection must bind both correction receipts.'
+    $combinedBlocked = $false
+    try {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $combinedCumulativeRun | Out-Null
+    } catch { $combinedBlocked = $true }
+    Assert-True $combinedBlocked (
+        'Combined correction and supersession must not satisfy main acceptance.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot `
+            'New-DurableReviewMilestoneRevisionCumulativeCorrectionReceipt.ps1') `
+            -RunDirectory $combinedCumulativeRun `
+            -AuthorizationReceiptPath $combinedAuthorizationPath `
+            -SelectionMaterialPath $combinedSelectionPath `
+            -AuthorizationMaterialPath $combinedAuthorizationMaterial `
+            -CumulativeCorrectionKey 'controller:revision-1-combined-replay' |
+            Out-Null
+    } 'unsuperseded authorization' 'A combined cumulative supersession cannot be replayed.'
+    $noLifecycleRun = Join-Path $testRoot 'cumulative-without-lifecycle-correction'
+    Copy-Item -LiteralPath $revisionRun -Destination $noLifecycleRun -Recurse
+    $noLifecycleBefore = (Get-FileHash -LiteralPath (
+        Join-Path $noLifecycleRun 'events.jsonl'
+    ) -Algorithm SHA256).Hash
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot `
+            'New-DurableReviewMilestoneRevisionCumulativeCorrectionReceipt.ps1') `
+            -RunDirectory $noLifecycleRun `
+            -AuthorizationReceiptPath (Join-Path $noLifecycleRun `
+                $revisionAuthorizationRelative) `
+            -SelectionMaterialPath (Join-Path $noLifecycleRun `
+                'materials/method-1-revision-1-selection.json') `
+            -AuthorizationMaterialPath (Join-Path $noLifecycleRun `
+                'materials/method-1-revision-1-controller-authorization.md') `
+            -CumulativeCorrectionKey 'controller:combined-without-lifecycle' |
+            Out-Null
+    } 'exact lifecycle correction' (
+        'Combined supersession must require the exact lifecycle correction.'
+    )
+    Assert-True (
+        $noLifecycleBefore -eq (Get-FileHash -LiteralPath (
+            Join-Path $noLifecycleRun 'events.jsonl'
+        ) -Algorithm SHA256).Hash
+    ) 'A missing lifecycle correction must fail before journal write.'
+    $combinedMutationRun = Join-Path $testRoot `
+        'combined-supersession-restored-text-mutation'
+    Copy-Item -LiteralPath $combinedCumulativeRun `
+        -Destination $combinedMutationRun -Recurse
+    $combinedMutationEventsPath = Join-Path $combinedMutationRun 'events.jsonl'
+    $combinedMutationEvents = @(Read-OrchestrationJournal $combinedMutationEventsPath)
+    if ([string]$combinedMutationEvents[-1].event -eq
+        'milestone-revision-selected') {
+        $selectionReceiptRelative = [string]$combinedMutationEvents[-1].
+            milestone_activation_receipt_path
+        $selectionReceiptPath = Join-Path $combinedMutationRun `
+            $selectionReceiptRelative
+        if (Test-Path -LiteralPath $selectionReceiptPath -PathType Leaf) {
+            Remove-Item -LiteralPath $selectionReceiptPath -Force
+        }
+        $combinedMutationEvents = @(
+            $combinedMutationEvents | Select-Object -SkipLast 1
+        )
+        @($combinedMutationEvents | ForEach-Object {
+            $_ | ConvertTo-Json -Compress -Depth 100
+        }) | Set-Content -LiteralPath $combinedMutationEventsPath
+    }
+    $combinedMutationReceipt = @(
+        Get-ChildItem -LiteralPath (Join-Path $combinedMutationRun 'receipts') `
+            -File -Filter '*.cumulative-correction.json'
+    )[0].FullName
+    Resign-RevisionInventorySupersessionTail -Run $combinedMutationRun `
+        -ReceiptMutation {
+            param($receipt)
+            $restored = @($receipt.cumulative_correction_sources | Where-Object {
+                [int]$_.restored_occurrence_count -gt 0
+            })[0]
+            $restored.restored_occurrences[0].pending_finding.text =
+                'forged combined occurrence text'
+        }
+    Assert-ThrowsLike {
+        Read-DurableReviewMilestoneRevisionCumulativeCorrection `
+            -Path $combinedMutationReceipt -RunDirectory $combinedMutationRun |
+            Out-Null
+    } 'changed finding status, evidence, or effective artifacts' (
+        'A re-signed combined supersession with changed restored text must fail closed.'
+    )
 
     $partialCorrectionRun = Join-Path $testRoot (
         'revision-lifecycle-correction-partial-source'

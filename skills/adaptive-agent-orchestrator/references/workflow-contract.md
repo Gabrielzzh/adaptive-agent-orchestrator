@@ -368,6 +368,26 @@ correction fails before write. Selection schema 1.4 revalidates both the
 original lifecycle pointers and the superseded cumulative artifacts; completion
 continues to block on open P0/P1 and missing main-owner acceptance.
 
+If the same revision already has the exact whole-source lifecycle correction,
+do not use the standalone command above. Use the dedicated combined command:
+
+```powershell
+pwsh -File scripts/New-DurableReviewMilestoneRevisionCumulativeCorrectionReceipt.ps1 `
+  -RunDirectory <run> `
+  -AuthorizationReceiptPath <run>/receipts/<revision-authorization>.json `
+  -SelectionMaterialPath <run>/materials/<current-revision-selection>.json `
+  -AuthorizationMaterialPath <run>/materials/<supersession-authorization>.md `
+  -CumulativeCorrectionKey "controller:<stable-combined-reference>"
+```
+
+This command requires the exact lifecycle-correction receipt/event, preserves
+both prior and current source-specific result/disposition sets, and appends
+one additional non-state cumulative event. It emits combined selection
+material only; it cannot rewrite lifecycle state, alter an occurrence, omit a
+source, or change the checkpoint, source, role, thread, or authorization key.
+Selection schema 1.6 consumes and revalidates both receipts. Open P0/P1 and
+missing main-owner acceptance remain blocking.
+
 If and only if every source's `completed` event binds its result, every
 `adopted` event binds its disposition, and every `validated` event mistakenly
 repeats that result pointer, append one whole-source-set correction before
@@ -394,15 +414,19 @@ hashes. It appends a non-state event: it cannot change a source state, resolve a
 finding, resend review, or replace main acceptance. Partial, repeated, forked,
 cross-run/source/thread/revision/checkpoint, artifact-drifted, or differently
 shaped corrections fail before journal write. Selection schema 1.2 binds and
-revalidates this correction together with the original events.
+revalidates this correction together with the original events. For a combined
+lifecycle correction plus cumulative supersession, selection schema 1.6 is
+required instead.
 
 When the same authorized revision legitimately selects a verified replacement,
 the correction may be consumed only by the dedicated selection schema 1.5.
 That schema must additionally revalidate the replacement continuity/recovery/
 re-arm chain and bind the selected replacement thread, lifecycle events, and
 correction receipt/event exactly. Ordinary replacement selection remains schema
-1.3 and still rejects any lifecycle correction; correction and inventory
-supersession cannot be combined.
+1.3 and still rejects any lifecycle correction. A combined correction and
+inventory supersession is allowed only through the dedicated schema 1.6 path;
+standalone inventory supersession and lifecycle correction remain mutually
+exclusive.
 
 Selection rejects partial source sets, excluded chains, cross-source/thread or
 cross-checkpoint substitutions, and any prior occurrence that disappears or
