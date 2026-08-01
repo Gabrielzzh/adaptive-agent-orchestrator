@@ -548,6 +548,71 @@ function Resign-RevisionLifecycleCorrectionTail {
     }) | Set-Content -LiteralPath $eventsPath -Encoding utf8
 }
 
+function Resign-RevisionInventorySupersessionTail {
+    param(
+        [Parameter(Mandatory)][string] $Run,
+        [Parameter(Mandatory)][scriptblock] $ReceiptMutation
+    )
+    $receiptFiles = @(
+        Get-ChildItem -LiteralPath (Join-Path $Run 'receipts') -File |
+            Where-Object { $_.Name -like '*.inventory-supersession.json' }
+    )
+    if ($receiptFiles.Count -ne 1) {
+        throw 'Inventory supersession fixture needs exactly one receipt.'
+    }
+    $receiptPath = $receiptFiles[0].FullName
+    $receipt = Get-Content -LiteralPath $receiptPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    & $ReceiptMutation $receipt
+    $receipt.source_supersessions_hash = Get-TextSha256 (
+        ConvertTo-Json -InputObject @($receipt.source_supersessions) `
+            -Compress -Depth 100
+    )
+    $receipt.Remove('receipt_hash')
+    $receipt.receipt_hash = Get-TextSha256 (
+        $receipt | ConvertTo-Json -Compress -Depth 100
+    )
+    $receipt | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $receiptPath -Encoding utf8
+
+    $eventsPath = Join-Path $Run 'events.jsonl'
+    $events = @(
+        Get-Content -LiteralPath $eventsPath | ForEach-Object {
+            $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+        }
+    )
+    $eventIndex = [Array]::FindIndex(
+        [object[]]$events,
+        [Predicate[object]]{
+            param($event)
+            [string]$event.event -eq
+                'milestone-revision-inventory-superseded'
+        }
+    )
+    if ($eventIndex -ne ($events.Count - 1)) {
+        throw 'Inventory supersession mutation fixture requires a tail event.'
+    }
+    $events[$eventIndex].milestone_activation_receipt_hash =
+        [string]$receipt.receipt_hash
+    $events[$eventIndex].milestone_revision_authorization_receipt_hash =
+        [string]$receipt.authorization_receipt_hash
+    $events[$eventIndex].milestone_revision_checkpoint_hash =
+        [string]$receipt.checkpoint_material_hash
+    $events[$eventIndex].milestone_revision_input_hash =
+        [string]$receipt.input_manifest_hash
+    $events[$eventIndex].milestone_revision_selection_key =
+        [string]$receipt.selection_key
+    $events[$eventIndex].idempotency_key = [string]$receipt.supersession_key
+    $events[$eventIndex].request_fingerprint = [string]$receipt.receipt_hash
+    $events[$eventIndex].Remove('hash')
+    $events[$eventIndex].hash = Get-OrchestrationEventHash (
+        [pscustomobject]$events[$eventIndex]
+    )
+    @($events | ForEach-Object {
+        [pscustomobject]$_ | ConvertTo-Json -Compress -Depth 100
+    }) | Set-Content -LiteralPath $eventsPath -Encoding utf8
+}
+
 function Resign-RevisionAuthorizationTail {
     param(
         [Parameter(Mandatory)][string] $Run,
@@ -2547,6 +2612,449 @@ try {
         }
     ) | ConvertTo-Json -Depth 20 |
         Set-Content -LiteralPath $revision2SelectionMaterial
+
+    # A correct lifecycle can still be unusable when the caller builds the
+    # current result/disposition from only the presently open finding and drops
+    # a previously resolved source occurrence. The repair must be one
+    # append-only, all-source, non-state supersession derived from immutable
+    # predecessor/current receipts; it may not let the caller rewrite findings.
+    $inventoryOmissionRun = Join-Path $testRoot (
+        'same-revision-cumulative-inventory-omission'
+    )
+    Copy-Item -LiteralPath $consecutiveRevisionRun `
+        -Destination $inventoryOmissionRun -Recurse
+    $omittedFindingId = 'review-method-1-finding-r08'
+    $omittedResultPath = Join-Path $inventoryOmissionRun (
+        $revision2Review.result_path
+    )
+    $omittedResult = Get-Content -LiteralPath $omittedResultPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $omittedResult.pending_findings = @(
+        $omittedResult.pending_findings | Where-Object {
+            [string]$_.finding_id -ne $omittedFindingId
+        }
+    )
+    $omittedResult.Remove('receipt_hash')
+    $omittedResult.receipt_hash = Get-ThreadResultReceiptCanonicalHash `
+        -Receipt ([pscustomobject]$omittedResult)
+    $omittedResult | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $omittedResultPath -Encoding utf8
+    $omittedDispositionPath = Join-Path $inventoryOmissionRun (
+        $revision2Review.disposition_path
+    )
+    $omittedDisposition = Get-Content -LiteralPath $omittedDispositionPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $omittedDisposition.source_result_receipt_hash =
+        [string]$omittedResult.receipt_hash
+    $omittedDisposition.decisions = @(
+        $omittedDisposition.decisions | Where-Object {
+            [string]$_.source_finding_id -ne $omittedFindingId
+        }
+    )
+    $omittedDisposition.blocking_open = @(
+        $omittedDisposition.decisions | Where-Object {
+            [string]$_.severity -in @('P0', 'P1') -and
+            [string]$_.resolution_status -ne 'resolved'
+        } | ForEach-Object { [string]$_.finding }
+    )
+    $omittedDisposition.Remove('receipt_hash')
+    $omittedDisposition.receipt_hash = Get-TextSha256 (
+        $omittedDisposition | ConvertTo-Json -Compress -Depth 100
+    )
+    $omittedDisposition | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $omittedDispositionPath -Encoding utf8
+    $inventoryAuthorizationPath = Join-Path $inventoryOmissionRun (
+        $revision2AuthorizationRelative
+    )
+    $inventorySelectionMaterial = Join-Path $inventoryOmissionRun (
+        'materials/method-1-revision-2-selection.json'
+    )
+    $inventoryAuthorizationMaterial = Join-Path $inventoryOmissionRun (
+        'materials/method-1-revision-2-controller-authorization.md'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+        )) -RunDirectory $inventoryOmissionRun `
+            -AuthorizationReceiptPath $inventoryAuthorizationPath `
+            -SelectionMaterialPath $inventorySelectionMaterial `
+            -SelectionKey ([string]$revision2Authorization.selection_key) |
+            Out-Null
+    } 'did not conserve finding occurrence' (
+        'A same-revision cumulative inventory omission must reproduce before repair.'
+    )
+    $inventoryJournalBefore = (
+        Get-FileHash -LiteralPath (
+            Join-Path $inventoryOmissionRun 'events.jsonl'
+        ) -Algorithm SHA256
+    ).Hash
+    $omittedResultHashBefore = (
+        Get-FileHash -LiteralPath $omittedResultPath -Algorithm SHA256
+    ).Hash
+    $omittedDispositionHashBefore = (
+        Get-FileHash -LiteralPath $omittedDispositionPath -Algorithm SHA256
+    ).Hash
+    $inventorySupersession = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionInventorySupersessionReceipt.ps1'
+    )) -RunDirectory $inventoryOmissionRun `
+        -AuthorizationReceiptPath $inventoryAuthorizationPath `
+        -SelectionMaterialPath $inventorySelectionMaterial `
+        -AuthorizationMaterialPath $inventoryAuthorizationMaterial `
+        -SupersessionKey 'controller:revision-2-inventory-supersession' |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$inventorySupersession.schema_version -eq '1.0' -and
+        @($inventorySupersession.source_supersessions).Count -eq 2 -and
+        (@($inventorySupersession.source_supersessions |
+            ForEach-Object { [int]$_.restored_occurrence_count }) |
+            Measure-Object -Sum).Sum -eq 1
+    ) (
+        'Inventory supersession must restore exactly the omitted occurrence ' +
+        'while binding every required source.'
+    )
+    Assert-True (
+        $omittedResultHashBefore -eq (
+            Get-FileHash -LiteralPath $omittedResultPath -Algorithm SHA256
+        ).Hash -and
+        $omittedDispositionHashBefore -eq (
+            Get-FileHash -LiteralPath $omittedDispositionPath -Algorithm SHA256
+        ).Hash -and
+        $inventoryJournalBefore -ne (
+            Get-FileHash -LiteralPath (
+                Join-Path $inventoryOmissionRun 'events.jsonl'
+            ) -Algorithm SHA256
+        ).Hash
+    ) (
+        'Inventory supersession must preserve old receipts and append only one ' +
+        'non-state journal event.'
+    )
+    $inventoryEvent = @(
+        Read-OrchestrationJournal (Join-Path $inventoryOmissionRun 'events.jsonl') |
+            Where-Object {
+                [string]$_.event -eq
+                    'milestone-revision-inventory-superseded'
+            }
+    )
+    Assert-True (
+        $inventoryEvent.Count -eq 1 -and
+        $null -eq $inventoryEvent[0].node_id -and
+        $null -eq $inventoryEvent[0].prior_state -and
+        [string]$inventoryEvent[0].status -eq 'planned'
+    ) 'Inventory supersession must not mutate any source lifecycle state.'
+    $reviewSupersession = @(
+        $inventorySupersession.source_supersessions | Where-Object {
+            [string]$_.source_node_id -eq 'review'
+        }
+    )[0]
+    $supersededReviewDisposition = Get-Content -LiteralPath (
+        Join-Path $inventoryOmissionRun (
+            [string]$reviewSupersession.superseded_binding.
+                disposition_receipt_path
+        )
+    ) -Raw | ConvertFrom-Json -Depth 100
+    $restoredDecision = @(
+        $supersededReviewDisposition.decisions | Where-Object {
+            [string]$_.source_finding_id -eq $omittedFindingId
+        }
+    )
+    $previousReviewDisposition = Get-Content -LiteralPath (
+        Join-Path $inventoryOmissionRun (
+            [string]$reviewSupersession.previous_binding.
+                disposition_receipt_path
+        )
+    ) -Raw | ConvertFrom-Json -Depth 100
+    $previousRestoredDecision = @(
+        $previousReviewDisposition.decisions | Where-Object {
+            [string]$_.source_finding_id -eq $omittedFindingId
+        }
+    )
+    Assert-True (
+        $restoredDecision.Count -eq 1 -and
+        $previousRestoredDecision.Count -eq 1 -and
+        (ConvertTo-Json -InputObject $restoredDecision[0] `
+            -Compress -Depth 100) -ceq
+        (ConvertTo-Json -InputObject $previousRestoredDecision[0] `
+            -Compress -Depth 100)
+    ) (
+        'A restored occurrence must retain its exact identity, status, and evidence.'
+    )
+    $supersededReviewResult = Get-Content -LiteralPath (
+        Join-Path $inventoryOmissionRun (
+            [string]$reviewSupersession.superseded_binding.result_receipt_path
+        )
+    ) -Raw | ConvertFrom-Json -Depth 100
+    $currentReviewResult = Get-Content -LiteralPath $omittedResultPath -Raw |
+        ConvertFrom-Json -Depth 100
+    $currentReviewDisposition =
+        Get-Content -LiteralPath $omittedDispositionPath -Raw |
+            ConvertFrom-Json -Depth 100
+    $existingFindingId = 'review-method-1-finding'
+    $currentFinding = @($currentReviewResult.pending_findings | Where-Object {
+        [string]$_.finding_id -eq $existingFindingId
+    })[0]
+    $effectiveFinding = @(
+        $supersededReviewResult.pending_findings | Where-Object {
+            [string]$_.finding_id -eq $existingFindingId
+        }
+    )[0]
+    $currentDecision = @($currentReviewDisposition.decisions | Where-Object {
+        [string]$_.source_finding_id -eq $existingFindingId
+    })[0]
+    $effectiveDecision = @(
+        $supersededReviewDisposition.decisions | Where-Object {
+            [string]$_.source_finding_id -eq $existingFindingId
+        }
+    )[0]
+    Assert-True (
+        (ConvertTo-Json -InputObject $currentFinding -Compress -Depth 100) -ceq
+            (ConvertTo-Json -InputObject $effectiveFinding -Compress -Depth 100) -and
+        (ConvertTo-Json -InputObject $currentDecision -Compress -Depth 100) -ceq
+            (ConvertTo-Json -InputObject $effectiveDecision -Compress -Depth 100)
+    ) (
+        'Inventory supersession must preserve every existing current finding ' +
+        'and decision exactly.'
+    )
+    $inventorySupersededSnapshot = Join-Path $testRoot (
+        'same-revision-cumulative-inventory-superseded'
+    )
+    Copy-Item -LiteralPath $inventoryOmissionRun `
+        -Destination $inventorySupersededSnapshot -Recurse
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+        )) -RunDirectory $inventoryOmissionRun `
+            -AuthorizationReceiptPath $inventoryAuthorizationPath `
+            -SelectionMaterialPath $inventorySelectionMaterial `
+            -SelectionKey ([string]$revision2Authorization.selection_key) |
+            Out-Null
+    } 'does not use its bound inventory supersession material' (
+        'Selection cannot ignore the superseded cumulative material.'
+    )
+    $supersededSelectionMaterial = Join-Path $inventoryOmissionRun (
+        [string]$inventorySupersession.superseded_selection_material_path
+    )
+    $inventorySelection = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+    )) -RunDirectory $inventoryOmissionRun `
+        -AuthorizationReceiptPath $inventoryAuthorizationPath `
+        -SelectionMaterialPath $supersededSelectionMaterial `
+        -SelectionKey ([string]$revision2Authorization.selection_key) |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$inventorySelection.schema_version -eq '1.4' -and
+        [string]$inventorySelection.inventory_supersession_receipt_hash -eq
+            [string]$inventorySupersession.receipt_hash -and
+        @($inventorySelection.source_bindings).Count -eq 2
+    ) 'Selection must bind and revalidate the complete supersession chain.'
+    $inventorySelectionReceiptPath = Join-Path $inventoryOmissionRun (
+        'receipts/durable-review-milestone.' +
+        "$($revision2Authorization.milestone_id).revision-" +
+        "$($revision2Authorization.revision_id).selection.json"
+    )
+    $cacheToken = Enter-OrchestrationValidationContext `
+        -RunDirectory $inventoryOmissionRun
+    $cacheSucceeded = $false
+    try {
+        $firstCachedSelection =
+            Read-DurableReviewMilestoneRevisionSelection `
+                -Path $inventorySelectionReceiptPath `
+                -RunDirectory $inventoryOmissionRun
+        $firstCachedSelection.source_bindings[0].source_node_id =
+            'memory-only-mutation'
+        $secondCachedSelection =
+            Read-DurableReviewMilestoneRevisionSelection `
+                -Path $inventorySelectionReceiptPath `
+                -RunDirectory $inventoryOmissionRun
+        Assert-True (
+            [string]$secondCachedSelection.source_bindings[0].source_node_id -ne
+                'memory-only-mutation'
+        ) 'The validation cache must return a serialized verified-object copy.'
+        $cacheSucceeded = $true
+    } finally {
+        Exit-OrchestrationValidationContext -Token $cacheToken `
+            -ValidateSnapshot:$cacheSucceeded
+    }
+    Assert-True ($null -eq $script:OrchestrationValidationContext) (
+        'A successful top-level validation must clear its context.'
+    )
+
+    $cacheIsolationRun = Join-Path $testRoot (
+        'same-process-validation-cache-isolation'
+    )
+    Copy-Item -LiteralPath $inventoryOmissionRun `
+        -Destination $cacheIsolationRun -Recurse
+    $cacheIsolationSelectionPath = Join-Path $cacheIsolationRun (
+        [IO.Path]::GetRelativePath(
+            $inventoryOmissionRun, $inventorySelectionReceiptPath
+        )
+    )
+    Read-DurableReviewMilestoneRevisionSelection `
+        -Path $cacheIsolationSelectionPath -RunDirectory $cacheIsolationRun |
+        Out-Null
+    $mutatedSelection = Get-Content -LiteralPath $cacheIsolationSelectionPath `
+        -Raw | ConvertFrom-Json -Depth 100 -DateKind String
+    $mutatedSelection.created_at_utc = '2099-01-01T00:00:00.0000000Z'
+    $mutatedSelection | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $cacheIsolationSelectionPath -Encoding utf8
+    Assert-ThrowsLike {
+        Read-DurableReviewMilestoneRevisionSelection `
+            -Path $cacheIsolationSelectionPath -RunDirectory $cacheIsolationRun |
+            Out-Null
+    } 'receipt hash mismatch' (
+        'A second top-level call in the same process must not use stale cache data.'
+    )
+    Assert-True ($null -eq $script:OrchestrationValidationContext) (
+        'A failed top-level validation must clear its context.'
+    )
+
+    $toctouRun = Join-Path $testRoot 'validation-context-toctou'
+    Copy-Item -LiteralPath $inventoryOmissionRun -Destination $toctouRun -Recurse
+    $toctouSelectionPath = Join-Path $toctouRun (
+        [IO.Path]::GetRelativePath(
+            $inventoryOmissionRun, $inventorySelectionReceiptPath
+        )
+    )
+    Assert-ThrowsLike {
+        $toctouToken = Enter-OrchestrationValidationContext `
+            -RunDirectory $toctouRun
+        $toctouSucceeded = $false
+        try {
+            Read-DurableReviewMilestoneRevisionSelection `
+                -Path $toctouSelectionPath -RunDirectory $toctouRun |
+                Out-Null
+            Add-Content -LiteralPath $toctouSelectionPath -Value ''
+            $toctouSucceeded = $true
+        } finally {
+            Exit-OrchestrationValidationContext -Token $toctouToken `
+                -ValidateSnapshot:$toctouSucceeded
+        }
+    } 'inputs changed during verification' (
+        'A bound input mutation before top-level exit must fail the TOCTOU check.'
+    )
+    Assert-True ($null -eq $script:OrchestrationValidationContext) (
+        'A TOCTOU rejection must clear its validation context.'
+    )
+
+    $aliasRun = Join-Path $testRoot 'validation-context-same-content-alias'
+    Copy-Item -LiteralPath $inventoryOmissionRun -Destination $aliasRun -Recurse
+    $canonicalAliasSource = Join-Path $aliasRun (
+        [IO.Path]::GetRelativePath(
+            $inventoryOmissionRun, $inventorySelectionReceiptPath
+        )
+    )
+    $sameContentAlias = Join-Path (Join-Path $aliasRun 'receipts') (
+        'same-content-alias.selection.json'
+    )
+    Copy-Item -LiteralPath $canonicalAliasSource -Destination $sameContentAlias
+    Assert-ThrowsLike {
+        Read-DurableReviewMilestoneRevisionSelection -Path $sameContentAlias `
+            -RunDirectory $aliasRun | Out-Null
+    } 'lacks its exact journal event' (
+        'A same-content receipt at a different path must not satisfy canonical binding.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $inventoryOmissionRun | Out-Null
+    } 'unresolved P0' (
+        'Supersession and selection must retain open P0/P1 completion blockers.'
+    )
+
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionInventorySupersessionReceipt.ps1'
+        )) -RunDirectory $inventorySupersededSnapshot `
+            -AuthorizationReceiptPath (Join-Path $inventorySupersededSnapshot (
+                $revision2AuthorizationRelative
+            )) -SelectionMaterialPath (Join-Path $inventorySupersededSnapshot (
+                'materials/method-1-revision-2-selection.json'
+            )) -AuthorizationMaterialPath (Join-Path $inventorySupersededSnapshot (
+                'materials/method-1-revision-2-controller-authorization.md'
+            )) -SupersessionKey 'controller:duplicate-inventory-supersession' |
+            Out-Null
+    } 'unsuperseded authorization' (
+        'A revision inventory may be superseded only once.'
+    )
+    $partialInventoryRun = Join-Path $testRoot (
+        'same-revision-cumulative-inventory-partial-source'
+    )
+    Copy-Item -LiteralPath $consecutiveRevisionRun `
+        -Destination $partialInventoryRun -Recurse
+    $partialSelectionPath = Join-Path $partialInventoryRun (
+        'materials/method-1-revision-2-selection.json'
+    )
+    @([ordered]@{
+        source_node_id = 'review'
+        disposition_receipt_path = $revision2Review.disposition_path
+    }) | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $partialSelectionPath
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionInventorySupersessionReceipt.ps1'
+        )) -RunDirectory $partialInventoryRun `
+            -AuthorizationReceiptPath (Join-Path $partialInventoryRun (
+                $revision2AuthorizationRelative
+            )) -SelectionMaterialPath $partialSelectionPath `
+            -AuthorizationMaterialPath (Join-Path $partialInventoryRun (
+                'materials/method-1-revision-2-controller-authorization.md'
+            )) -SupersessionKey 'controller:partial-inventory-supersession' |
+            Out-Null
+    } 'requires every source' (
+        'A partial-source inventory supersession must fail before journal write.'
+    )
+    $statusMutationRun = Join-Path $testRoot (
+        'same-revision-cumulative-inventory-status-mutation'
+    )
+    Copy-Item -LiteralPath $inventorySupersededSnapshot `
+        -Destination $statusMutationRun -Recurse
+    Resign-RevisionInventorySupersessionTail -Run $statusMutationRun `
+        -ReceiptMutation {
+            param($receipt)
+            $restoredSource = @(
+                $receipt.source_supersessions | Where-Object {
+                    [int]$_.restored_occurrence_count -gt 0
+                }
+            )[0]
+            $restoredSource.restored_occurrences[0].
+                decision.resolution_status = 'resolved'
+        }
+    $statusReceiptPath = @(
+        Get-ChildItem -LiteralPath (Join-Path $statusMutationRun 'receipts') `
+            -File -Filter '*.inventory-supersession.json'
+    )[0].FullName
+    Assert-ThrowsLike {
+        Read-DurableReviewMilestoneRevisionInventorySupersession `
+            -Path $statusReceiptPath -RunDirectory $statusMutationRun |
+            Out-Null
+    } 'finding status, evidence, or effective artifacts' (
+        'A re-signed restored status change must fail closed.'
+    )
+    $crossSourceMutationRun = Join-Path $testRoot (
+        'same-revision-cumulative-inventory-cross-source'
+    )
+    Copy-Item -LiteralPath $inventorySupersededSnapshot `
+        -Destination $crossSourceMutationRun -Recurse
+    Resign-RevisionInventorySupersessionTail -Run $crossSourceMutationRun `
+        -ReceiptMutation {
+            param($receipt)
+            $movedSource = @(
+                $receipt.source_supersessions | Where-Object {
+                    [string]$_.source_node_id -ne 'domain'
+                }
+            )[0]
+            $movedSource.source_node_id = 'domain'
+        }
+    $crossSourceReceiptPath = @(
+        Get-ChildItem -LiteralPath (Join-Path $crossSourceMutationRun 'receipts') `
+            -File -Filter '*.inventory-supersession.json'
+    )[0].FullName
+    Assert-ThrowsLike {
+        Read-DurableReviewMilestoneRevisionInventorySupersession `
+            -Path $crossSourceReceiptPath -RunDirectory $crossSourceMutationRun |
+            Out-Null
+    } 'is not unique' (
+        'A re-signed cross-source inventory move must fail closed.'
+    )
+
     $revision2Selection = & (Join-Path $scriptRoot (
         'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
     )) -RunDirectory $consecutiveRevisionRun `

@@ -298,6 +298,12 @@ For the narrowly defined milestone-revision validated-pointer mistake, append
 the full-source lifecycle correction receipt and its non-state event. Never
 rewrite the original lifecycle events or use correction for another error
 shape.
+For the separate cumulative-inventory omission shape, append one full-source
+inventory supersession and its non-state event. It may only copy omitted
+occurrences exactly from the prior selected receipts into new cumulative
+artifacts; current objects, old receipts, lifecycle state, and open blockers
+remain unchanged. Lifecycle correction and inventory supersession are mutually
+exclusive for a revision.
 
 The journal uses ordered sequence numbers and a SHA-256 hash chain. Treat a
 sequence gap or hash mismatch as corruption and stop recovery. `unknown` is

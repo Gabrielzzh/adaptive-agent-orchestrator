@@ -25,6 +25,8 @@ foreach ($candidate in @($AuthorizationReceiptPath, $SelectionMaterialPath)) {
         throw 'Milestone revision selection inputs must be files inside the run.'
     }
 }
+$validationToken = Enter-OrchestrationValidationContext -RunDirectory $runRoot
+try {
 $authorization = Read-DurableReviewMilestoneRevisionAuthorization `
     -Path $AuthorizationReceiptPath -RunDirectory $runRoot
 $authorizationRelativePath = [IO.Path]::GetRelativePath(
@@ -72,6 +74,48 @@ if ((Test-Path -LiteralPath $correctionReceiptPath -PathType Leaf) -or
     $lifecycleCorrection =
         Read-DurableReviewMilestoneRevisionLifecycleCorrection `
             -Path $correctionReceiptPath -RunDirectory $runRoot
+}
+$supersessionReceiptName = (
+    "durable-review-milestone.$($authorization.milestone_id)." +
+    "revision-$($authorization.revision_id).inventory-supersession.json"
+)
+$supersessionReceiptPath = Join-Path (
+    Join-Path $runRoot 'receipts'
+) $supersessionReceiptName
+$supersessionEvents = @($events | Where-Object {
+    [string]$_.event -eq 'milestone-revision-inventory-superseded' -and
+    [string]$_.milestone_revision_id -eq [string]$authorization.revision_id
+})
+$inventorySupersession = $null
+if ((Test-Path -LiteralPath $supersessionReceiptPath -PathType Leaf) -or
+    $supersessionEvents.Count -gt 0) {
+    if ($null -ne $lifecycleCorrection) {
+        throw (
+            'Milestone revision selection cannot combine lifecycle correction ' +
+            'and inventory supersession.'
+        )
+    }
+    if (-not (Test-Path -LiteralPath $supersessionReceiptPath -PathType Leaf) -or
+        $supersessionEvents.Count -ne 1) {
+        throw 'Milestone revision inventory supersession is missing or forked.'
+    }
+    $inventorySupersession =
+        Read-DurableReviewMilestoneRevisionInventorySupersession `
+            -Path $supersessionReceiptPath -RunDirectory $runRoot
+    $supersededSelectionPath = Get-RunLocalReceiptPath `
+        -RunDirectory $runRoot -RelativePath (
+            [string]$inventorySupersession.superseded_selection_material_path
+        ) -Label 'Superseded milestone revision selection material'
+    if ([IO.Path]::GetFullPath($SelectionMaterialPath) -cne
+            [IO.Path]::GetFullPath($supersededSelectionPath) -or
+        [string]$inventorySupersession.superseded_selection_material_hash -ne (
+            Get-FileHash -LiteralPath $SelectionMaterialPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()) {
+        throw (
+            'Milestone revision selection does not use its bound inventory ' +
+            'supersession material.'
+        )
+    }
 }
 $selectionItems = @(
     Get-Content -LiteralPath $SelectionMaterialPath -Raw |
@@ -194,8 +238,28 @@ foreach ($requiredSource in $requiredSources) {
             'replacement evidence.'
         )
     }
-    $resultPointer = "artifact:$($binding.result_receipt_path)"
-    $dispositionPointer = "artifact:$($binding.disposition_receipt_path)"
+    $evidenceBinding = $binding
+    if ($null -ne $inventorySupersession) {
+        $sourceSupersession = @(
+            $inventorySupersession.source_supersessions | Where-Object {
+                [string]$_.source_node_id -eq $sourceNodeId
+            }
+        )
+        if ($sourceSupersession.Count -ne 1 -or
+            (ConvertTo-Json -InputObject (
+                $sourceSupersession[0].superseded_binding
+            ) -Compress -Depth 100) -cne
+            (ConvertTo-Json -InputObject $binding -Compress -Depth 100)) {
+            throw (
+                "Milestone revision source '$sourceNodeId' inventory " +
+                'supersession binding changed.'
+            )
+        }
+        $evidenceBinding = $sourceSupersession[0].current_binding
+    }
+    $resultPointer = "artifact:$($evidenceBinding.result_receipt_path)"
+    $dispositionPointer =
+        "artifact:$($evidenceBinding.disposition_receipt_path)"
     if ($null -eq $lifecycleCorrection) {
         if ($resultPointer -notin @($completed.evidence) -or
             $dispositionPointer -notin @($validated.evidence) -or
@@ -318,7 +382,7 @@ foreach ($requiredSource in $requiredSources) {
 
 $lifecycleBindings = [Collections.Generic.List[object]]::new()
 foreach ($candidate in @($lifecycleCandidates)) {
-    if ($hasReplacement) {
+    if ($hasReplacement -or $null -ne $inventorySupersession) {
         $lifecycleBindings.Add($candidate)
     } else {
         $lifecycleBindings.Add([pscustomobject][ordered]@{
@@ -351,7 +415,9 @@ $relative = {
     [IO.Path]::GetRelativePath($runRoot, $Path).Replace('\', '/')
 }
 $payload = [ordered]@{
-    schema_version = if ($hasReplacement) {
+    schema_version = if ($null -ne $inventorySupersession) {
+        '1.4'
+    } elseif ($hasReplacement) {
         '1.3'
     } elseif ($null -eq $lifecycleCorrection) { '1.1' } else { '1.2' }
     run_id = [string]$run.run_id
@@ -410,11 +476,24 @@ if ($null -ne $lifecycleCorrection) {
     $payload.lifecycle_correction_event_hash =
         [string]$correctionEvents[0].hash
 }
+if ($null -ne $inventorySupersession) {
+    $payload.inventory_supersession_receipt_path =
+        "receipts/$supersessionReceiptName"
+    $payload.inventory_supersession_receipt_hash =
+        [string]$inventorySupersession.receipt_hash
+    $payload.inventory_supersession_event_sequence =
+        [int]$supersessionEvents[0].sequence
+    $payload.inventory_supersession_event_hash =
+        [string]$supersessionEvents[0].hash
+}
 $receipt = [ordered]@{}
 foreach ($key in $payload.Keys) { $receipt[$key] = $payload[$key] }
 $receipt.receipt_hash = Get-TextSha256 (
     $payload | ConvertTo-Json -Compress -Depth 100
 )
+} finally {
+    Exit-OrchestrationValidationContext -Token $validationToken
+}
 if (-not (Test-Path -LiteralPath $receiptDirectory -PathType Container)) {
     $null = New-Item -ItemType Directory -Path $receiptDirectory
 }
@@ -431,6 +510,8 @@ try {
         [string]$current[-1].hash -ne [string]$events[-1].hash) {
         throw 'The journal changed while revision selection was prepared.'
     }
+    Assert-OrchestrationValidationContextUnchanged `
+        -Context $validationToken.context -AllowAdditionalFiles
     Move-Item -LiteralPath $temp -Destination $receiptPath
     $event = New-MilestoneRevisionJournalEvent -Plan $plan -Run $run `
         -Events $current -RunDirectory $runRoot `

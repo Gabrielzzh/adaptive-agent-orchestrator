@@ -347,6 +347,13 @@ If every source's `completed` and `adopted` evidence is correct but each
 `validated` event repeated the result pointer, use the lifecycle correction
 command in [workflow-contract.md](references/workflow-contract.md). It appends
 one non-state correction for the full source set; no other error shape qualifies.
+If the lifecycle is correct but the current result/disposition files omitted
+older source occurrences, use the cumulative inventory supersession command in
+the workflow contract before selection. It derives one full-source, non-state
+replacement set from the prior selected and current signed receipts without
+overwriting either set. It may only restore omitted occurrences exactly; it
+cannot change an existing or restored finding's identity, severity, text/hash,
+status, or evidence, and it cannot be combined with lifecycle correction.
 The activation must also bind controller material that fixes the later
 main-owner acceptance key and evidence path/hash.
 If a reviewed milestone intentionally retains P0/P1 work assigned to the next

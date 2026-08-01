@@ -340,6 +340,34 @@ old checkpoint/input, moved across source/role/thread, or used to create a
 replacement-of-replacement. Open P0/P1 and missing main acceptance remain
 blocking.
 
+If every source has a correct post-authorization lifecycle but the current
+result/disposition files contain only the currently open findings, append
+exactly one cumulative inventory supersession before selection:
+
+```powershell
+pwsh -File scripts/New-DurableReviewMilestoneRevisionInventorySupersessionReceipt.ps1 `
+  -RunDirectory <run> `
+  -AuthorizationReceiptPath <run>/receipts/<revision-authorization>.json `
+  -SelectionMaterialPath <run>/materials/<current-revision-selection>.json `
+  -AuthorizationMaterialPath <run>/materials/<supersession-authorization>.md `
+  -SupersessionKey "controller:<stable-supersession-reference>"
+```
+
+The command derives, for every required source, new result/disposition files
+from the prior selected inventory plus the current signed inventory. It never
+overwrites either input. Missing source occurrences are copied mechanically
+with their exact source/canonical IDs, severity, text/hash, resolution status,
+and evidence; existing current occurrences remain byte-equivalent JSON
+objects. The receipt binds the same run, authorization, pre-bound selection
+key, journal head/count, checkpoint/input, source/role/thread set, re-arm, and
+`completed -> validated -> adopted` lifecycle. It appends one non-state event
+and emits the only selection material that may consume the supersession.
+Partial-source repair, repeat/fork, cross-source movement, artifact drift,
+replacement-of-replacement, lifecycle-state change, or mixing with lifecycle
+correction fails before write. Selection schema 1.4 revalidates both the
+original lifecycle pointers and the superseded cumulative artifacts; completion
+continues to block on open P0/P1 and missing main-owner acceptance.
+
 If and only if every source's `completed` event binds its result, every
 `adopted` event binds its disposition, and every `validated` event mistakenly
 repeats that result pointer, append one whole-source-set correction before
