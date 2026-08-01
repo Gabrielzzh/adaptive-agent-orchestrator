@@ -5281,27 +5281,10 @@ function Get-ReplacementMilestoneRevisionResultBinding {
         throw 'Replacement result milestone revision is already selected.'
     }
     $authorizationEvent = $authorizationEvents[0]
-    $rearmEvents = @($Events | Where-Object {
-        [string]$_.node_id -eq $SourceNodeId -and
-        [string]$_.role_id -eq [string]$node[0].role_id -and
-        [string]$_.thread_id -eq $ThreadId -and
-        [string]$_.prior_state -eq 'adopted' -and
-        [string]$_.status -eq 'running' -and
-        [int]$_.sequence -gt [int]$authorizationEvent.sequence -and
-        [string]$_.milestone_revision_id -eq
-            [string]$authorization.revision_id -and
-        [string]$_.milestone_revision_authorization_receipt_path -eq
-            $AuthorizationReceiptRelativePath -and
-        [string]$_.milestone_revision_authorization_receipt_hash -eq
-            [string]$authorization.receipt_hash -and
-        [string]$_.milestone_revision_checkpoint_hash -eq
-            $CheckpointMaterialHash -and
-        [string]$_.milestone_revision_input_hash -eq
-            [string]$authorization.input_manifest_hash
-    })
-    if ($rearmEvents.Count -ne 1) {
-        throw 'Replacement result lacks its exact milestone revision re-arm event.'
-    }
+    $rearmEvent = Get-DurableReviewMilestoneRevisionRearmEvent `
+        -RunDirectory $runRoot -Events $Events -Authorization $authorization `
+        -RequiredSource $requiredSource[0] `
+        -AuthorizationEventSequence ([int]$authorizationEvent.sequence)
     if (@($Events | Where-Object {
         [string]$_.node_id -eq $SourceNodeId -and
         [string]$_.thread_id -eq $ThreadId -and
@@ -5322,8 +5305,8 @@ function Get-ReplacementMilestoneRevisionResultBinding {
         authorization_receipt_hash = [string]$authorization.receipt_hash
         authorization_event_sequence = [int]$authorizationEvent.sequence
         authorization_event_hash = [string]$authorizationEvent.hash
-        rearm_event_sequence = [int]$rearmEvents[0].sequence
-        rearm_event_hash = [string]$rearmEvents[0].hash
+        rearm_event_sequence = [int]$rearmEvent.sequence
+        rearm_event_hash = [string]$rearmEvent.hash
         input_manifest_path = [string]$authorization.input_manifest_path
         input_manifest_hash = [string]$authorization.input_manifest_hash
     }
