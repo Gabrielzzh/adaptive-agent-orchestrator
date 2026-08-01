@@ -373,6 +373,11 @@ If and only if every source's `completed` event binds its result, every
 repeats that result pointer, append one whole-source-set correction before
 selection:
 
+The completed evidence set may additionally include only the raw capture path
+named and hash-bound by that result receipt. Validated and adopted retain one
+result/disposition artifact respectively; all three stages may retain only
+typed `test:`, `source:`, or `observation:` evidence, which correction preserves.
+
 ```powershell
 pwsh -File scripts/New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1 `
   -RunDirectory <run> `

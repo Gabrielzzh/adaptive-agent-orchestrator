@@ -1204,12 +1204,25 @@ try {
         @{
             id = 'review'
             result = $revisionReview.result_path
+            disposition = $revisionReview.disposition_path
         },
         @{
             id = 'domain'
             result = $revisionDomain.result_path
+            disposition = $revisionDomain.disposition_path
         }
     )) {
+        $resultReceipt = Get-Content -LiteralPath (
+            Join-Path $evidenceCorrectionRun $source.result
+        ) -Raw | ConvertFrom-Json -Depth 100 -DateKind String
+        $completedIndex = [Array]::FindLastIndex(
+            [object[]]$evidenceCorrectionEvents,
+            [Predicate[object]]{
+                param($event)
+                [string]$event.node_id -eq [string]$source.id -and
+                [string]$event.status -eq 'completed'
+            }
+        )
         $validatedIndex = [Array]::FindLastIndex(
             [object[]]$evidenceCorrectionEvents,
             [Predicate[object]]{
@@ -1217,6 +1230,22 @@ try {
                 [string]$event.node_id -eq [string]$source.id -and
                 [string]$event.status -eq 'validated'
             }
+        )
+        $adoptedIndex = [Array]::FindLastIndex(
+            [object[]]$evidenceCorrectionEvents,
+            [Predicate[object]]{
+                param($event)
+                [string]$event.node_id -eq [string]$source.id -and
+                [string]$event.status -eq 'adopted'
+            }
+        )
+        Assert-True ($completedIndex -ge 0 -and
+            $validatedIndex -ge 0 -and $adoptedIndex -ge 0) (
+            "The correction fixture needs all lifecycle events for '$($source.id)'."
+        )
+        $evidenceCorrectionEvents[$completedIndex].evidence = @(
+            "artifact:$($source.result)",
+            "artifact:$($resultReceipt.thread_read_path)"
         )
         Assert-True ($validatedIndex -ge 0) (
             "The correction fixture needs a validated event for '$($source.id)'."
@@ -1226,6 +1255,10 @@ try {
             "test:lifecycle-correction-extra-test-$($source.id)",
             "source:lifecycle-correction-extra-source-$($source.id)",
             "observation:lifecycle-correction-extra-observation-$($source.id)"
+        )
+        $evidenceCorrectionEvents[$adoptedIndex].evidence = @(
+            "artifact:$($source.disposition)",
+            "observation:lifecycle-correction-adopted-$($source.id)"
         )
     }
     for ($eventIndex = 0; $eventIndex -lt $evidenceCorrectionEvents.Count;
@@ -1383,6 +1416,134 @@ try {
             (Get-FileHash -LiteralPath $mutationEventsPath `
                 -Algorithm SHA256).Hash -eq $beforeFileHash
         ) "The '$($mutation.name)' rejection must not mutate the journal."
+    }
+    $completedEvidenceMutations = @(
+        @{
+            name = 'third-artifact'
+            build = {
+                param($source)
+                @(
+                    "artifact:$($source.result)",
+                    "artifact:$($source.raw)",
+                    'artifact:receipts/third-artifact.json'
+                )
+            }
+        },
+        @{
+            name = 'wrong-raw-path'
+            build = {
+                param($source)
+                @(
+                    "artifact:$($source.result)",
+                    'artifact:thread-reads/wrong.raw.json'
+                )
+            }
+        },
+        @{
+            name = 'raw-other-artifact'
+            build = {
+                param($source)
+                @(
+                    "artifact:$($source.result)",
+                    "artifact:$($source.disposition)"
+                )
+            }
+        },
+        @{
+            name = 'zero-result'
+            build = {
+                param($source)
+                @("artifact:$($source.raw)")
+            }
+        }
+    )
+    foreach ($mutation in $completedEvidenceMutations) {
+        $mutationRun = Join-Path $testRoot (
+            "revision-lifecycle-correction-completed-$($mutation.name)"
+        )
+        Copy-Item -LiteralPath $evidenceCorrectionBeforeRun `
+            -Destination $mutationRun -Recurse
+        $mutationEventsPath = Join-Path $mutationRun 'events.jsonl'
+        $mutationEvents = @(
+            Get-Content -LiteralPath $mutationEventsPath | ForEach-Object {
+                $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+            }
+        )
+        foreach ($source in @(
+            @{
+                id = 'review'
+                result = $revisionReview.result_path
+                disposition = $revisionReview.disposition_path
+            },
+            @{
+                id = 'domain'
+                result = $revisionDomain.result_path
+                disposition = $revisionDomain.disposition_path
+            }
+        )) {
+            $receipt = Get-Content -LiteralPath (
+                Join-Path $mutationRun $source.result
+            ) -Raw | ConvertFrom-Json -Depth 100 -DateKind String
+            $source.raw = [string]$receipt.thread_read_path
+            $completedIndex = [Array]::FindLastIndex(
+                [object[]]$mutationEvents,
+                [Predicate[object]]{
+                    param($event)
+                    [string]$event.node_id -eq [string]$source.id -and
+                    [string]$event.status -eq 'completed'
+                }
+            )
+            Assert-True ($completedIndex -ge 0) (
+                "The '$($mutation.name)' fixture needs a completed event."
+            )
+            $mutationEvents[$completedIndex].evidence = @(
+                & $mutation.build $source
+            )
+        }
+        for ($eventIndex = 0; $eventIndex -lt $mutationEvents.Count;
+            $eventIndex++) {
+            $mutationEvents[$eventIndex].prev_hash = if (
+                $eventIndex -eq 0
+            ) { $null } else {
+                [string]$mutationEvents[$eventIndex - 1].hash
+            }
+            $mutationEvents[$eventIndex].hash = Get-OrchestrationEventHash (
+                [pscustomobject]$mutationEvents[$eventIndex]
+            )
+        }
+        @($mutationEvents | ForEach-Object {
+            [pscustomobject]$_ | ConvertTo-Json -Compress -Depth 100
+        }) | Set-Content -LiteralPath $mutationEventsPath
+        $beforeCount = $mutationEvents.Count
+        $beforeHead = [string]$mutationEvents[-1].hash
+        $beforeFileHash = (Get-FileHash -LiteralPath $mutationEventsPath `
+            -Algorithm SHA256).Hash
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+            )) -RunDirectory $mutationRun `
+                -AuthorizationReceiptPath (
+                    Join-Path $mutationRun $revisionAuthorizationRelative
+                ) -SelectionMaterialPath (
+                    Join-Path $mutationRun (
+                        'materials/method-1-revision-1-selection.json'
+                    )
+                ) -AuthorizationMaterialPath (
+                    Join-Path $mutationRun (
+                        'materials/revision-lifecycle-correction-authorization.md'
+                    )
+                ) -CorrectionKey "controller:reject-completed-$($mutation.name)" |
+                Out-Null
+        } 'exact validated-result-pointer error shape' (
+            "The completed '$($mutation.name)' mutation must fail closed."
+        )
+        $afterEvents = @(Read-OrchestrationJournal $mutationEventsPath)
+        Assert-True (
+            $afterEvents.Count -eq $beforeCount -and
+            [string]$afterEvents[-1].hash -eq $beforeHead -and
+            (Get-FileHash -LiteralPath $mutationEventsPath `
+                -Algorithm SHA256).Hash -eq $beforeFileHash
+        ) "The completed '$($mutation.name)' rejection must not mutate the journal."
     }
     $evidenceCorrection = & (Join-Path $scriptRoot (
         'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'

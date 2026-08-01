@@ -5486,6 +5486,35 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
         }
         $resultPointer = "artifact:$($binding.result_receipt_path)"
         $dispositionPointer = "artifact:$($binding.disposition_receipt_path)"
+        $resultPath = Get-RunLocalReceiptPath `
+            -RunDirectory $runRoot -RelativePath $binding.result_receipt_path `
+            -Label 'Lifecycle correction result receipt'
+        $resultReceipt = Get-Content -LiteralPath $resultPath -Raw |
+            ConvertFrom-Json -Depth 100 -DateKind String
+        if ([string]$resultReceipt.receipt_hash -ne
+                [string]$binding.result_receipt_hash -or
+            (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+                [string]$binding.result_file_hash -or
+            [string]$resultReceipt.source_node_id -ne $sourceNodeId -or
+            [string]$resultReceipt.thread_id -ne
+                [string]$requiredSource.thread_id -or
+            [string]::IsNullOrWhiteSpace(
+                [string]$resultReceipt.thread_read_path
+            )) {
+            throw (
+                "Milestone revision lifecycle correction source " +
+                "'$sourceNodeId' result receipt changed."
+            )
+        }
+        $rawPointer = "artifact:$($resultReceipt.thread_read_path)"
+        $typedEvidencePattern = '^(test|source|observation):\S.+$'
+        $completedEvidence = @($completed.evidence)
+        $completedArtifacts = @($completedEvidence | Where-Object {
+            [string]$_ -match '^artifact:'
+        })
+        $completedNonArtifacts = @($completedEvidence | Where-Object {
+            [string]$_ -notmatch '^artifact:'
+        })
         $validatedEvidence = @($validated.evidence)
         $validatedArtifacts = @($validatedEvidence | Where-Object {
             [string]$_ -match '^artifact:'
@@ -5493,19 +5522,47 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
         $validatedNonArtifacts = @($validatedEvidence | Where-Object {
             [string]$_ -notmatch '^artifact:'
         })
-        if (@($completed.evidence).Count -ne 1 -or
-            [string]$completed.evidence[0] -cne $resultPointer -or
+        $adoptedEvidence = @($adopted.evidence)
+        $adoptedArtifacts = @($adoptedEvidence | Where-Object {
+            [string]$_ -match '^artifact:'
+        })
+        $adoptedNonArtifacts = @($adoptedEvidence | Where-Object {
+            [string]$_ -notmatch '^artifact:'
+        })
+        $completedResultCount = @($completedArtifacts | Where-Object {
+            [string]$_ -ceq $resultPointer
+        }).Count
+        $completedRawCount = @($completedArtifacts | Where-Object {
+            [string]$_ -cne $resultPointer -and
+            [string]$_ -eq $rawPointer
+        }).Count
+        $completedUnexpectedArtifacts = @($completedArtifacts | Where-Object {
+            [string]$_ -cne $resultPointer -and
+            [string]$_ -cne $rawPointer
+        })
+        if ($completedResultCount -ne 1 -or
+            $completedArtifacts.Count -notin @(1, 2) -or
+            $completedRawCount -ne ($completedArtifacts.Count - 1) -or
+            $completedUnexpectedArtifacts.Count -gt 0 -or
+            @($completedNonArtifacts | Where-Object {
+                [string]$_ -notmatch $typedEvidencePattern
+            }).Count -gt 0 -or
             $validatedArtifacts.Count -ne 1 -or
             [string]$validatedArtifacts[0] -cne $resultPointer -or
             @($validatedNonArtifacts | Where-Object {
-                [string]$_ -notmatch '^(test|source|observation):\S.+$'
+                [string]$_ -notmatch $typedEvidencePattern
             }).Count -gt 0 -or
-            @($adopted.evidence).Count -ne 1 -or
-            [string]$adopted.evidence[0] -cne $dispositionPointer) {
+            $adoptedArtifacts.Count -ne 1 -or
+            [string]$adoptedArtifacts[0] -cne $dispositionPointer -or
+            @($adoptedNonArtifacts | Where-Object {
+                [string]$_ -notmatch $typedEvidencePattern
+            }).Count -gt 0) {
             throw (
                 'Milestone revision lifecycle correction only accepts the ' +
-                'exact validated-result-pointer error shape: one result artifact ' +
-                'plus typed non-artifact evidence.'
+                'exact validated-result-pointer error shape: completed has one ' +
+                'result artifact plus its optional bound raw capture, validated ' +
+                'has one result artifact, adopted has one disposition artifact, ' +
+                'and all extra evidence is typed.'
             )
         }
         $computed = [pscustomobject][ordered]@{
