@@ -254,15 +254,20 @@ run, or resolution fails, do not launch; keep the work in the main agent.
 Before every launch, use
 `Resolve-WorkerCapacity.ps1` with observed active persistent and transient
 counts; registered but idle agents do not count. Automatically use the
-`economy` class only for bounded mechanical work and `standard` for ordinary
-judgment, implementation, writing, or review. Resolve concrete model IDs with
+`economy` class only for bounded mechanical work and `standard` for bounded
+ordinary implementation, research, writing, or testing. Architecture,
+ambiguous debugging, formal domain/dissent review, and adversarial acceptance
+use `strong`. Resolve concrete model IDs with
 [platform-codex.md](references/platform-codex.md). Treat experimental models as
 explicit-request-only. Terra additionally requires a concrete `user:` request
 pointer in the resolver call; a role description, cost rationale, or automatic
 teaming policy is not authorization. Before any model or effort escalation,
 explain the
 change and obtain user confirmation unless a bounded policy already authorizes
-it. Ultra always needs explicit per-node confirmation.
+it. Ultra always needs explicit per-node confirmation. Prefer Sol `max` for
+very hard bounded work. Ultra is a last resort because the current runtime
+couples it to automatic task delegation; it additionally needs a concrete node
+reason explaining why that delegation is useful.
 
 Never silently inherit the main agent's model. Resolve only models exposed by
 the destination runtime. If the capability default is unavailable, keep the
@@ -342,6 +347,13 @@ If every source's `completed` and `adopted` evidence is correct but each
 `validated` event repeated the result pointer, use the lifecycle correction
 command in [workflow-contract.md](references/workflow-contract.md). It appends
 one non-state correction for the full source set; no other error shape qualifies.
+If the lifecycle is correct but the current result/disposition files omitted
+older source occurrences, use the cumulative inventory supersession command in
+the workflow contract before selection. It derives one full-source, non-state
+replacement set from the prior selected and current signed receipts without
+overwriting either set. It may only restore omitted occurrences exactly; it
+cannot change an existing or restored finding's identity, severity, text/hash,
+status, or evidence, and it cannot be combined with lifecycle correction.
 The activation must also bind controller material that fixes the later
 main-owner acceptance key and evidence path/hash.
 If a reviewed milestone intentionally retains P0/P1 work assigned to the next
@@ -404,6 +416,26 @@ one same-role read-only replacement through
 `New-ReplacementContinuityReceipt.ps1`. A replacement result remains bound to
 the original logical source, is labeled `replacement`, and never claims the
 original task passed.
+
+If that 3/3 exhaustion happens after a first-milestone revision was authorized
+and re-armed, the revision may select the one verified replacement instead of
+the exhausted original thread. Selection schema 1.3 binds the authorized and
+selected thread separately, all three recovery receipts and journal events,
+the unique `replacement_pending -> running` bridge, and the replacement's
+result/disposition lifecycle. The logical source, role, checkpoint, input, and
+prior finding occurrences cannot change. A lifecycle correction cannot be
+combined with this replacement path, and replacement-of-replacement remains
+forbidden.
+
+If the source named by a later consecutive revision is already that verified
+replacement task, do not create another replacement and do not use the
+next-milestone roll-forward path. Pass the same parent continuity plus the exact
+schema 1.1 revision authorization to `New-ThreadResultReceipt.ps1`. The new
+schema 1.5 result binds the source/role/replacement task, parent continuity,
+authorization receipt/event, new checkpoint/input, and the single authorized
+`adopted -> running` re-arm. Revision selection must revalidate those bindings;
+ordinary replacement reuse, mixed roll-forward authority, replay, identity
+changes, and replacement-of-replacement remain forbidden.
 
 A replacement continuity is checkpoint-scoped; never reuse it as silent
 authorization for later work. If the same adopted replacement task must review

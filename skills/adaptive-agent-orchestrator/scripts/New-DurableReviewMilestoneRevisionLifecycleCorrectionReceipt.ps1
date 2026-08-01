@@ -60,8 +60,17 @@ $correctionEvents = @($events | Where-Object {
         'milestone-revision-lifecycle-evidence-corrected' -and
     [string]$_.milestone_revision_id -eq [string]$authorization.revision_id
 })
+$supersessionEvents = @($events | Where-Object {
+    [string]$_.event -eq 'milestone-revision-inventory-superseded' -and
+    [string]$_.milestone_revision_id -eq [string]$authorization.revision_id
+})
+$supersessionReceiptPath = Join-Path (Join-Path $runRoot 'receipts') (
+    "durable-review-milestone.$($authorization.milestone_id)." +
+    "revision-$($authorization.revision_id).inventory-supersession.json"
+)
 if ($authorizationEvents.Count -ne 1 -or $selectionEvents.Count -ne 0 -or
-    $correctionEvents.Count -ne 0) {
+    $correctionEvents.Count -ne 0 -or $supersessionEvents.Count -ne 0 -or
+    (Test-Path -LiteralPath $supersessionReceiptPath -PathType Leaf)) {
     throw (
         'Milestone revision lifecycle correction requires one pending, ' +
         'uncorrected authorization.'

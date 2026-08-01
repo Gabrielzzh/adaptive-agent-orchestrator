@@ -298,6 +298,76 @@ produce fresh post-anchor `completed -> validated -> adopted` chains, select
 them once with
 `New-DurableReviewMilestoneRevisionSelectionReceipt.ps1`.
 
+If an authorized source instead exhausts an original schema 1.2 recovery cycle
+after that re-arm, the same revision may select exactly one verified same-role
+replacement. Selection schema 1.3 preserves the authorization's logical
+source, role, checkpoint and input while distinguishing the authorized thread
+from the selected replacement thread. It hash-binds all three original
+recovery receipt/event pairs and intervening resumes, the unique
+`replacement_pending -> running` bridge, and the replacement's
+`completed -> validated -> adopted` result/disposition chain. Cross-source,
+cross-role, cross-checkpoint, pre-authorization recovery, missing or reordered
+attempts, an unbound thread, and replacement-of-replacement fail before write.
+This replacement path cannot be combined with a lifecycle evidence correction.
+
+When a later consecutive revision already names that previously selected
+replacement task as its required source thread, it may continue the same seat
+without creating another replacement. Generate its result with both the parent
+continuity and the exact consecutive revision authorization:
+
+```powershell
+pwsh -File scripts/New-ThreadResultReceipt.ps1 `
+  -RunDirectory <run> -SourceNodeId <source> `
+  -ThreadId <same-replacement-thread> -HostId local `
+  -ThreadReadPath <run>/thread-reads/<final>.json `
+  -OutputPath <run>/receipts/<result>.thread-result-receipt.json `
+  -MilestoneId <same-first-milestone> `
+  -CheckpointMaterialPath <run>/materials/<new-checkpoint>.json `
+  -PendingFindingRecordsPath <run>/materials/<findings>.json `
+  -ReplacementContinuityReceiptPath <run>/receipts/<continuity>.json `
+  -MilestoneRevisionAuthorizationReceiptPath `
+    <run>/receipts/<revision-authorization>.json
+```
+
+Schema 1.5 binds the same logical source, role and replacement task, its parent
+continuity, the authorization receipt and journal event, new checkpoint/input,
+and the exact single-use `adopted -> running` re-arm. Selection schema 1.3 then
+records the authorized and selected thread as the same replacement task while
+retaining the original parent replacement bridge and an empty new recovery
+chain. This route is same-milestone only. It cannot be combined with checkpoint
+roll-forward, used without a schema 1.1 consecutive revision, replayed at an
+old checkpoint/input, moved across source/role/thread, or used to create a
+replacement-of-replacement. Open P0/P1 and missing main acceptance remain
+blocking.
+
+If every source has a correct post-authorization lifecycle but the current
+result/disposition files contain only the currently open findings, append
+exactly one cumulative inventory supersession before selection:
+
+```powershell
+pwsh -File scripts/New-DurableReviewMilestoneRevisionInventorySupersessionReceipt.ps1 `
+  -RunDirectory <run> `
+  -AuthorizationReceiptPath <run>/receipts/<revision-authorization>.json `
+  -SelectionMaterialPath <run>/materials/<current-revision-selection>.json `
+  -AuthorizationMaterialPath <run>/materials/<supersession-authorization>.md `
+  -SupersessionKey "controller:<stable-supersession-reference>"
+```
+
+The command derives, for every required source, new result/disposition files
+from the prior selected inventory plus the current signed inventory. It never
+overwrites either input. Missing source occurrences are copied mechanically
+with their exact source/canonical IDs, severity, text/hash, resolution status,
+and evidence; existing current occurrences remain byte-equivalent JSON
+objects. The receipt binds the same run, authorization, pre-bound selection
+key, journal head/count, checkpoint/input, source/role/thread set, re-arm, and
+`completed -> validated -> adopted` lifecycle. It appends one non-state event
+and emits the only selection material that may consume the supersession.
+Partial-source repair, repeat/fork, cross-source movement, artifact drift,
+replacement-of-replacement, lifecycle-state change, or mixing with lifecycle
+correction fails before write. Selection schema 1.4 revalidates both the
+original lifecycle pointers and the superseded cumulative artifacts; completion
+continues to block on open P0/P1 and missing main-owner acceptance.
+
 If and only if every source's `completed` event binds its result, every
 `adopted` event binds its disposition, and every `validated` event mistakenly
 repeats that result pointer, append one whole-source-set correction before

@@ -20,6 +20,8 @@ param(
     [switch] $UserConfirmedEscalation,
     [switch] $UserConfirmedUltra,
 
+    [string] $UltraReason,
+
     [string] $AuthorizationEvidence
 )
 
@@ -57,14 +59,14 @@ $platformBindingHash = (
     Get-FileHash -LiteralPath $resolvedPlatformBindingPath -Algorithm SHA256
 ).Hash.ToLowerInvariant()
 
-$defaultModel = if ($Capability -eq 'economy') {
+$defaultModel = if ($Capability -in @('economy', 'standard')) {
     'gpt-5.6-luna'
 } else {
     'gpt-5.6-sol'
 }
 $defaultEffort = switch ($Capability) {
     'economy' { 'medium' }
-    'standard' { 'medium' }
+    'standard' { 'max' }
     'strong' { 'high' }
     'ultra' { 'ultra' }
 }
@@ -164,6 +166,9 @@ if ($Capability -eq 'ultra' -or $resolvedEffort -eq 'ultra') {
         $AuthorizationEvidence -notmatch '^user:.+') {
         throw 'Ultra requires Sol, capability ultra, effort ultra, and user: confirmation evidence.'
     }
+    if ([string]::IsNullOrWhiteSpace($UltraReason)) {
+        throw 'Ultra requires a concrete automatic-delegation reason after considering Sol max.'
+    }
 }
 
 $supportedEfforts = $null
@@ -199,7 +204,7 @@ if ($supportedEfforts -and $resolvedEffort -notin $supportedEfforts) {
 }
 
 $effortOrder = @('low', 'medium', 'high', 'xhigh', 'max', 'ultra')
-$isDefaultModelEscalation = $Capability -eq 'economy' -and
+$isDefaultModelEscalation = $Capability -in @('economy', 'standard') -and
     $model -eq 'gpt-5.6-sol'
 $isModelEscalation = $priorModel -in @('gpt-5.6-luna', 'gpt-5.6-terra') -and
     $model -eq 'gpt-5.6-sol'
@@ -234,6 +239,7 @@ if (($UserConfirmedEscalation -or $UserConfirmedUltra) -and
     authorization_evidence = if ($AuthorizationEvidence) {
         $AuthorizationEvidence
     } else { $null }
+    ultra_reason = if ($Capability -eq 'ultra') { $UltraReason } else { $null }
     platform_binding_path = $resolvedPlatformBindingPath
     platform_binding_sha256 = $platformBindingHash
     selection_source = if ($RequestedModel) {
@@ -245,7 +251,7 @@ if (($UserConfirmedEscalation -or $UserConfirmedUltra) -and
     unavailable_model_fallback = 'main-agent-or-user-authorized-available-model'
     reason = switch ($Capability) {
         'economy' { 'bounded mechanical work' }
-        'standard' { 'ordinary judgment, drafting, implementation, or testing' }
+        'standard' { 'bounded ordinary drafting, implementation, research, or testing' }
         'strong' { 'high ambiguity, architecture, difficult debugging, or critical review' }
         'ultra' { 'user-confirmed exceptional adjudication' }
     }

@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.7.16 release notes](docs/releases/v0.7.16.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.7.17 release notes](docs/releases/v0.7.17.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -71,6 +71,11 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   one pre-authorized revision may re-arm every required read-only source and
   select one exact set of fresh cumulative results. Older evidence remains
   retained but cannot be retroactively promoted into the selected review.
+- **Cumulative inventory repair:** if a valid new checkpoint accidentally lists
+  only its currently open findings, one pre-bound all-source supersession may
+  mechanically restore omitted prior occurrences. It cannot change their
+  source, severity, text/hash, status, or evidence, and selection can consume it
+  only once.
 - **Auditable successor runs:** after the final declared milestone, a new run
   can inherit every unresolved P1 through a hash-bound predecessor export and
   successor adoption. The old run stays immutable, source/thread continuity is
@@ -113,11 +118,14 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
 - **Protected active capacity:** target six active Workers while keeping two
   transient-subagent slots available beside four active persistent Workers;
   actual capacity is clamped to the runtime.
-- **Static model routing:** Luna handles bounded mechanical work; Sol handles
-  judgment, writing, implementation, and review. Terra remains
+- **Cost-aware static model routing:** Luna handles bounded mechanical work and
+  ordinary implementation/testing at maximum effort; Sol handles architecture,
+  ambiguous debugging, and formal domain or adversarial review. Terra remains
   explicit-request-only, and no benchmark Agent is launched before work.
   Requested and actual models remain separate when the platform does not expose
   the runtime model.
+  Sol `max` is preferred for very hard bounded work; Ultra remains a last-resort,
+  explicitly authorized route because it also enables automatic delegation.
 - **Deterministic modes:** `auto` resolves to a lightweight quick path,
   independent team, or recoverable workflow without another routing Agent.
 - **Reusable research evidence:** an on-demand curator builds a source

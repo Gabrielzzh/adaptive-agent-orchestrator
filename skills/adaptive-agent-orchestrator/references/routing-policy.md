@@ -108,8 +108,8 @@ Use capability classes in plans so the skill remains portable:
 | Class | Intent |
 | --- | --- |
 | `economy` | extraction, classification, formatting, broad scans |
-| `standard` | normal implementation, research, drafting, testing |
-| `strong` | architecture, ambiguous debugging, adversarial review |
+| `standard` | bounded ordinary implementation, research, drafting, testing |
+| `strong` | architecture, ambiguous debugging, formal domain or adversarial review |
 | `ultra` | one exceptional escalation or final high-risk adjudication |
 
 Resolve a class to a currently available model with
@@ -140,16 +140,28 @@ model is unavailable, keep the work in the main agent or request confirmation
 for a model actually exposed by the destination. Do not silently escalate a
 mechanical node to a high-cost model.
 
+On the Codex surface, `standard` deliberately uses Luna at maximum supported
+reasoning effort for cost-aware execution. This is not a review downgrade:
+durable domain/dissent roles and other formal acceptance reviewers require the
+`strong` Sol route. A low-risk sampled check may remain standard only when it is
+not the run's formal independent acceptance source.
+Apply the new default prospectively through the resolver. A prior immutable
+plan may retain its already-bound standard/Sol route; changing its model field
+would violate the durable-run contract and is not a cost optimization.
+
 `ultra` requires all of the following:
 
 - the selected surface and model actually support it;
+- Sol `max` was considered first and is insufficient for a stated reason;
+- automatic task delegation is materially useful to the node, not incidental;
 - the plan states a concrete quality reason;
 - `limits.max_ultra_nodes` has remaining capacity;
 - the node is read-only; v0.4 does not permit Ultra writers;
 - the node cannot delegate or orchestrate;
 - the user explicitly requested Ultra for this node.
 
-Ultra is a reasoning allocation, not permission to create more agents.
+Ultra changes both reasoning and delegation behavior. It is not the default
+answer to a hard task and is not permission to create an unbounded team.
 
 ## Default limits
 

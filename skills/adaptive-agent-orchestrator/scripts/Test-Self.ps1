@@ -857,9 +857,31 @@ try {
     $standardModel = & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
         -PlatformBindingPath $platformBindingPath `
         -Capability standard -AvailableModelIds $modelIds | ConvertFrom-Json
-    Assert-True ($standardModel.model -eq 'gpt-5.6-sol') (
-        'Standard judgment should resolve to Sol, not Terra.'
+    Assert-True (
+        $standardModel.model -eq 'gpt-5.6-luna' -and
+        $standardModel.effort -eq 'max'
+    ) (
+        'Standard bounded execution should resolve to Luna max.'
     )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+            -PlatformBindingPath $platformBindingPath `
+            -Capability standard -RequestedModel 'gpt-5.6-sol' `
+            -AvailableModelIds $modelIds | Out-Null
+    } 'requires explicit user confirmation' (
+        'A standard Luna-to-Sol override must require confirmation.'
+    )
+    $confirmedStandardSol = & (
+        Join-Path $scriptRoot 'Resolve-WorkerModel.ps1'
+    ) -PlatformBindingPath $platformBindingPath `
+        -Capability standard -RequestedModel 'gpt-5.6-sol' `
+        -UserConfirmedEscalation `
+        -AuthorizationEvidence 'user:explicit-standard-sol-escalation' `
+        -AvailableModelIds $modelIds | ConvertFrom-Json
+    Assert-True (
+        $confirmedStandardSol.model -eq 'gpt-5.6-sol' -and
+        $confirmedStandardSol.authorization -eq 'escalation-confirmed'
+    ) 'Explicit user evidence should permit standard-to-Sol escalation.'
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
         -PlatformBindingPath $platformBindingPath `
@@ -883,6 +905,26 @@ try {
     } 'user: confirmation evidence' (
         'Ultra must require explicit per-node confirmation.'
     )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+            -PlatformBindingPath $platformBindingPath `
+            -Capability ultra -UserConfirmedUltra `
+            -AuthorizationEvidence 'user:explicit-ultra-test-request' `
+            -AvailableModelIds $modelIds | Out-Null
+    } 'requires a concrete automatic-delegation reason' (
+        'Ultra confirmation alone must not omit why automatic delegation is needed.'
+    )
+    $confirmedUltra = & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
+        -PlatformBindingPath $platformBindingPath `
+        -Capability ultra -UserConfirmedUltra `
+        -UltraReason 'The bounded max route failed and automatic delegation is necessary.' `
+        -AuthorizationEvidence 'user:explicit-ultra-test-request' `
+        -AvailableModelIds $modelIds | ConvertFrom-Json
+    Assert-True (
+        $confirmedUltra.model -eq 'gpt-5.6-sol' -and
+        $confirmedUltra.effort -eq 'ultra' -and
+        $confirmedUltra.authorization -eq 'ultra-confirmed'
+    ) 'Explicit confirmation plus a delegation reason should permit Ultra.'
     Assert-ThrowsLike {
         & (Join-Path $scriptRoot 'Resolve-WorkerModel.ps1') `
         -PlatformBindingPath $platformBindingPath `
@@ -2816,6 +2858,22 @@ try {
         'model authorization requires user: evidence'
     )
 
+    $legacyStandardSol = Get-Content -LiteralPath $examplePath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $legacyStandardSol.nodes[0].capability = 'standard'
+    $legacyStandardSol.nodes[0].model = 'gpt-5.6-sol'
+    $legacyStandardSol.nodes[0].effort = 'medium'
+    $legacyStandardSolPath = Join-Path $testRoot 'legacy-standard-sol.json'
+    $legacyStandardSol | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $legacyStandardSolPath
+    $legacyStandardSolValidation = & (
+        Join-Path $scriptRoot 'Test-OrchestrationPlan.ps1'
+    ) -PlanPath $legacyStandardSolPath -WorkspaceRoot $skillRoot |
+        ConvertFrom-Json
+    Assert-True $legacyStandardSolValidation.valid (
+        'An immutable standard/Sol plan valid under the prior binding must remain readable.'
+    )
+
     $missingResolvedModel = Get-Content -LiteralPath $examplePath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 100
     $missingResolvedModel.nodes[0].Remove('model')
@@ -3166,6 +3224,16 @@ try {
     Assert-True $durableReviewValidation.valid (
         'A bounded durable domain-and-dissent profile should validate.'
     )
+
+    $weakDurableReviewRoute = Get-Content `
+        -LiteralPath $durableReviewPlanPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $weakDurableReviewRoute.nodes[-1].capability = 'standard'
+    $weakDurableReviewRoute.nodes[-1].model = 'gpt-5.6-luna'
+    $weakDurableReviewRoute.nodes[-1].effort = 'max'
+    Assert-InvalidPlan $weakDurableReviewRoute (
+        'durable-review-weak-model-route'
+    ) 'requires strong Sol review routing'
 
     $missingDurableDisposition = Get-Content `
         -LiteralPath $durableReviewPlanPath -Raw |

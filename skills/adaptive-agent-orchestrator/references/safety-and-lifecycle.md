@@ -178,6 +178,15 @@ The replacement may satisfy only that source obligation and must be labeled as
 a replacement. It cannot substitute for another durable role or claim that the
 original thread passed.
 
+When the original exhausts its three attempts inside an already authorized
+first-milestone revision, selection may bridge to that one replacement without
+rewriting the authorization. The bridge must prove that all three recovery
+receipts were journaled after the revision re-arm, attempt 3 was exhausted, and
+the replacement entered one bound `replacement_pending -> running` lifecycle
+before producing its result and disposition. The authorized thread and selected
+thread are recorded separately; source, role, checkpoint, input, or recovery
+identity changes fail closed.
+
 If the replacement itself returns no final answer, it receives a separate
 `replacement` recovery epoch with filenames and hashes distinct from the
 original source's recovery chain. That epoch binds the existing replacement
@@ -195,6 +204,15 @@ and controller authorization. That receipt permits only the narrow
 The subsequent result/disposition and any missing-final recovery must bind the
 same roll-forward. Reuse, fork, identity changes, an old original task, or a
 replacement-of-replacement fail closed.
+
+Checkpoint roll-forward is not used when a schema 1.1 consecutive revision
+already names the current replacement task as the required source. In that
+narrow same-milestone case, result schema 1.5 must bind the parent continuity,
+exact revision authorization/event, new checkpoint/input, and its single
+post-authorization re-arm event. Selection revalidates the same task and parent
+replacement bridge. Missing or mixed authority, replay, identity drift, or a
+second replacement fails closed; the result does not resolve findings or supply
+main-owner acceptance by itself.
 
 Legacy durable sources may lack machine identifiers and immutable captures that
 the current protocol requires. Never synthesize those values. A one-time legacy
@@ -280,6 +298,12 @@ For the narrowly defined milestone-revision validated-pointer mistake, append
 the full-source lifecycle correction receipt and its non-state event. Never
 rewrite the original lifecycle events or use correction for another error
 shape.
+For the separate cumulative-inventory omission shape, append one full-source
+inventory supersession and its non-state event. It may only copy omitted
+occurrences exactly from the prior selected receipts into new cumulative
+artifacts; current objects, old receipts, lifecycle state, and open blockers
+remain unchanged. Lifecycle correction and inventory supersession are mutually
+exclusive for a revision.
 
 The journal uses ordered sequence numbers and a SHA-256 hash chain. Treat a
 sequence gap or hash mismatch as corruption and stop recovery. `unknown` is

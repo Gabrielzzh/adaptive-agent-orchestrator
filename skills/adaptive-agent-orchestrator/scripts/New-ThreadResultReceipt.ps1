@@ -10,6 +10,7 @@ param(
     [string] $CheckpointMaterialPath,
     [string] $ReplacementContinuityReceiptPath,
     [string] $ReplacementCheckpointRollForwardReceiptPath,
+    [string] $MilestoneRevisionAuthorizationReceiptPath,
     [string] $PendingFindingRecordsPath,
     [string[]] $PendingFindings = @(),
     [string[]] $AdoptedFindings = @(),
@@ -154,11 +155,53 @@ if (-not [string]::IsNullOrWhiteSpace($ReplacementContinuityReceiptPath)) {
         'be recorded as original.'
     )
 }
+$hasRollForwardAuthority = -not [string]::IsNullOrWhiteSpace(
+    $ReplacementCheckpointRollForwardReceiptPath
+)
+$hasRevisionAuthority = -not [string]::IsNullOrWhiteSpace(
+    $MilestoneRevisionAuthorizationReceiptPath
+)
+if ($hasRollForwardAuthority -and $hasRevisionAuthority) {
+    throw (
+        'Replacement checkpoint roll-forward and milestone revision ' +
+        'authorization cannot be combined.'
+    )
+}
+$replacementRevisionBinding = $null
+$replacementRevisionRelativePath = ''
+if ($hasRevisionAuthority) {
+    if ($sourceKind -ne 'replacement') {
+        throw 'Milestone revision replacement result requires continuity.'
+    }
+    $revisionAuthorizationFullPath = [IO.Path]::GetFullPath(
+        $MilestoneRevisionAuthorizationReceiptPath
+    )
+    if (-not $revisionAuthorizationFullPath.StartsWith(
+        $runRoot + [IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase
+    ) -or -not (
+        Test-Path -LiteralPath $revisionAuthorizationFullPath -PathType Leaf
+    )) {
+        throw 'Milestone revision authorization must be a file inside the run.'
+    }
+    $replacementRevisionRelativePath = [IO.Path]::GetRelativePath(
+        $runRoot, $revisionAuthorizationFullPath
+    ).Replace('\', '/')
+    $replacementRevisionBinding =
+        Get-ReplacementMilestoneRevisionResultBinding `
+            -RunDirectory $runRoot -SourceNodeId $SourceNodeId `
+            -ThreadId $ThreadId -MilestoneId $MilestoneId `
+            -CheckpointMaterialPath $checkpointRelativePath `
+            -CheckpointMaterialHash $checkpointHash `
+            -ReplacementContinuity $replacement `
+            -ReplacementContinuityReceiptRelativePath $replacementRelativePath `
+            -AuthorizationReceiptRelativePath (
+                $replacementRevisionRelativePath
+            ) -Events $events -RequireUnselected
+}
 $replacementRollForwardRelativePath = ''
 $replacementRollForwardHash = ''
-if (-not [string]::IsNullOrWhiteSpace(
-    $ReplacementCheckpointRollForwardReceiptPath
-)) {
+if ($hasRollForwardAuthority) {
     if ($sourceKind -ne 'replacement') {
         throw (
             'Replacement checkpoint roll-forward requires replacement ' +
@@ -217,7 +260,7 @@ if (-not [string]::IsNullOrWhiteSpace(
             'checkpoint roll-forward lifecycle binding.'
         )
     }
-} elseif ($sourceKind -eq 'replacement' -and
+} elseif ($sourceKind -eq 'replacement' -and -not $hasRevisionAuthority -and
     -not [string]::IsNullOrWhiteSpace($checkpointHash) -and
     [string]$replacement.checkpoint_hash -ne $checkpointHash) {
     throw (
@@ -299,12 +342,12 @@ if ($structuredPending.Count -eq 0 -and
     @($allFindings | Select-Object -Unique).Count -ne $allFindings.Count) {
     throw 'Thread result findings must be unique across disposition groups.'
 }
-if (-not [string]::IsNullOrWhiteSpace(
-    $replacementRollForwardRelativePath
-) -and $structuredPending.Count -eq 0) {
+if ((-not [string]::IsNullOrWhiteSpace(
+        $replacementRollForwardRelativePath
+    ) -or $hasRevisionAuthority) -and $structuredPending.Count -eq 0) {
     throw (
-        'Replacement checkpoint roll-forward results require structured ' +
-        'schema findings.'
+        'Replacement checkpoint authority results require structured schema ' +
+        'findings.'
     )
 }
 $receiptAdopted = [object[]]@($adopted)
@@ -316,7 +359,9 @@ if ($structuredPending.Count -gt 0) {
     $receiptPending = [object[]]@($structuredPending)
 }
 $receipt = [ordered]@{
-    schema_version = if (-not [string]::IsNullOrWhiteSpace(
+    schema_version = if ($hasRevisionAuthority) {
+        '1.5'
+    } elseif (-not [string]::IsNullOrWhiteSpace(
         $replacementRollForwardRelativePath
     )) {
         '1.4'
@@ -349,6 +394,27 @@ if ([string]$receipt.schema_version -eq '1.4') {
         $replacementRollForwardRelativePath
     $receipt['replacement_checkpoint_roll_forward_receipt_hash'] =
         $replacementRollForwardHash
+} elseif ([string]$receipt.schema_version -eq '1.5') {
+    $receipt['source_role_id'] =
+        [string]$replacementRevisionBinding.source_role_id
+    $receipt['milestone_revision_authorization_receipt_path'] =
+        $replacementRevisionRelativePath
+    $receipt['milestone_revision_authorization_receipt_hash'] =
+        [string]$replacementRevisionBinding.authorization_receipt_hash
+    $receipt['milestone_revision_id'] =
+        [string]$replacementRevisionBinding.authorization.revision_id
+    $receipt['milestone_revision_authorization_event_sequence'] =
+        [int]$replacementRevisionBinding.authorization_event_sequence
+    $receipt['milestone_revision_authorization_event_hash'] =
+        [string]$replacementRevisionBinding.authorization_event_hash
+    $receipt['milestone_revision_rearm_event_sequence'] =
+        [int]$replacementRevisionBinding.rearm_event_sequence
+    $receipt['milestone_revision_rearm_event_hash'] =
+        [string]$replacementRevisionBinding.rearm_event_hash
+    $receipt['milestone_revision_input_manifest_path'] =
+        [string]$replacementRevisionBinding.input_manifest_path
+    $receipt['milestone_revision_input_manifest_hash'] =
+        [string]$replacementRevisionBinding.input_manifest_hash
 }
 $receipt.receipt_hash = Get-TextSha256 (
     $receipt | ConvertTo-Json -Compress -Depth 20

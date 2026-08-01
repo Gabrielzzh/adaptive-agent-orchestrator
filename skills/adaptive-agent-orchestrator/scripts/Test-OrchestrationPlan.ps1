@@ -942,6 +942,17 @@ if ($null -ne $durableReview) {
                 'background-thread agent with delegation disabled.'
             )
         }
+        if ((Get-PlanProperty $reviewNode 'model') -ne 'gpt-5.6-sol' -or
+            (Get-PlanProperty $reviewNode 'capability') -notin @(
+                'strong', 'ultra'
+            ) -or (Get-PlanProperty $reviewNode 'effort') -notin @(
+                'high', 'xhigh', 'max', 'ultra'
+            )) {
+            Add-PlanError (
+                "Durable review node '$reviewNodeId' requires strong Sol " +
+                'review routing.'
+            )
+        }
         $reviewRole = $roles[[string](Get-PlanProperty $reviewNode 'role_id')]
         if ($null -eq $reviewRole -or
             (Get-PlanProperty $reviewRole 'lifetime') -notin @(
