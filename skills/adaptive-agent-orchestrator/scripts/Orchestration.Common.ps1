@@ -5486,15 +5486,26 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
         }
         $resultPointer = "artifact:$($binding.result_receipt_path)"
         $dispositionPointer = "artifact:$($binding.disposition_receipt_path)"
+        $validatedEvidence = @($validated.evidence)
+        $validatedArtifacts = @($validatedEvidence | Where-Object {
+            [string]$_ -match '^artifact:'
+        })
+        $validatedNonArtifacts = @($validatedEvidence | Where-Object {
+            [string]$_ -notmatch '^artifact:'
+        })
         if (@($completed.evidence).Count -ne 1 -or
             [string]$completed.evidence[0] -cne $resultPointer -or
-            @($validated.evidence).Count -ne 1 -or
-            [string]$validated.evidence[0] -cne $resultPointer -or
+            $validatedArtifacts.Count -ne 1 -or
+            [string]$validatedArtifacts[0] -cne $resultPointer -or
+            @($validatedNonArtifacts | Where-Object {
+                [string]$_ -notmatch '^(test|source|observation):\S.+$'
+            }).Count -gt 0 -or
             @($adopted.evidence).Count -ne 1 -or
             [string]$adopted.evidence[0] -cne $dispositionPointer) {
             throw (
                 'Milestone revision lifecycle correction only accepts the ' +
-                'exact validated-result-pointer error shape.'
+                'exact validated-result-pointer error shape: one result artifact ' +
+                'plus typed non-artifact evidence.'
             )
         }
         $computed = [pscustomobject][ordered]@{
