@@ -316,9 +316,11 @@ Resume from the event journal:
 6. Record any plan revision as an event; never silently rewrite history.
 
 For the narrowly defined milestone-revision validated-pointer mistake, append
-the full-source lifecycle correction receipt and its non-state event. Never
-rewrite the original lifecycle events or use correction for another error
-shape.
+the full-source lifecycle correction receipt and its non-state event. The only
+eligible sibling is a whole-source omission where every top-level
+`completed.artifact` is the current result but `completed.evidence` contains no
+artifact pointer. Never rewrite the original lifecycle events or combine mixed
+error shapes.
 For the separate cumulative-inventory omission shape, append one full-source
 inventory supersession and its non-state event. It may only copy omitted
 occurrences exactly from the prior selected receipts into new cumulative

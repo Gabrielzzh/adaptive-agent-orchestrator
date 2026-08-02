@@ -391,12 +391,17 @@ missing main-owner acceptance remain blocking.
 If and only if every source's `completed` event binds its result, every
 `adopted` event binds its disposition, and every `validated` event mistakenly
 repeats that result pointer, append one whole-source-set correction before
-selection:
+selection. The only sibling shape is also eligible: every source has the same
+validated mistake, its top-level `completed.artifact` is the current result,
+and `completed.evidence` omitted all artifact pointers, including that result.
 
-The completed evidence set may additionally include only the raw capture path
-named and hash-bound by that result receipt. Validated and adopted retain one
-result/disposition artifact respectively; all three stages may retain only
-typed `test:`, `source:`, or `observation:` evidence, which correction preserves.
+For the original shape, completed evidence may additionally include only the
+raw capture path named and hash-bound by that result receipt. For the sibling
+shape, completed evidence contains no artifact at all; a raw-only or different
+artifact does not qualify. Validated and adopted retain one result/disposition
+artifact respectively; all three stages may retain only typed `test:`,
+`source:`, or `observation:` evidence, which correction preserves. Every source
+must have the same exact error shape.
 
 ```powershell
 pwsh -File scripts/New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1 `

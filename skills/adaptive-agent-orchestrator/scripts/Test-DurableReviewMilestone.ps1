@@ -2417,9 +2417,25 @@ try {
             }
     )
     foreach ($source in @(
-        @{ id = 'review'; result = $replacementReview.result_path },
-        @{ id = 'domain'; result = $replacementDomain.result_path }
+        @{
+            id = 'review'
+            result = $replacementReview.result_path
+            disposition = $replacementReview.disposition_path
+        },
+        @{
+            id = 'domain'
+            result = $replacementDomain.result_path
+            disposition = $replacementDomain.disposition_path
+        }
     )) {
+        $completedIndex = [Array]::FindLastIndex(
+            [object[]]$replacementCorrectionEvents,
+            [Predicate[object]]{
+                param($event)
+                [string]$event.node_id -eq [string]$source.id -and
+                [string]$event.status -eq 'completed'
+            }
+        )
         $validatedIndex = [Array]::FindLastIndex(
             [object[]]$replacementCorrectionEvents,
             [Predicate[object]]{
@@ -2428,12 +2444,32 @@ try {
                 [string]$event.status -eq 'validated'
             }
         )
-        Assert-True ($validatedIndex -ge 0) (
-            "The replacement correction fixture needs '$($source.id)' validated."
+        $adoptedIndex = [Array]::FindLastIndex(
+            [object[]]$replacementCorrectionEvents,
+            [Predicate[object]]{
+                param($event)
+                [string]$event.node_id -eq [string]$source.id -and
+                [string]$event.status -eq 'adopted'
+            }
+        )
+        Assert-True ($completedIndex -ge 0 -and $validatedIndex -ge 0 -and
+            $adoptedIndex -ge 0) (
+            "The replacement correction fixture needs '$($source.id)' lifecycle."
+        )
+        $replacementCorrectionEvents[$completedIndex].artifact =
+            [string]$source.result
+        $replacementCorrectionEvents[$completedIndex].evidence = @(
+            "test:completed-pointer-omission-$($source.id)",
+            "source:completed-pointer-omission-$($source.id)",
+            "observation:completed-pointer-omission-$($source.id)"
         )
         $replacementCorrectionEvents[$validatedIndex].evidence = @(
             "artifact:$($source.result)"
         )
+        $replacementCorrectionEvents[$validatedIndex].artifact =
+            [string]$source.disposition
+        $replacementCorrectionEvents[$adoptedIndex].artifact =
+            [string]$source.disposition
     }
     for ($eventIndex = 0; $eventIndex -lt $replacementCorrectionEvents.Count;
         $eventIndex++) {
@@ -2481,6 +2517,104 @@ try {
     Set-Content -LiteralPath $replacementCorrectionAuthorization -Value (
         'Controller authorizes only the whole-source validated evidence correction.'
     )
+    foreach ($omissionAttack in @(
+        @{
+            name = 'wrong-completed-artifact'
+            expected = 'exact validated-result-pointer error shape'
+            mutate = {
+                param($events)
+                $event = @($events | Where-Object {
+                    [string]$_.node_id -eq 'review' -and
+                    [string]$_.status -eq 'completed'
+                })[-1]
+                $event.artifact = [string]$replacementReview.disposition_path
+            }
+        },
+        @{
+            name = 'unexpected-completed-evidence-artifact'
+            expected = 'exact validated-result-pointer error shape'
+            mutate = {
+                param($events)
+                $event = @($events | Where-Object {
+                    [string]$_.node_id -eq 'review' -and
+                    [string]$_.status -eq 'completed'
+                })[-1]
+                $event.evidence = @(
+                    "artifact:$($replacementReview.disposition_path)",
+                    'observation:unexpected-completed-artifact'
+                )
+            }
+        },
+        @{
+            name = 'partial-source-omission'
+            expected = 'one exact error shape across the complete durable source set'
+            mutate = {
+                param($events)
+                $event = @($events | Where-Object {
+                    [string]$_.node_id -eq 'review' -and
+                    [string]$_.status -eq 'completed'
+                })[-1]
+                $event.evidence = @(
+                    "artifact:$($replacementReview.result_path)"
+                )
+            }
+        }
+    )) {
+        $attackRun = Join-Path $testRoot (
+            "replacement-completed-evidence-omission-$($omissionAttack.name)"
+        )
+        Copy-Item -LiteralPath $replacementCorrectionRun `
+            -Destination $attackRun -Recurse
+        $attackEventsPath = Join-Path $attackRun 'events.jsonl'
+        $attackEvents = @(
+            Get-Content -LiteralPath $attackEventsPath | ForEach-Object {
+                $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+            }
+        )
+        & $omissionAttack.mutate $attackEvents
+        for ($eventIndex = 0; $eventIndex -lt $attackEvents.Count; $eventIndex++) {
+            $attackEvents[$eventIndex].prev_hash = if ($eventIndex -eq 0) {
+                $null
+            } else { [string]$attackEvents[$eventIndex - 1].hash }
+            $attackEvents[$eventIndex].Remove('hash')
+            $attackEvents[$eventIndex].hash = Get-OrchestrationEventHash (
+                [pscustomobject]$attackEvents[$eventIndex]
+            )
+        }
+        @($attackEvents | ForEach-Object {
+            $_ | ConvertTo-Json -Compress -Depth 100
+        }) | Set-Content -LiteralPath $attackEventsPath
+        $beforeCount = $attackEvents.Count
+        $beforeHead = [string]$attackEvents[-1].hash
+        $beforeFileHash = (Get-FileHash -LiteralPath $attackEventsPath `
+            -Algorithm SHA256).Hash
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+            )) -RunDirectory $attackRun `
+                -AuthorizationReceiptPath (
+                    Join-Path $attackRun $revisionAuthorizationRelative
+                ) -SelectionMaterialPath (
+                    Join-Path $attackRun (
+                        'materials/method-1-revision-1-replacement-selection.json'
+                    )
+                ) -AuthorizationMaterialPath (
+                    Join-Path $attackRun (
+                        'materials/replacement-lifecycle-correction-authorization.md'
+                    )
+                ) -CorrectionKey "controller:reject-$($omissionAttack.name)" |
+                Out-Null
+        } ([string]$omissionAttack.expected) (
+            "The '$($omissionAttack.name)' omission mutation must fail closed."
+        )
+        $afterEvents = @(Read-OrchestrationJournal $attackEventsPath)
+        Assert-True (
+            $afterEvents.Count -eq $beforeCount -and
+            [string]$afterEvents[-1].hash -eq $beforeHead -and
+            (Get-FileHash -LiteralPath $attackEventsPath `
+                -Algorithm SHA256).Hash -eq $beforeFileHash
+        ) "The '$($omissionAttack.name)' rejection must not mutate the journal."
+    }
     $replacementCorrection = & (Join-Path $scriptRoot (
         'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
     )) -RunDirectory $replacementCorrectionRun `
@@ -2495,6 +2629,10 @@ try {
         ConvertFrom-Json -Depth 100
     Assert-True (
         @($replacementCorrection.source_corrections).Count -eq 2 -and
+        @($replacementCorrection.source_corrections | Where-Object {
+            [string]$_.error_class -eq
+                'completed-missing-result-pointer-and-validated-missing-disposition-pointer'
+        }).Count -eq 2 -and
         [string](@($replacementCorrection.source_corrections | Where-Object {
             [string]$_.source_node_id -eq 'review'
         })[0].source_thread_id) -eq 'review-replacement-thread'

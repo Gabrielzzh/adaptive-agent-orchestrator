@@ -5565,9 +5565,27 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
             [string]$_ -cne $resultPointer -and
             [string]$_ -cne $rawPointer
         })
-        if ($completedResultCount -ne 1 -or
-            $completedArtifacts.Count -notin @(1, 2) -or
-            $completedRawCount -ne ($completedArtifacts.Count - 1) -or
+        $validatedPointerErrorShape = (
+            $completedResultCount -eq 1 -and
+            $completedArtifacts.Count -in @(1, 2) -and
+            $completedRawCount -eq ($completedArtifacts.Count - 1) -and
+            $completedUnexpectedArtifacts.Count -eq 0
+        )
+        $completedPointerOmissionShape = (
+            $completedArtifacts.Count -eq 0 -and
+            $completedResultCount -eq 0 -and
+            $completedRawCount -eq 0
+        )
+        if (($completedPointerOmissionShape -and (
+                [string]$completed.artifact -cne
+                    [string]$binding.result_receipt_path -or
+                [string]$validated.artifact -cne
+                    [string]$binding.disposition_receipt_path -or
+                [string]$adopted.artifact -cne
+                    [string]$binding.disposition_receipt_path
+            )) -or
+            (-not $validatedPointerErrorShape -and
+                -not $completedPointerOmissionShape) -or
             $completedUnexpectedArtifacts.Count -gt 0 -or
             @($completedNonArtifacts | Where-Object {
                 [string]$_ -notmatch $typedEvidencePattern
@@ -5587,8 +5605,15 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
                 'exact validated-result-pointer error shape: completed has one ' +
                 'result artifact plus its optional bound raw capture, validated ' +
                 'has one result artifact, adopted has one disposition artifact, ' +
-                'and all extra evidence is typed.'
+                'and all extra evidence is typed; or its exact whole-source ' +
+                'completed-result-pointer-omission sibling, where completed.artifact ' +
+                'is the current result and completed.evidence has no artifact.'
             )
+        }
+        $errorClass = if ($completedPointerOmissionShape) {
+            'completed-missing-result-pointer-and-validated-missing-disposition-pointer'
+        } else {
+            'validated-missing-disposition-pointer'
         }
         $computed = [pscustomobject][ordered]@{
             source_node_id = $sourceNodeId
@@ -5610,7 +5635,7 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
             disposition_receipt_hash =
                 [string]$binding.disposition_receipt_hash
             disposition_file_hash = [string]$binding.disposition_file_hash
-            error_class = 'validated-missing-disposition-pointer'
+            error_class = $errorClass
         }
         if ($declaredMode -and
             (ConvertTo-Json -InputObject $computed -Compress -Depth 100) -cne
@@ -5621,6 +5646,14 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
             )
         }
         $corrections.Add($computed)
+    }
+    if (@($corrections | ForEach-Object {
+        [string]$_.error_class
+    } | Sort-Object -Unique).Count -ne 1) {
+        throw (
+            'Milestone revision lifecycle correction requires one exact error ' +
+            'shape across the complete durable source set.'
+        )
     }
     return @($corrections)
 }

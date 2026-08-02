@@ -158,7 +158,7 @@ try {
         -EventName 'milestone-revision-lifecycle-evidence-corrected' `
         -ReceiptName $receiptName -Receipt $receipt `
         -Message (
-            "Corrected validated evidence binding for revision " +
+            "Corrected lifecycle evidence binding for revision " +
             "'$($authorization.revision_id)'."
         ) -IdempotencyKey $CorrectionKey
     try {

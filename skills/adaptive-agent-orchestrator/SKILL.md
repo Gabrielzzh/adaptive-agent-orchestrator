@@ -343,10 +343,12 @@ checkpoint and input may authorize the next revision without falsely creating
 final acceptance. The new authorization must bind the prior selection
 receipt/event and every open source occurrence exactly; no later milestone,
 pending revision, changed source/thread, or completed final acceptance qualifies.
-If every source's `completed` and `adopted` evidence is correct but each
-`validated` event repeated the result pointer, use the lifecycle correction
-command in [workflow-contract.md](references/workflow-contract.md). It appends
-one non-state correction for the full source set; no other error shape qualifies.
+If every source's `validated` event repeated the result pointer, use the
+lifecycle correction command in
+[workflow-contract.md](references/workflow-contract.md). It also accepts the
+single sibling shape where each `completed.artifact` is the current result but
+`completed.evidence` omitted that same pointer. It appends one non-state
+correction for the full source set; mixed or other error shapes do not qualify.
 If the lifecycle is correct but the current result/disposition files omitted
 older source occurrences, use the cumulative inventory supersession command in
 the workflow contract before selection. It derives one full-source, non-state
