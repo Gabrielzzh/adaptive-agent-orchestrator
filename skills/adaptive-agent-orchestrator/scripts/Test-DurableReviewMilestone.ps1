@@ -2878,6 +2878,120 @@ try {
     } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (
         $singleSourceOmissionAuthorization
     )
+    foreach ($ordinalMutation in @(
+        @{
+            name = 'mode-case'
+            property = 'correction_mode'
+            value = 'Single_Source_Omission'
+            expected = 'authorization binding is invalid'
+        },
+        @{
+            name = 'mode-leading-space'
+            property = 'correction_mode'
+            value = ' single_source_omission'
+            expected = 'authorization binding is invalid'
+        },
+        @{
+            name = 'mode-trailing-space'
+            property = 'correction_mode'
+            value = 'single_source_omission '
+            expected = 'authorization binding is invalid'
+        },
+        @{
+            name = 'mode-unicode-near'
+            property = 'correction_mode'
+            value = [string]::Concat(
+                'single_source_omissi', [char]0x043E, 'n'
+            )
+            expected = 'authorization binding is invalid'
+        },
+        @{
+            name = 'source-case'
+            property = 'omission_source_node_id'
+            value = 'Domain'
+            expected = 'omission source is unauthorized'
+        },
+        @{
+            name = 'source-leading-space'
+            property = 'omission_source_node_id'
+            value = ' domain'
+            expected = 'omission source is unauthorized'
+        },
+        @{
+            name = 'source-trailing-space'
+            property = 'omission_source_node_id'
+            value = 'domain '
+            expected = 'omission source is unauthorized'
+        },
+        @{
+            name = 'source-unicode-near'
+            property = 'omission_source_node_id'
+            value = [string]::Concat('d', [char]0x043E, 'main')
+            expected = 'omission source is unauthorized'
+        }
+    )) {
+        $ordinalMutationRun = Join-Path $testRoot (
+            "replacement-single-source-omission-$($ordinalMutation.name)"
+        )
+        Copy-Item -LiteralPath $singleSourceOmissionRun `
+            -Destination $ordinalMutationRun -Recurse
+        $ordinalMutationAuthorization = Join-Path $ordinalMutationRun (
+            'materials/replacement-lifecycle-correction-authorization.md'
+        )
+        $ordinalMutationMaterial = Get-Content -LiteralPath (
+            $ordinalMutationAuthorization
+        ) -Raw | ConvertFrom-Json -Depth 20 -DateKind String
+        $ordinalMutationMaterial.([string]$ordinalMutation.property) =
+            [string]$ordinalMutation.value
+        $ordinalMutationMaterial | ConvertTo-Json -Depth 20 | Set-Content `
+            -LiteralPath $ordinalMutationAuthorization
+        $ordinalMutationEventsPath = Join-Path $ordinalMutationRun 'events.jsonl'
+        $ordinalMutationBefore = @(
+            Read-OrchestrationJournal $ordinalMutationEventsPath
+        )
+        $ordinalMutationBeforeHash = (
+            Get-FileHash -LiteralPath $ordinalMutationEventsPath -Algorithm SHA256
+        ).Hash
+        $ordinalMutationReceiptCount = @(
+            Get-ChildItem -LiteralPath (Join-Path $ordinalMutationRun 'receipts') `
+                -Filter '*.lifecycle-correction.json' -File `
+                -ErrorAction SilentlyContinue
+        ).Count
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+            )) -RunDirectory $ordinalMutationRun `
+                -AuthorizationReceiptPath (
+                    Join-Path $ordinalMutationRun $revisionAuthorizationRelative
+                ) -SelectionMaterialPath (
+                    Join-Path $ordinalMutationRun (
+                        'materials/method-1-revision-1-replacement-selection.json'
+                    )
+                ) -AuthorizationMaterialPath $ordinalMutationAuthorization `
+                -CorrectionKey (
+                    "controller:reject-$($ordinalMutation.name)"
+                ) | Out-Null
+        } ([string]$ordinalMutation.expected) (
+            "The '$($ordinalMutation.name)' ordinal mutation must be rejected."
+        )
+        $ordinalMutationAfter = @(
+            Read-OrchestrationJournal $ordinalMutationEventsPath
+        )
+        Assert-True (
+            $ordinalMutationAfter.Count -eq $ordinalMutationBefore.Count -and
+            [string]$ordinalMutationAfter[-1].hash -eq
+                [string]$ordinalMutationBefore[-1].hash -and
+            (Get-FileHash -LiteralPath $ordinalMutationEventsPath `
+                -Algorithm SHA256).Hash -eq $ordinalMutationBeforeHash -and
+            @(Get-ChildItem -LiteralPath (
+                Join-Path $ordinalMutationRun 'receipts'
+            ) -Filter '*.lifecycle-correction.json' -File `
+                -ErrorAction SilentlyContinue).Count -eq
+                $ordinalMutationReceiptCount
+        ) (
+            "Rejected '$($ordinalMutation.name)' must preserve journal and receipts."
+        )
+    }
     $allCorrectRun = Join-Path $testRoot (
         'replacement-lifecycle-correction-all-sources-correct'
     )

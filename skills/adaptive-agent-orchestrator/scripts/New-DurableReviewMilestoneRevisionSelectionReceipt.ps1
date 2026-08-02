@@ -174,7 +174,7 @@ $hasReplacement = $false
 foreach ($requiredSource in $requiredSources) {
     $sourceNodeId = [string]$requiredSource.source_node_id
     $matches = @($selectionItems | Where-Object {
-        [string]$_.source_node_id -eq $sourceNodeId
+        [string]$_.source_node_id -ceq $sourceNodeId
     })
     if ($matches.Count -ne 1) {
         throw "Milestone revision source '$sourceNodeId' is missing or repeated."
@@ -195,7 +195,7 @@ foreach ($requiredSource in $requiredSources) {
     }
 
     $sourceEvents = @($events | Where-Object {
-        [string]$_.node_id -eq $sourceNodeId -and
+        [string]$_.node_id -ceq $sourceNodeId -and
         [int]$_.sequence -gt [int]$authorizationEvent[0].sequence
     })
     $rearms = @(
@@ -218,17 +218,17 @@ foreach ($requiredSource in $requiredSources) {
     $lifecycleStartSequence = [int]$continuity.lifecycle_start_sequence
     $completed = @($sourceEvents | Where-Object {
         [string]$_.status -eq 'completed' -and
-        [string]$_.thread_id -eq $selectedThreadId -and
+        [string]$_.thread_id -ceq $selectedThreadId -and
         [int]$_.sequence -gt $lifecycleStartSequence
     }) | Select-Object -Last 1
     $validated = @($sourceEvents | Where-Object {
         [string]$_.status -eq 'validated' -and
-        [string]$_.thread_id -eq $selectedThreadId -and
+        [string]$_.thread_id -ceq $selectedThreadId -and
         [int]$_.sequence -gt $lifecycleStartSequence
     }) | Select-Object -Last 1
     $adopted = @($sourceEvents | Where-Object {
         [string]$_.status -eq 'adopted' -and
-        [string]$_.thread_id -eq $selectedThreadId -and
+        [string]$_.thread_id -ceq $selectedThreadId -and
         [int]$_.sequence -gt $lifecycleStartSequence
     }) | Select-Object -Last 1
     $continuitySequences = @(
@@ -265,7 +265,7 @@ foreach ($requiredSource in $requiredSources) {
     if ($null -ne $inventorySupersession) {
         $sourceSupersession = @(
             $inventorySupersession.source_supersessions | Where-Object {
-                [string]$_.source_node_id -eq $sourceNodeId
+                [string]$_.source_node_id -ceq $sourceNodeId
             }
         )
         if ($sourceSupersession.Count -ne 1 -or
@@ -295,7 +295,7 @@ foreach ($requiredSource in $requiredSources) {
     } else {
         $sourceCorrection = @(
             $lifecycleCorrection.source_corrections | Where-Object {
-                [string]$_.source_node_id -eq $sourceNodeId
+                [string]$_.source_node_id -ceq $sourceNodeId
             }
         )
         if ($sourceCorrection.Count -ne 1 -or
@@ -335,7 +335,7 @@ foreach ($requiredSource in $requiredSources) {
     }
 
     $previous = @($authorization.previous_source_bindings | Where-Object {
-        [string]$_.source_node_id -eq $sourceNodeId
+        [string]$_.source_node_id -ceq $sourceNodeId
     })
     if ($previous.Count -ne 1) {
         throw 'Milestone revision predecessor source binding is incomplete.'
@@ -502,7 +502,7 @@ if ($null -ne $lifecycleCorrection) {
         [int]$correctionEvents[0].sequence
     $payload.lifecycle_correction_event_hash =
         [string]$correctionEvents[0].hash
-    if ([string]$lifecycleCorrection.schema_version -eq '1.1') {
+    if ([string]$lifecycleCorrection.schema_version -ceq '1.1') {
         $payload.lifecycle_correction_mode =
             [string]$lifecycleCorrection.correction_mode
         $payload.lifecycle_correction_omission_source_node_id =

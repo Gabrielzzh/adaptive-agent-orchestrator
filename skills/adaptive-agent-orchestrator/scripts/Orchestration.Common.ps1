@@ -5482,24 +5482,24 @@ function Read-MilestoneRevisionLifecycleCorrectionAuthorizationMaterial {
     }
     $mode = [string]$material.correction_mode
     $omissionSourceNodeId = [string]$material.omission_source_node_id
-    if ([string]$material.schema_version -ne '1.0' -or
+    if ([string]$material.schema_version -cne '1.0' -or
         [string]$material.revision_id -ne [string]$Authorization.revision_id -or
         [string]$material.authorization_receipt_hash -ne
             [string]$Authorization.receipt_hash -or
         [string]$material.selection_key -cne
             [string]$Authorization.selection_key -or
-        $mode -notin @(
+        $mode -cnotin @(
             'single_source_omission', 'legacy_whole_source_same_shape'
         ) -or
-        ($mode -eq 'single_source_omission' -and
+        ($mode -ceq 'single_source_omission' -and
             [string]::IsNullOrWhiteSpace($omissionSourceNodeId)) -or
-        ($mode -eq 'legacy_whole_source_same_shape' -and
+        ($mode -ceq 'legacy_whole_source_same_shape' -and
             -not [string]::IsNullOrWhiteSpace($omissionSourceNodeId))) {
         throw 'Milestone revision lifecycle correction authorization binding is invalid.'
     }
-    if ($mode -eq 'single_source_omission' -and
+    if ($mode -ceq 'single_source_omission' -and
         @($Authorization.required_sources | Where-Object {
-            [string]$_.source_node_id -eq $omissionSourceNodeId
+            [string]$_.source_node_id -ceq $omissionSourceNodeId
         }).Count -ne 1) {
         throw 'Milestone revision lifecycle correction omission source is unauthorized.'
     }
@@ -5520,6 +5520,11 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
         [object[]] $DeclaredCorrections
     )
     $runRoot = [IO.Path]::GetFullPath($RunDirectory).TrimEnd('\', '/')
+    if ($CorrectionMode -cnotin @(
+            'single_source_omission', 'legacy_whole_source_same_shape'
+        )) {
+        throw 'Milestone revision lifecycle correction mode is invalid.'
+    }
     $authorizationEvents = @($Events | Where-Object {
         [string]$_.event -eq 'milestone-revision-authorized' -and
         [string]$_.milestone_revision_id -eq [string]$Authorization.revision_id
@@ -5544,14 +5549,14 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
     foreach ($requiredSource in $requiredSources) {
         $sourceNodeId = [string]$requiredSource.source_node_id
         $node = @($Plan.nodes | Where-Object {
-            [string]$_.id -eq $sourceNodeId
+            [string]$_.id -ceq $sourceNodeId
         })
         $selection = @($SelectionItems | Where-Object {
-            [string]$_.source_node_id -eq $sourceNodeId
+            [string]$_.source_node_id -ceq $sourceNodeId
         })
         $declared = @(if ($declaredMode) {
             $DeclaredCorrections | Where-Object {
-                [string]$_.source_node_id -eq $sourceNodeId
+                [string]$_.source_node_id -ceq $sourceNodeId
             }
         })
         if ($node.Count -ne 1 -or $selection.Count -ne 1 -or
@@ -5577,7 +5582,7 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
             )
         }
         $sourceEvents = @($Events | Where-Object {
-            [string]$_.node_id -eq $sourceNodeId -and
+            [string]$_.node_id -ceq $sourceNodeId -and
             [int]$_.sequence -gt [int]$authorizationEvents[0].sequence
         })
         $rearms = @(
@@ -5663,15 +5668,15 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
             $null -eq $adopted -or
             [int]$rearm.sequence -ne [int]$rearms[0].sequence -or
             [string]$rearm.hash -ne [string]$rearms[0].hash -or
-            [string]$completed.node_id -ne $sourceNodeId -or
-            [string]$validated.node_id -ne $sourceNodeId -or
-            [string]$adopted.node_id -ne $sourceNodeId -or
-            [string]$completed.role_id -ne [string]$requiredSource.role_id -or
-            [string]$validated.role_id -ne [string]$requiredSource.role_id -or
-            [string]$adopted.role_id -ne [string]$requiredSource.role_id -or
-            [string]$completed.thread_id -ne $selectedThreadId -or
-            [string]$validated.thread_id -ne $selectedThreadId -or
-            [string]$adopted.thread_id -ne $selectedThreadId -or
+            [string]$completed.node_id -cne $sourceNodeId -or
+            [string]$validated.node_id -cne $sourceNodeId -or
+            [string]$adopted.node_id -cne $sourceNodeId -or
+            [string]$completed.role_id -cne [string]$requiredSource.role_id -or
+            [string]$validated.role_id -cne [string]$requiredSource.role_id -or
+            [string]$adopted.role_id -cne [string]$requiredSource.role_id -or
+            [string]$completed.thread_id -cne $selectedThreadId -or
+            [string]$validated.thread_id -cne $selectedThreadId -or
+            [string]$adopted.thread_id -cne $selectedThreadId -or
             [string]$completed.prior_state -ne 'running' -or
             [string]$completed.status -ne 'completed' -or
             [string]$validated.prior_state -ne 'completed' -or
@@ -5701,8 +5706,8 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
                 [string]$binding.result_receipt_hash -or
             (Get-FileHash -LiteralPath $resultPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne
                 [string]$binding.result_file_hash -or
-            [string]$resultReceipt.source_node_id -ne $sourceNodeId -or
-            [string]$resultReceipt.thread_id -ne $selectedThreadId -or
+            [string]$resultReceipt.source_node_id -cne $sourceNodeId -or
+            [string]$resultReceipt.thread_id -cne $selectedThreadId -or
             [string]::IsNullOrWhiteSpace(
                 [string]$resultReceipt.thread_read_path
             )) {
@@ -5739,7 +5744,7 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
         }).Count
         $completedRawCount = @($completedArtifacts | Where-Object {
             [string]$_ -cne $resultPointer -and
-            [string]$_ -eq $rawPointer
+            [string]$_ -ceq $rawPointer
         }).Count
         $completedUnexpectedArtifacts = @($completedArtifacts | Where-Object {
             [string]$_ -cne $resultPointer -and
@@ -5874,39 +5879,39 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
     } | Sort-Object -Unique)
     $singleSourceOmissionMix = (
         $errorClasses.Count -eq 2 -and
-        'lifecycle-binding-unchanged' -in $errorClasses -and
-        'completed-missing-result-pointer-with-valid-validated-binding' -in
+        'lifecycle-binding-unchanged' -cin $errorClasses -and
+        'completed-missing-result-pointer-with-valid-validated-binding' -cin
             $errorClasses -and
         @($corrections | Where-Object {
-            [string]$_.error_class -eq
+            [string]$_.error_class -ceq
                 'completed-missing-result-pointer-with-valid-validated-binding'
         }).Count -eq 1 -and
         @($corrections | Where-Object {
-            [string]$_.error_class -eq 'lifecycle-binding-unchanged'
+            [string]$_.error_class -ceq 'lifecycle-binding-unchanged'
         }).Count -eq ($corrections.Count - 1)
     )
     $modeBound = $PSBoundParameters.ContainsKey('CorrectionMode')
     $modeAccepted = if (-not $modeBound) {
         ($errorClasses.Count -eq 1 -and
-            $errorClasses[0] -ne 'lifecycle-binding-unchanged') -or
+            $errorClasses[0] -cne 'lifecycle-binding-unchanged') -or
             $singleSourceOmissionMix
-    } elseif ($CorrectionMode -eq 'single_source_omission') {
+    } elseif ($CorrectionMode -ceq 'single_source_omission') {
         $omissions = @($corrections | Where-Object {
-            [string]$_.error_class -eq
+            [string]$_.error_class -ceq
                 'completed-missing-result-pointer-with-valid-validated-binding'
         })
         $unchanged = @($corrections | Where-Object {
-            [string]$_.error_class -eq 'lifecycle-binding-unchanged'
+            [string]$_.error_class -ceq 'lifecycle-binding-unchanged'
         })
         $omissions.Count -eq 1 -and
-            [string]$omissions[0].source_node_id -eq $OmissionSourceNodeId -and
+            [string]$omissions[0].source_node_id -ceq $OmissionSourceNodeId -and
             $unchanged.Count -eq ($corrections.Count - 1)
     } else {
         $errorClasses.Count -eq 1 -and
-            $errorClasses[0] -ne 'lifecycle-binding-unchanged'
+            $errorClasses[0] -cne 'lifecycle-binding-unchanged'
     }
     if (-not $modeAccepted) {
-        $message = if ($CorrectionMode -eq 'single_source_omission') {
+        $message = if ($CorrectionMode -ceq 'single_source_omission') {
             'Milestone revision single_source_omission correction requires exactly one omitted source and every other source unchanged.'
         } else {
             'Milestone revision lifecycle correction requires one exact error shape across the complete durable source set.'
@@ -5945,7 +5950,7 @@ function Read-DurableReviewMilestoneRevisionLifecycleCorrection {
             throw "Milestone revision lifecycle correction is missing '$name'."
         }
     }
-    $structuredMode = [string]$receipt.schema_version -eq '1.1'
+    $structuredMode = [string]$receipt.schema_version -ceq '1.1'
     if ($structuredMode) {
         foreach ($name in @('correction_mode', 'omission_source_node_id')) {
             if ($null -eq $receipt.PSObject.Properties[$name]) {
@@ -5978,7 +5983,7 @@ function Read-DurableReviewMilestoneRevisionLifecycleCorrection {
         -Label 'Milestone revision lifecycle correction authorization'
     $authorization = Read-DurableReviewMilestoneRevisionAuthorization `
         -Path $authorizationPath -RunDirectory $runRoot
-    if ([string]$receipt.schema_version -notin @('1.0', '1.1') -or
+    if ([string]$receipt.schema_version -cnotin @('1.0', '1.1') -or
         [string]$receipt.run_id -ne [string]$run.run_id -or
         [string]$receipt.plan_hash -ne [string]$run.plan_hash -or
         [string]$receipt.genesis_hash -ne [string]$events[0].hash -or
@@ -6034,9 +6039,9 @@ function Read-DurableReviewMilestoneRevisionLifecycleCorrection {
         $correctionAuthorization =
             Read-MilestoneRevisionLifecycleCorrectionAuthorizationMaterial `
                 -Path $authorizationMaterial -Authorization $authorization
-        if ([string]$receipt.correction_mode -ne
+        if ([string]$receipt.correction_mode -cne
                 [string]$correctionAuthorization.correction_mode -or
-            [string]$receipt.omission_source_node_id -ne
+            [string]$receipt.omission_source_node_id -cne
                 [string]$correctionAuthorization.omission_source_node_id) {
             throw 'Milestone revision lifecycle correction mode binding changed.'
         }
@@ -6095,9 +6100,9 @@ function Read-DurableReviewMilestoneRevisionLifecycleCorrection {
         [string]$_.milestone_revision_selection_key -ceq
             [string]$receipt.selection_key -and
         (-not $structuredMode -or (
-            [string]$_.lifecycle_correction_mode -eq
+            [string]$_.lifecycle_correction_mode -ceq
                 [string]$receipt.correction_mode -and
-            [string]$_.lifecycle_correction_omission_source_node_id -eq
+            [string]$_.lifecycle_correction_omission_source_node_id -ceq
                 [string]$receipt.omission_source_node_id
         ))
     })
@@ -7279,7 +7284,7 @@ function Read-DurableReviewMilestoneRevisionSelection {
         $lifecycleCorrection =
             Read-DurableReviewMilestoneRevisionLifecycleCorrection `
                 -Path $correctionPath -RunDirectory $runRoot
-        if ([string]$lifecycleCorrection.schema_version -eq '1.1') {
+        if ([string]$lifecycleCorrection.schema_version -ceq '1.1') {
             foreach ($name in @(
                 'lifecycle_correction_mode',
                 'lifecycle_correction_omission_source_node_id'
@@ -7307,10 +7312,10 @@ function Read-DurableReviewMilestoneRevisionSelection {
                 [string]$receipt.checkpoint_material_hash -or
             [string]$lifecycleCorrection.input_manifest_hash -ne
                 [string]$receipt.input_manifest_hash -or
-            ([string]$lifecycleCorrection.schema_version -eq '1.1' -and (
-                [string]$receipt.lifecycle_correction_mode -ne
+            ([string]$lifecycleCorrection.schema_version -ceq '1.1' -and (
+                [string]$receipt.lifecycle_correction_mode -cne
                     [string]$lifecycleCorrection.correction_mode -or
-                [string]$receipt.lifecycle_correction_omission_source_node_id -ne
+                [string]$receipt.lifecycle_correction_omission_source_node_id -cne
                     [string]$lifecycleCorrection.omission_source_node_id
             )) -or
             ([string]$receipt.schema_version -ne '1.6' -and
