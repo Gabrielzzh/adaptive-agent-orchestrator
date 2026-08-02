@@ -2856,6 +2856,79 @@ try {
     )
     Copy-Item -LiteralPath $replacementCorrectionRun `
         -Destination $replacementCorrectionPendingRun -Recurse
+    foreach ($correctionEventAttack in @(
+        @{
+            name = 'noncanonical-status'
+            mutate = {
+                param($event)
+                $event.status = 'completed'
+            }
+        },
+        @{
+            name = 'noncanonical-prior-state'
+            mutate = {
+                param($event)
+                $event.prior_state = 'running'
+            }
+        }
+    )) {
+        $correctionEventAttackRun = Join-Path $testRoot (
+            "revision-replacement-correction-event-$($correctionEventAttack.name)"
+        )
+        Copy-Item -LiteralPath $replacementCorrectionPendingRun `
+            -Destination $correctionEventAttackRun -Recurse
+        $correctionEventAttackJournal = Join-Path $correctionEventAttackRun (
+            'events.jsonl'
+        )
+        $correctionEventAttackLines = @(
+            Get-Content -LiteralPath $correctionEventAttackJournal
+        )
+        $correctionEventAttackTail = $correctionEventAttackLines[-1] |
+            ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+        & $correctionEventAttack.mutate $correctionEventAttackTail
+        $correctionEventAttackTail.Remove('hash')
+        $correctionEventAttackTail.hash = Get-OrchestrationEventHash (
+            [pscustomobject]$correctionEventAttackTail
+        )
+        $correctionEventAttackLines[-1] = $correctionEventAttackTail |
+            ConvertTo-Json -Compress -Depth 100
+        $correctionEventAttackLines |
+            Set-Content -LiteralPath $correctionEventAttackJournal -Encoding utf8
+        $correctionEventAttackBefore = @(
+            Read-OrchestrationJournal $correctionEventAttackJournal
+        )
+        $correctionEventAttackFileHash = (
+            Get-FileHash -LiteralPath $correctionEventAttackJournal -Algorithm SHA256
+        ).Hash
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+            )) -RunDirectory $correctionEventAttackRun `
+                -AuthorizationReceiptPath (
+                    Join-Path $correctionEventAttackRun $revisionAuthorizationRelative
+                ) -SelectionMaterialPath (
+                    Join-Path $correctionEventAttackRun (
+                        'materials/method-1-revision-1-replacement-selection.json'
+                    )
+                ) -SelectionKey $authorizedSelectionKey | Out-Null
+        } 'lacks its exact append-only journal event' (
+            "A $($correctionEventAttack.name) correction event must fail closed."
+        )
+        $correctionEventAttackAfter = @(
+            Read-OrchestrationJournal $correctionEventAttackJournal
+        )
+        Assert-True (
+            $correctionEventAttackAfter.Count -eq
+                $correctionEventAttackBefore.Count -and
+            [string]$correctionEventAttackAfter[-1].hash -eq
+                [string]$correctionEventAttackBefore[-1].hash -and
+            (Get-FileHash -LiteralPath $correctionEventAttackJournal `
+                -Algorithm SHA256).Hash -eq $correctionEventAttackFileHash
+        ) (
+            "A rejected $($correctionEventAttack.name) correction event " +
+            'must not mutate the journal.'
+        )
+    }
     $replacementCorrectionPreSelectionEvents = @(
         Read-OrchestrationJournal (
             Join-Path $replacementCorrectionRun 'events.jsonl'

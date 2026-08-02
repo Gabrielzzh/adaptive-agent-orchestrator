@@ -5823,6 +5823,8 @@ function Read-DurableReviewMilestoneRevisionLifecycleCorrection {
     $matchingEvents = @($events | Where-Object {
         [string]$_.event -eq
             'milestone-revision-lifecycle-evidence-corrected' -and
+        $null -eq $_.prior_state -and
+        [string]$_.status -eq 'planned' -and
         [string]$_.milestone_revision_id -eq [string]$receipt.revision_id -and
         [string]$_.milestone_activation_receipt_path -eq $relativePath -and
         [string]$_.milestone_activation_receipt_hash -eq
