@@ -320,10 +320,11 @@ Resume from the event journal:
 
 For the narrowly defined milestone-revision validated-pointer mistake, append
 the full-source lifecycle correction receipt and its non-state event. The only
-eligible sibling is a whole-source omission where every top-level
+eligible sibling is one exact source omission where its top-level
 `completed.artifact` is the current result but `completed.evidence` contains no
-artifact pointer. Never rewrite the original lifecycle events or combine mixed
-error shapes.
+artifact pointer, while every other source has the exact correct lifecycle
+binding. Never rewrite the original lifecycle events or accept any other mixed
+error shape.
 For the separate cumulative-inventory omission shape, append one full-source
 inventory supersession and its non-state event. It may only copy omitted
 occurrences exactly from the prior selected receipts into new cumulative

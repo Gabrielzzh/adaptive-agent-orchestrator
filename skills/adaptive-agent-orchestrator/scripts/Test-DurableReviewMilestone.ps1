@@ -2741,6 +2741,154 @@ try {
         'The corrected replacement lifecycle must remain selectable through ' +
         'the existing schema 1.5 path.'
     )
+    $singleSourceOmissionRun = Join-Path $testRoot (
+        'replacement-single-source-completed-evidence-omission'
+    )
+    Copy-Item -LiteralPath $validatedCompleteBeforeRun `
+        -Destination $singleSourceOmissionRun -Recurse
+    $singleSourceOmissionEventsPath = Join-Path $singleSourceOmissionRun (
+        'events.jsonl'
+    )
+    $singleSourceOmissionEvents = @(
+        Get-Content -LiteralPath $singleSourceOmissionEventsPath | ForEach-Object {
+            $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+        }
+    )
+    $unchangedCompleted = @($singleSourceOmissionEvents | Where-Object {
+        [string]$_.node_id -eq 'review' -and
+        [string]$_.status -eq 'completed'
+    })[-1]
+    $unchangedCompleted.evidence = @(
+        "artifact:$($replacementReview.result_path)",
+        'test:unchanged-replacement-completed',
+        'source:unchanged-replacement-completed',
+        'observation:unchanged-replacement-completed'
+    )
+    for ($eventIndex = 0; $eventIndex -lt $singleSourceOmissionEvents.Count;
+        $eventIndex++) {
+        $singleSourceOmissionEvents[$eventIndex].prev_hash = if (
+            $eventIndex -eq 0
+        ) { $null } else {
+            [string]$singleSourceOmissionEvents[$eventIndex - 1].hash
+        }
+        $singleSourceOmissionEvents[$eventIndex].Remove('hash')
+        $singleSourceOmissionEvents[$eventIndex].hash = Get-OrchestrationEventHash (
+            [pscustomobject]$singleSourceOmissionEvents[$eventIndex]
+        )
+    }
+    @($singleSourceOmissionEvents | ForEach-Object {
+        $_ | ConvertTo-Json -Compress -Depth 100
+    }) | Set-Content -LiteralPath $singleSourceOmissionEventsPath
+    $allCorrectRun = Join-Path $testRoot (
+        'replacement-lifecycle-correction-all-sources-correct'
+    )
+    Copy-Item -LiteralPath $singleSourceOmissionRun `
+        -Destination $allCorrectRun -Recurse
+    $allCorrectEventsPath = Join-Path $allCorrectRun 'events.jsonl'
+    $allCorrectEvents = @(
+        Get-Content -LiteralPath $allCorrectEventsPath | ForEach-Object {
+            $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+        }
+    )
+    $secondCorrectCompleted = @($allCorrectEvents | Where-Object {
+        [string]$_.node_id -eq 'domain' -and
+        [string]$_.status -eq 'completed'
+    })[-1]
+    $secondCorrectCompleted.evidence = @(
+        "artifact:$($replacementDomain.result_path)",
+        'test:unchanged-domain-completed'
+    )
+    for ($eventIndex = 0; $eventIndex -lt $allCorrectEvents.Count; $eventIndex++) {
+        $allCorrectEvents[$eventIndex].prev_hash = if ($eventIndex -eq 0) {
+            $null
+        } else { [string]$allCorrectEvents[$eventIndex - 1].hash }
+        $allCorrectEvents[$eventIndex].Remove('hash')
+        $allCorrectEvents[$eventIndex].hash = Get-OrchestrationEventHash (
+            [pscustomobject]$allCorrectEvents[$eventIndex]
+        )
+    }
+    @($allCorrectEvents | ForEach-Object {
+        $_ | ConvertTo-Json -Compress -Depth 100
+    }) | Set-Content -LiteralPath $allCorrectEventsPath
+    $allCorrectBeforeCount = $allCorrectEvents.Count
+    $allCorrectBeforeHead = [string]$allCorrectEvents[-1].hash
+    $allCorrectBeforeHash = (Get-FileHash -LiteralPath $allCorrectEventsPath `
+        -Algorithm SHA256).Hash
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+        )) -RunDirectory $allCorrectRun `
+            -AuthorizationReceiptPath (
+                Join-Path $allCorrectRun $revisionAuthorizationRelative
+            ) -SelectionMaterialPath (
+                Join-Path $allCorrectRun (
+                    'materials/method-1-revision-1-replacement-selection.json'
+                )
+            ) -AuthorizationMaterialPath (
+                Join-Path $allCorrectRun (
+                    'materials/replacement-lifecycle-correction-authorization.md'
+                )
+            ) -CorrectionKey 'controller:reject-all-correct-correction' |
+            Out-Null
+    } 'requires one exact error shape' (
+        'A fully correct source set must not create a lifecycle correction.'
+    )
+    $allCorrectAfter = @(Read-OrchestrationJournal $allCorrectEventsPath)
+    Assert-True (
+        $allCorrectAfter.Count -eq $allCorrectBeforeCount -and
+        [string]$allCorrectAfter[-1].hash -eq $allCorrectBeforeHead -and
+        (Get-FileHash -LiteralPath $allCorrectEventsPath -Algorithm SHA256).Hash -eq
+            $allCorrectBeforeHash
+    ) 'A rejected all-correct lifecycle must not mutate the journal.'
+    $singleSourceOmissionBeforeCount = $singleSourceOmissionEvents.Count
+    $singleSourceOmissionCorrection = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+    )) -RunDirectory $singleSourceOmissionRun `
+        -AuthorizationReceiptPath (
+            Join-Path $singleSourceOmissionRun $revisionAuthorizationRelative
+        ) -SelectionMaterialPath (
+            Join-Path $singleSourceOmissionRun (
+                'materials/method-1-revision-1-replacement-selection.json'
+            )
+        ) -AuthorizationMaterialPath (
+            Join-Path $singleSourceOmissionRun (
+                'materials/replacement-lifecycle-correction-authorization.md'
+            )
+        ) -CorrectionKey 'controller:single-source-omission-correction' |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        @($singleSourceOmissionCorrection.source_corrections | Where-Object {
+            [string]$_.error_class -eq
+                'completed-missing-result-pointer-with-valid-validated-binding'
+        }).Count -eq 1 -and
+        @($singleSourceOmissionCorrection.source_corrections | Where-Object {
+            [string]$_.error_class -eq 'lifecycle-binding-unchanged'
+        }).Count -eq 1 -and
+        @(Read-OrchestrationJournal $singleSourceOmissionEventsPath).Count -eq
+            ($singleSourceOmissionBeforeCount + 1)
+    ) (
+        'A whole-source correction must preserve one exact source lifecycle ' +
+        'while correcting the sibling source completed evidence omission.'
+    )
+    $singleSourceOmissionSelection = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+    )) -RunDirectory $singleSourceOmissionRun `
+        -AuthorizationReceiptPath (
+            Join-Path $singleSourceOmissionRun $revisionAuthorizationRelative
+        ) -SelectionMaterialPath (
+            Join-Path $singleSourceOmissionRun (
+                'materials/method-1-revision-1-replacement-selection.json'
+            )
+        ) -SelectionKey $authorizedSelectionKey |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$singleSourceOmissionSelection.schema_version -eq '1.5' -and
+        [string]$singleSourceOmissionSelection.lifecycle_correction_receipt_hash -eq
+            [string]$singleSourceOmissionCorrection.receipt_hash
+    ) (
+        'A single-source omission correction must remain selectable through ' +
+        'the existing replacement correction schema.'
+    )
     foreach ($validatedCompleteAttack in @(
         @{
             name = 'duplicate-result'

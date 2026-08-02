@@ -5710,13 +5710,22 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
             $validatedDispositionCount -eq 1 -and
             $validatedUnexpectedArtifacts.Count -eq 0
         )
+        $lifecycleBindingUnchangedShape = (
+            $completedArtifacts.Count -eq 1 -and
+            $completedResultCount -eq 1 -and
+            $completedRawCount -eq 0 -and
+            $completedUnexpectedArtifacts.Count -eq 0 -and
+            $validatedCompleteShape
+        )
         $acceptedLifecycleShape = (
             ($validatedPointerErrorShape -and
                 $validatedMissingDispositionShape) -or
             ($completedPointerOmissionShape -and
-                ($validatedMissingDispositionShape -or $validatedCompleteShape))
+                ($validatedMissingDispositionShape -or $validatedCompleteShape)) -or
+            $lifecycleBindingUnchangedShape
         )
-        if (($completedPointerOmissionShape -and (
+        if ((($completedPointerOmissionShape -or
+                $lifecycleBindingUnchangedShape) -and (
                 [string]$completed.artifact -cne
                     [string]$binding.result_receipt_path -or
                 [string]$validated.artifact -cne
@@ -5753,6 +5762,8 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
         $errorClass = if ($completedPointerOmissionShape -and
             $validatedCompleteShape) {
             'completed-missing-result-pointer-with-valid-validated-binding'
+        } elseif ($lifecycleBindingUnchangedShape) {
+            'lifecycle-binding-unchanged'
         } elseif ($completedPointerOmissionShape) {
             'completed-missing-result-pointer-and-validated-missing-disposition-pointer'
         } else {
@@ -5790,12 +5801,30 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
         }
         $corrections.Add($computed)
     }
-    if (@($corrections | ForEach-Object {
+    $errorClasses = @($corrections | ForEach-Object {
         [string]$_.error_class
-    } | Sort-Object -Unique).Count -ne 1) {
+    } | Sort-Object -Unique)
+    $singleSourceOmissionMix = (
+        $errorClasses.Count -eq 2 -and
+        'lifecycle-binding-unchanged' -in $errorClasses -and
+        'completed-missing-result-pointer-with-valid-validated-binding' -in
+            $errorClasses -and
+        @($corrections | Where-Object {
+            [string]$_.error_class -eq
+                'completed-missing-result-pointer-with-valid-validated-binding'
+        }).Count -eq 1 -and
+        @($corrections | Where-Object {
+            [string]$_.error_class -eq 'lifecycle-binding-unchanged'
+        }).Count -eq ($corrections.Count - 1)
+    )
+    if (($errorClasses.Count -ne 1 -or
+            $errorClasses[0] -eq 'lifecycle-binding-unchanged') -and
+        -not $singleSourceOmissionMix) {
         throw (
             'Milestone revision lifecycle correction requires one exact error ' +
-            'shape across the complete durable source set.'
+            'shape across the complete durable source set, or one exact ' +
+            'completed-result-pointer omission while every other source ' +
+            'lifecycle remains unchanged.'
         )
     }
     return @($corrections)

@@ -346,9 +346,11 @@ pending revision, changed source/thread, or completed final acceptance qualifies
 If every source's `validated` event repeated the result pointer, use the
 lifecycle correction command in
 [workflow-contract.md](references/workflow-contract.md). It also accepts the
-single sibling shape where each `completed.artifact` is the current result but
-`completed.evidence` omitted that same pointer. It appends one non-state
-correction for the full source set; mixed or other error shapes do not qualify.
+sibling shape where one source's `completed.artifact` is the current result but
+`completed.evidence` omitted that same pointer while every other source has the
+exact correct lifecycle binding. It appends one non-state correction for the
+full source set; a fully correct set, partial set, or any other mixed error
+shape does not qualify.
 If the lifecycle is correct but the current result/disposition files omitted
 older source occurrences, use the cumulative inventory supersession command in
 the workflow contract before selection. It derives one full-source, non-state
