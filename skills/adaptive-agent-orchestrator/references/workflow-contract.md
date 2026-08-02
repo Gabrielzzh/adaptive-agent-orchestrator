@@ -340,6 +340,14 @@ old checkpoint/input, moved across source/role/thread, or used to create a
 replacement-of-replacement. Open P0/P1 and missing main acceptance remain
 blocking.
 
+If the same review has progress evidence but no final, open attempt 1 with
+`New-ThreadResultRecoveryReceipt.ps1 -RecoveryStage replacement`, the parent
+continuity, `-MilestoneId`, and the same
+`-MilestoneRevisionAuthorizationReceiptPath`. Recovery schema 1.4 binds that
+authorization receipt/event, the exact post-authorization re-arm, and the new
+checkpoint/input. It neither requires nor accepts checkpoint roll-forward;
+attempt 2/3 must extend the same cycle in order.
+
 If every source has a correct post-authorization lifecycle but the current
 result/disposition files contain only the currently open findings, append
 exactly one cumulative inventory supersession before selection:

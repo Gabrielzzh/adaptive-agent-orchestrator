@@ -455,6 +455,10 @@ authorization receipt/event, new checkpoint/input, and the single authorized
 `adopted -> running` re-arm. Revision selection must revalidate those bindings;
 ordinary replacement reuse, mixed roll-forward authority, replay, identity
 changes, and replacement-of-replacement remain forbidden.
+If that same authorized review returns no final, pass the parent continuity and
+the same revision authorization to `New-ThreadResultRecoveryReceipt.ps1` with
+`-RecoveryStage replacement`; schema 1.4 binds the exact authorization event,
+re-arm event, checkpoint/input, and attempt chain without using roll-forward.
 
 A replacement continuity is checkpoint-scoped; never reuse it as silent
 authorization for later work. If the same adopted replacement task must review

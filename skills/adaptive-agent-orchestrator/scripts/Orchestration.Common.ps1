@@ -1440,7 +1440,9 @@ function Read-ThreadResultRecoveryReceipt {
         'attempt', 'outcome', 'previous_receipt_path',
         'previous_receipt_hash', 'created_at_utc', 'receipt_hash'
     )
-    $recoveryStage = if ([string]$receipt.schema_version -in @('1.1', '1.3')) {
+    $recoveryStage = if ([string]$receipt.schema_version -in @(
+        '1.1', '1.3', '1.4'
+    )) {
         'replacement'
     } elseif ([string]$receipt.schema_version -in @('1.0', '1.2')) {
         'original'
@@ -1457,6 +1459,16 @@ function Read-ThreadResultRecoveryReceipt {
                 'recovery_cycle_id', 'milestone_id',
                 'replacement_checkpoint_roll_forward_receipt_path',
                 'replacement_checkpoint_roll_forward_receipt_hash'
+            )
+        } elseif ([string]$receipt.schema_version -eq '1.4') {
+            $required += @(
+                'recovery_cycle_id', 'milestone_id',
+                'milestone_revision_authorization_receipt_path',
+                'milestone_revision_authorization_receipt_hash',
+                'milestone_revision_authorization_event_sequence',
+                'milestone_revision_authorization_event_hash',
+                'milestone_revision_rearm_event_sequence',
+                'milestone_revision_rearm_event_hash'
             )
         }
     } elseif ([string]$receipt.schema_version -eq '1.2') {
@@ -1498,6 +1510,14 @@ function Read-ThreadResultRecoveryReceipt {
             throw 'Replacement recovery changed its continuity receipt.'
         }
         if ([string]$receipt.schema_version -eq '1.3') {
+            if ($null -ne $receipt.PSObject.Properties[
+                    'milestone_revision_authorization_receipt_path'
+                ]) {
+                throw (
+                    'Replacement recovery cannot combine checkpoint ' +
+                    'roll-forward and milestone revision authority.'
+                )
+            }
             $rollForwardPath = Get-RunLocalReceiptPath `
                 -RunDirectory $RunDirectory `
                 -RelativePath ([string]$receipt.
@@ -1538,6 +1558,83 @@ function Read-ThreadResultRecoveryReceipt {
                 throw (
                     'Replacement recovery cycle changed its checkpoint ' +
                     'roll-forward binding.'
+                )
+            }
+            $expectedReplacementCycleName = (
+                "$ExpectedSourceNodeId.replacement-cycle-$expectedCycleId." +
+                "attempt-$([int]$receipt.attempt).result-recovery.json"
+            )
+            if ([IO.Path]::GetFileName($receiptFullPath) -ne
+                $expectedReplacementCycleName) {
+                throw (
+                    'Replacement recovery cycle receipt has a non-canonical ' +
+                    'filename.'
+                )
+            }
+        } elseif ([string]$receipt.schema_version -eq '1.4') {
+            if ($null -ne $receipt.PSObject.Properties[
+                    'replacement_checkpoint_roll_forward_receipt_path'
+                ]) {
+                throw (
+                    'Replacement recovery cannot combine checkpoint ' +
+                    'roll-forward and milestone revision authority.'
+                )
+            }
+            $events = @(Read-OrchestrationJournal (
+                Join-Path $runRoot 'events.jsonl'
+            ))
+            $revisionBinding = Get-ReplacementMilestoneRevisionResultBinding `
+                -RunDirectory $runRoot -SourceNodeId $ExpectedSourceNodeId `
+                -ThreadId $ExpectedOriginalThreadId `
+                -MilestoneId ([string]$receipt.milestone_id) `
+                -CheckpointMaterialPath ([string]$receipt.checkpoint_path) `
+                -CheckpointMaterialHash ([string]$receipt.checkpoint_hash) `
+                -ReplacementContinuity $replacement `
+                -ReplacementContinuityReceiptRelativePath (
+                    [string]$receipt.replacement_continuity_receipt_path
+                ) -AuthorizationReceiptRelativePath (
+                    [string]$receipt.
+                        milestone_revision_authorization_receipt_path
+                ) -Events $events
+            $expectedCycleId = Get-TextSha256 (
+                [ordered]@{
+                    run_id = [string]$receipt.run_id
+                    source_node_id = $ExpectedSourceNodeId
+                    replacement_thread_id = $ExpectedOriginalThreadId
+                    replacement_continuity_receipt_hash =
+                        [string]$replacement.receipt_hash
+                    milestone_revision_authorization_receipt_hash =
+                        [string]$revisionBinding.authorization_receipt_hash
+                    milestone_revision_authorization_event_hash =
+                        [string]$revisionBinding.authorization_event_hash
+                    milestone_revision_rearm_event_hash =
+                        [string]$revisionBinding.rearm_event_hash
+                    milestone_id = [string]$receipt.milestone_id
+                    checkpoint_hash = [string]$receipt.checkpoint_hash
+                    input_manifest_hash = [string]$receipt.input_manifest_hash
+                } | ConvertTo-Json -Compress -Depth 20
+            )
+            if ([string]$receipt.
+                    milestone_revision_authorization_receipt_hash -ne
+                    [string]$revisionBinding.authorization_receipt_hash -or
+                [int]$receipt.
+                    milestone_revision_authorization_event_sequence -ne
+                    [int]$revisionBinding.authorization_event_sequence -or
+                [string]$receipt.
+                    milestone_revision_authorization_event_hash -ne
+                    [string]$revisionBinding.authorization_event_hash -or
+                [int]$receipt.milestone_revision_rearm_event_sequence -ne
+                    [int]$revisionBinding.rearm_event_sequence -or
+                [string]$receipt.milestone_revision_rearm_event_hash -ne
+                    [string]$revisionBinding.rearm_event_hash -or
+                [string]$receipt.input_manifest_path -ne
+                    [string]$revisionBinding.input_manifest_path -or
+                [string]$receipt.input_manifest_hash -ne
+                    [string]$revisionBinding.input_manifest_hash -or
+                [string]$receipt.recovery_cycle_id -ne $expectedCycleId) {
+                throw (
+                    'Replacement recovery cycle changed its milestone ' +
+                    'revision binding.'
                 )
             }
             $expectedReplacementCycleName = (
@@ -1748,6 +1845,21 @@ function Read-ThreadResultRecoveryReceipt {
                     replacement_checkpoint_roll_forward_receipt_hash
         )) {
             throw 'Thread result recovery receipt crossed replacement cycles.'
+        }
+        if ([string]$receipt.schema_version -eq '1.4' -and (
+            [string]$previous.schema_version -ne '1.4' -or
+            [string]$previous.recovery_cycle_id -ne
+                [string]$receipt.recovery_cycle_id -or
+            [string]$previous.milestone_id -ne
+                [string]$receipt.milestone_id -or
+            [string]$previous.
+                milestone_revision_authorization_receipt_hash -ne
+                [string]$receipt.
+                    milestone_revision_authorization_receipt_hash -or
+            [string]$previous.milestone_revision_rearm_event_hash -ne
+                [string]$receipt.milestone_revision_rearm_event_hash
+        )) {
+            throw 'Thread result recovery receipt crossed milestone revisions.'
         }
     }
     $hashPayload = [ordered]@{}

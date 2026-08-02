@@ -209,7 +209,10 @@ Checkpoint roll-forward is not used when a schema 1.1 consecutive revision
 already names the current replacement task as the required source. In that
 narrow same-milestone case, result schema 1.5 must bind the parent continuity,
 exact revision authorization/event, new checkpoint/input, and its single
-post-authorization re-arm event. Selection revalidates the same task and parent
+post-authorization re-arm event. A missing-final recovery at that checkpoint
+uses schema 1.4 and binds the same continuity, authorization/event, re-arm,
+checkpoint/input, and ordered attempt chain; it does not borrow checkpoint
+roll-forward authority. Selection revalidates the same task and parent
 replacement bridge. Missing or mixed authority, replay, identity drift, or a
 second replacement fails closed; the result does not resolve findings or supply
 main-owner acceptance by itself.

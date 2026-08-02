@@ -1898,10 +1898,12 @@ try {
             [string]$_.status -eq 'result_pending' -and
             [string]$_.thread_id -eq $ThreadId
         })
-        if ([string]$recoveryReceipt.schema_version -in @('1.2', '1.3')) {
+        if ([string]$recoveryReceipt.schema_version -in @(
+            '1.2', '1.3', '1.4'
+        )) {
             $sameCyclePending = [Collections.Generic.List[object]]::new()
             $cycleStage = if (
-                [string]$recoveryReceipt.schema_version -eq '1.3'
+                [string]$recoveryReceipt.schema_version -in @('1.3', '1.4')
             ) { 'replacement' } else { 'original' }
             foreach ($pendingEvent in $priorPendingForThread) {
                 if ([string]::IsNullOrWhiteSpace(
@@ -1937,7 +1939,9 @@ try {
             ($priorPendingForThread.Count + 1)) {
             throw 'Recovery attempts must be recorded once in sequential order.'
         }
-        if ([string]$recoveryReceipt.schema_version -in @('1.2', '1.3')) {
+        if ([string]$recoveryReceipt.schema_version -in @(
+            '1.2', '1.3', '1.4'
+        )) {
             $event['recovery_cycle_id'] =
                 [string]$recoveryReceipt.recovery_cycle_id
             $event['recovery_milestone_id'] =
@@ -1946,10 +1950,26 @@ try {
                 $event['recovery_milestone_activation_receipt_hash'] =
                     [string]$recoveryReceipt.
                         milestone_activation_receipt_hash
-            } else {
+            } elseif ([string]$recoveryReceipt.schema_version -eq '1.3') {
                 $event['replacement_roll_forward_receipt_hash'] =
                     [string]$recoveryReceipt.
                         replacement_checkpoint_roll_forward_receipt_hash
+            } else {
+                $event['milestone_revision_authorization_receipt_hash'] =
+                    [string]$recoveryReceipt.
+                        milestone_revision_authorization_receipt_hash
+                $event['milestone_revision_authorization_event_sequence'] =
+                    [int]$recoveryReceipt.
+                        milestone_revision_authorization_event_sequence
+                $event['milestone_revision_authorization_event_hash'] =
+                    [string]$recoveryReceipt.
+                        milestone_revision_authorization_event_hash
+                $event['milestone_revision_rearm_event_sequence'] =
+                    [int]$recoveryReceipt.
+                        milestone_revision_rearm_event_sequence
+                $event['milestone_revision_rearm_event_hash'] =
+                    [string]$recoveryReceipt.
+                        milestone_revision_rearm_event_hash
             }
             $event['recovery_checkpoint_hash'] =
                 [string]$recoveryReceipt.checkpoint_hash
