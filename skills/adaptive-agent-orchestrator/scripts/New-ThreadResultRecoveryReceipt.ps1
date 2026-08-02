@@ -11,6 +11,7 @@ param(
     [string] $RecoveryStage = 'original',
     [string] $ReplacementContinuityReceiptPath,
     [string] $ReplacementCheckpointRollForwardReceiptPath,
+    [string] $MilestoneRevisionAuthorizationReceiptPath,
     [string] $MilestoneId,
     [Parameter(Mandatory)][ValidateRange(1, 3)][int] $Attempt,
     [string] $OutputPath
@@ -82,6 +83,15 @@ $checkpointHash = Get-TextSha256 (
 $inputManifestHash = Get-TextSha256 (
     Get-Content -LiteralPath $inputPath -Raw
 )
+$checkpointRelativePath = [IO.Path]::GetRelativePath(
+    $runRoot, $checkpointPath
+).Replace('\', '/')
+$inputRelativePath = [IO.Path]::GetRelativePath(
+    $runRoot, $inputPath
+).Replace('\', '/')
+$hasRevisionAuthority = -not [string]::IsNullOrWhiteSpace(
+    $MilestoneRevisionAuthorizationReceiptPath
+)
 $cycleAwareOriginal = (
     $RecoveryStage -eq 'original' -and
     [string]::IsNullOrWhiteSpace($LegacySourceAdoptionReceiptPath)
@@ -93,8 +103,15 @@ if ($cycleAwareOriginal) {
         -OriginalThreadId $OriginalThreadId `
         -CheckpointHash $checkpointHash `
         -InputManifestHash $inputManifestHash -MilestoneId $MilestoneId
+} elseif ($RecoveryStage -eq 'replacement' -and $hasRevisionAuthority) {
+    if ([string]::IsNullOrWhiteSpace($MilestoneId)) {
+        throw 'MilestoneId is required for milestone revision replacement recovery.'
+    }
 } elseif (-not [string]::IsNullOrWhiteSpace($MilestoneId)) {
-    throw 'MilestoneId is only valid for cycle-aware original recovery.'
+    throw (
+        'MilestoneId is only valid for cycle-aware original recovery or ' +
+        'milestone revision replacement recovery.'
+    )
 }
 $replacementRelativePath = ''
 $replacementHash = ''
@@ -103,6 +120,8 @@ $replacementRollForwardHash = ''
 $replacementRecoveryCycleId = ''
 $replacement = $null
 $replacementRollForward = $null
+$replacementRevisionBinding = $null
+$replacementRevisionRelativePath = ''
 if ($RecoveryStage -eq 'replacement') {
     if (-not [string]::IsNullOrWhiteSpace($LegacySourceAdoptionReceiptPath) -or
         [string]::IsNullOrWhiteSpace($ReplacementContinuityReceiptPath)) {
@@ -121,6 +140,14 @@ if ($RecoveryStage -eq 'replacement') {
         $runRoot, $replacementPath
     ).Replace('\', '/')
     $replacementHash = [string]$replacement.receipt_hash
+    if (-not [string]::IsNullOrWhiteSpace(
+        $ReplacementCheckpointRollForwardReceiptPath
+    ) -and $hasRevisionAuthority) {
+        throw (
+            'Replacement checkpoint roll-forward and milestone revision ' +
+            'authorization cannot be combined.'
+        )
+    }
     if (-not [string]::IsNullOrWhiteSpace(
         $ReplacementCheckpointRollForwardReceiptPath
     )) {
@@ -163,6 +190,51 @@ if ($RecoveryStage -eq 'replacement') {
                 input_manifest_hash = $inputManifestHash
             } | ConvertTo-Json -Compress -Depth 20
         )
+    } elseif ($hasRevisionAuthority) {
+        $replacementRevisionPath = Resolve-InputPath `
+            $MilestoneRevisionAuthorizationReceiptPath (
+                'Milestone revision authorization receipt'
+            )
+        $replacementRevisionRelativePath = [IO.Path]::GetRelativePath(
+            $runRoot, $replacementRevisionPath
+        ).Replace('\', '/')
+        $replacementRevisionBinding =
+            Get-ReplacementMilestoneRevisionResultBinding `
+                -RunDirectory $runRoot -SourceNodeId $SourceNodeId `
+                -ThreadId $OriginalThreadId -MilestoneId $MilestoneId `
+                -CheckpointMaterialPath $checkpointRelativePath `
+                -CheckpointMaterialHash $checkpointHash `
+                -ReplacementContinuity $replacement `
+                -ReplacementContinuityReceiptRelativePath $replacementRelativePath `
+                -AuthorizationReceiptRelativePath $replacementRevisionRelativePath `
+                -Events $events -RequireUnselected
+        if ([string]$replacementRevisionBinding.input_manifest_path -ne
+                $inputRelativePath -or
+            [string]$replacementRevisionBinding.input_manifest_hash -ne
+                $inputManifestHash) {
+            throw (
+                'Replacement recovery input does not match its milestone ' +
+                'revision authorization.'
+            )
+        }
+        $replacementRecoveryCycleId = Get-TextSha256 (
+            [ordered]@{
+                run_id = [string]$run.run_id
+                source_node_id = $SourceNodeId
+                replacement_thread_id = $OriginalThreadId
+                replacement_continuity_receipt_hash = $replacementHash
+                milestone_revision_authorization_receipt_hash =
+                    [string]$replacementRevisionBinding.
+                        authorization_receipt_hash
+                milestone_revision_authorization_event_hash =
+                    [string]$replacementRevisionBinding.authorization_event_hash
+                milestone_revision_rearm_event_hash =
+                    [string]$replacementRevisionBinding.rearm_event_hash
+                milestone_id = $MilestoneId
+                checkpoint_hash = $checkpointHash
+                input_manifest_hash = $inputManifestHash
+            } | ConvertTo-Json -Compress -Depth 20
+        )
     } elseif ([string]$replacement.checkpoint_hash -ne $checkpointHash -or
         [string]$replacement.input_manifest_hash -ne $inputManifestHash) {
         throw (
@@ -174,7 +246,8 @@ if ($RecoveryStage -eq 'replacement') {
     $ReplacementContinuityReceiptPath
 ) -or -not [string]::IsNullOrWhiteSpace(
     $ReplacementCheckpointRollForwardReceiptPath
-)) {
+) -or $hasRevisionAuthority
+) {
     throw (
         'Original-stage recovery cannot bind replacement continuity or ' +
         'checkpoint roll-forward.'
@@ -319,7 +392,9 @@ if ($Attempt -gt 1) {
 
 $payload = [ordered]@{
     schema_version = if ($RecoveryStage -eq 'replacement') {
-        if (-not [string]::IsNullOrWhiteSpace($replacementRecoveryCycleId)) {
+        if ($null -ne $replacementRevisionBinding) {
+            '1.4'
+        } elseif (-not [string]::IsNullOrWhiteSpace($replacementRecoveryCycleId)) {
             '1.3'
         } else {
             '1.1'
@@ -334,13 +409,9 @@ $payload = [ordered]@{
     role_id = [string]$node.role_id
     original_thread_id = $OriginalThreadId
     continuity_key = [string]$node.context.continuity_key
-    checkpoint_path = [IO.Path]::GetRelativePath(
-        $runRoot, $checkpointPath
-    ).Replace('\', '/')
+    checkpoint_path = $checkpointRelativePath
     checkpoint_hash = $checkpointHash
-    input_manifest_path = [IO.Path]::GetRelativePath(
-        $runRoot, $inputPath
-    ).Replace('\', '/')
+    input_manifest_path = $inputRelativePath
     input_manifest_hash = $inputManifestHash
     thread_read_path = [IO.Path]::GetRelativePath(
         $runRoot, $capturePath
@@ -370,12 +441,28 @@ if ($RecoveryStage -eq 'replacement') {
     $payload['replacement_continuity_receipt_hash'] = $replacementHash
     if (-not [string]::IsNullOrWhiteSpace($replacementRecoveryCycleId)) {
         $payload['recovery_cycle_id'] = $replacementRecoveryCycleId
-        $payload['milestone_id'] =
-            [string]$replacementRollForward.target_milestone_id
-        $payload['replacement_checkpoint_roll_forward_receipt_path'] =
-            $replacementRollForwardRelativePath
-        $payload['replacement_checkpoint_roll_forward_receipt_hash'] =
-            $replacementRollForwardHash
+        if ($null -ne $replacementRevisionBinding) {
+            $payload['milestone_id'] = $MilestoneId
+            $payload['milestone_revision_authorization_receipt_path'] =
+                $replacementRevisionRelativePath
+            $payload['milestone_revision_authorization_receipt_hash'] =
+                [string]$replacementRevisionBinding.authorization_receipt_hash
+            $payload['milestone_revision_authorization_event_sequence'] =
+                [int]$replacementRevisionBinding.authorization_event_sequence
+            $payload['milestone_revision_authorization_event_hash'] =
+                [string]$replacementRevisionBinding.authorization_event_hash
+            $payload['milestone_revision_rearm_event_sequence'] =
+                [int]$replacementRevisionBinding.rearm_event_sequence
+            $payload['milestone_revision_rearm_event_hash'] =
+                [string]$replacementRevisionBinding.rearm_event_hash
+        } else {
+            $payload['milestone_id'] =
+                [string]$replacementRollForward.target_milestone_id
+            $payload['replacement_checkpoint_roll_forward_receipt_path'] =
+                $replacementRollForwardRelativePath
+            $payload['replacement_checkpoint_roll_forward_receipt_hash'] =
+                $replacementRollForwardHash
+        }
     }
 } elseif ($cycleAwareOriginal) {
     $payload['recovery_stage'] = 'original'

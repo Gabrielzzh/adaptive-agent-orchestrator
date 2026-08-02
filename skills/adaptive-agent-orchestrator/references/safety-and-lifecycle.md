@@ -209,10 +209,34 @@ Checkpoint roll-forward is not used when a schema 1.1 consecutive revision
 already names the current replacement task as the required source. In that
 narrow same-milestone case, result schema 1.5 must bind the parent continuity,
 exact revision authorization/event, new checkpoint/input, and its single
-post-authorization re-arm event. Selection revalidates the same task and parent
+post-authorization re-arm event. A missing-final recovery at that checkpoint
+uses schema 1.4 and binds the same continuity, authorization/event, re-arm,
+checkpoint/input, and ordered attempt chain; it does not borrow checkpoint
+roll-forward authority. Selection revalidates the same task and parent
 replacement bridge. Missing or mixed authority, replay, identity drift, or a
 second replacement fails closed; the result does not resolve findings or supply
 main-owner acceptance by itself.
+
+### Abandoning an invalid pending revision
+
+When a same-milestone revision has only its authorization and both source
+re-arms, and its control material is contradictory, use the one-shot
+`New-DurableReviewMilestoneRevisionAbandonmentReceipt.ps1` path. It is
+append-only: the receipt binds the authorization, journal boundary, both
+re-arms, the run-local mismatch audit, and the complete source occurrence
+inventory, then appends the abandonment and per-source cancellation events.
+It marks raw captures as non-adoptable evidence and never produces a result,
+disposition, selection, or completion signal. The declared control-path file
+and the file whose hash was declared must both exist inside the run, be
+distinct, and match their actual SHA-256 declarations.
+
+No result, disposition, lifecycle, or selection may already exist for the
+pending revision. Partial sources, changed identities or artifacts, repeated
+keys, journal drift, cross-run/source/thread/checkpoint reuse, and severity,
+text, or status changes fail closed. A later authorization must preserve the
+last valid selection as `previous_revision_selection_*`, bind the abandonment
+as `previous_abandonment_*`, and re-review both original logical source seats;
+open P0/P1 and main acceptance remain blocking.
 
 Legacy durable sources may lack machine identifiers and immutable captures that
 the current protocol requires. Never synthesize those values. A one-time legacy
@@ -295,15 +319,25 @@ Resume from the event journal:
 6. Record any plan revision as an event; never silently rewrite history.
 
 For the narrowly defined milestone-revision validated-pointer mistake, append
-the full-source lifecycle correction receipt and its non-state event. Never
-rewrite the original lifecycle events or use correction for another error
-shape.
+the full-source lifecycle correction receipt and its non-state event. The only
+eligible sibling is one exact source omission where its top-level
+`completed.artifact` is the current result but `completed.evidence` contains no
+artifact pointer, while every other source has the exact correct lifecycle
+binding. Its structured authorization must fix
+`correction_mode=single_source_omission` and the omitted source; the receipt,
+event, selection reader, and completion readback revalidate both. A legacy
+whole-source same-shape correction requires its own explicit mode and is never
+an implicit fallback. Never rewrite the original lifecycle events or accept any
+other mixed error shape.
 For the separate cumulative-inventory omission shape, append one full-source
 inventory supersession and its non-state event. It may only copy omitted
 occurrences exactly from the prior selected receipts into new cumulative
 artifacts; current objects, old receipts, lifecycle state, and open blockers
-remain unchanged. Lifecycle correction and inventory supersession are mutually
-exclusive for a revision.
+remain unchanged. If the same run also has the narrowly defined lifecycle
+evidence correction, use the dedicated cumulative-correction command: it
+consumes that correction, appends one additional non-state supersession event,
+and emits the only combined selection material. The older standalone inventory
+command remains mutually exclusive with lifecycle correction.
 
 The journal uses ordered sequence numbers and a SHA-256 hash chain. Treat a
 sequence gap or hash mismatch as corruption and stop recovery. `unknown` is

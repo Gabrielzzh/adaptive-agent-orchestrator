@@ -340,6 +340,14 @@ old checkpoint/input, moved across source/role/thread, or used to create a
 replacement-of-replacement. Open P0/P1 and missing main acceptance remain
 blocking.
 
+If the same review has progress evidence but no final, open attempt 1 with
+`New-ThreadResultRecoveryReceipt.ps1 -RecoveryStage replacement`, the parent
+continuity, `-MilestoneId`, and the same
+`-MilestoneRevisionAuthorizationReceiptPath`. Recovery schema 1.4 binds that
+authorization receipt/event, the exact post-authorization re-arm, and the new
+checkpoint/input. It neither requires nor accepts checkpoint roll-forward;
+attempt 2/3 must extend the same cycle in order.
+
 If every source has a correct post-authorization lifecycle but the current
 result/disposition files contain only the currently open findings, append
 exactly one cumulative inventory supersession before selection:
@@ -368,28 +376,83 @@ correction fails before write. Selection schema 1.4 revalidates both the
 original lifecycle pointers and the superseded cumulative artifacts; completion
 continues to block on open P0/P1 and missing main-owner acceptance.
 
+If the same revision already has the exact whole-source lifecycle correction,
+do not use the standalone command above. Use the dedicated combined command:
+
+```powershell
+pwsh -File scripts/New-DurableReviewMilestoneRevisionCumulativeCorrectionReceipt.ps1 `
+  -RunDirectory <run> `
+  -AuthorizationReceiptPath <run>/receipts/<revision-authorization>.json `
+  -SelectionMaterialPath <run>/materials/<current-revision-selection>.json `
+  -AuthorizationMaterialPath <run>/materials/<supersession-authorization>.md `
+  -CumulativeCorrectionKey "controller:<stable-combined-reference>"
+```
+
+This command requires the exact lifecycle-correction receipt/event, preserves
+both prior and current source-specific result/disposition sets, and appends
+one additional non-state cumulative event. It emits combined selection
+material only; it cannot rewrite lifecycle state, alter an occurrence, omit a
+source, or change the checkpoint, source, role, thread, or authorization key.
+Selection schema 1.6 consumes and revalidates both receipts. Open P0/P1 and
+missing main-owner acceptance remain blocking.
+
 If and only if every source's `completed` event binds its result, every
 `adopted` event binds its disposition, and every `validated` event mistakenly
 repeats that result pointer, append one whole-source-set correction before
-selection:
+selection. The sibling shape is also eligible when exactly one source's
+top-level `completed.artifact` is the current result but `completed.evidence`
+omitted all artifact pointers, including that result, while every other source
+already has the exact current result/disposition lifecycle binding.
+
+For the original shape, completed evidence may additionally include only the
+raw capture path named and hash-bound by that result receipt. For the sibling
+shape, completed evidence contains no artifact at all; a raw-only or different
+artifact does not qualify. In the sibling shape, validated retains the current
+result and disposition while adopted retains the disposition. All three stages
+may retain only typed `test:`,
+`source:`, or `observation:` evidence, which correction preserves. The receipt
+still binds the complete source set. A fully correct set, partial source set,
+or a source with any other error shape does not qualify.
+
+New correction authorization material is structured JSON. It binds schema
+`1.0`, the revision ID, authorization receipt hash, selection key,
+`correction_mode`, and `omission_source_node_id`. Use
+`single_source_omission` only when exactly the named source has the sibling
+omission and every other required source is unchanged. Historical whole-source
+same-shape correction is available for new writes only through explicit
+`legacy_whole_source_same_shape` authorization with a null omission source;
+there is no implicit fallback between modes.
 
 ```powershell
 pwsh -File scripts/New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1 `
   -RunDirectory <run> `
   -AuthorizationReceiptPath <run>/receipts/<revision-authorization>.json `
   -SelectionMaterialPath <run>/materials/<revision-selection>.json `
-  -AuthorizationMaterialPath <run>/materials/<correction-authorization>.md `
+  -AuthorizationMaterialPath <run>/materials/<correction-authorization>.json `
   -CorrectionKey "controller:<stable-correction-reference>"
 ```
 
 The correction binds the authorization and its pre-bound selection key, the
-current journal head/count, checkpoint/input, complete source/role/thread set,
+current journal head/count, checkpoint/input, correction mode and omission
+source, complete source/role/thread set,
 exact lifecycle event sequence/hash, and result/disposition file and internal
 hashes. It appends a non-state event: it cannot change a source state, resolve a
 finding, resend review, or replace main acceptance. Partial, repeated, forked,
 cross-run/source/thread/revision/checkpoint, artifact-drifted, or differently
 shaped corrections fail before journal write. Selection schema 1.2 binds and
-revalidates this correction together with the original events.
+revalidates this correction together with the original events. For a combined
+lifecycle correction plus cumulative supersession, selection schema 1.6 is
+required instead.
+
+When the same authorized revision legitimately selects a verified replacement,
+the correction may be consumed only by the dedicated selection schema 1.5.
+That schema must additionally revalidate the replacement continuity/recovery/
+re-arm chain and bind the selected replacement thread, lifecycle events, and
+correction receipt/event exactly. Ordinary replacement selection remains schema
+1.3 and still rejects any lifecycle correction. A combined correction and
+inventory supersession is allowed only through the dedicated schema 1.6 path;
+standalone inventory supersession and lifecycle correction remain mutually
+exclusive.
 
 Selection rejects partial source sets, excluded chains, cross-source/thread or
 cross-checkpoint substitutions, and any prior occurrence that disappears or
@@ -398,6 +461,43 @@ Resolved and open occurrences are both conserved; new occurrences may be
 appended. Completion overlays only the terminal valid first-milestone revision
 bindings. Open P0/P1 still block overall completion. A selected revision does
 not itself provide final main-owner acceptance.
+
+If a same-milestone revision has been authorized and both required sources have
+been re-armed, but no result, disposition, lifecycle, or selection evidence has
+been written and the revision's control material is self-contradictory, abandon
+that pending revision exactly once. This is not a result or selection receipt:
+it appends one abandonment event and one `running -> cancelled` event per
+source, marks raw captures as non-adoptable evidence, and preserves the last
+legitimate selection as the next authorization's previous selection. The
+abandonment receipt must bind the authorization/event, journal head/count/file
+hash, both re-arm events, the run-local input and mismatch audit, and the full
+source occurrence inventory. Both the declared control-path object and the
+object whose hash was declared must be existing, distinct run-local files; each
+actual SHA-256 is checked against the corresponding declaration.
+
+```powershell
+pwsh -File scripts/New-DurableReviewMilestoneRevisionAbandonmentReceipt.ps1 `
+  -RunDirectory <run> `
+  -AuthorizationReceiptPath <run>/receipts/<pending-authorization>.json `
+  -InvalidityAuditMaterialPath <run>/materials/<mismatch-audit>.json `
+  -AbandonmentKey "controller:<stable-abandonment-reference>"
+```
+
+The audit finding must bind its exact pending finding material (or the exact
+prior source decision), while the cumulative inventory must conserve every
+source occurrence independently. A pending revision that already has any
+formal result, disposition, lifecycle, or selection cannot use this path;
+neither can a partial source set, repeated/forked key, changed journal head,
+cross-run/source/thread/checkpoint input, or a severity/text/status change.
+Only after the abandonment reader verifies the full chain may a new same-
+milestone authorization bind `previous_abandonment_*` while retaining the last
+valid `previous_revision_selection_*`; it must start fresh review from the same
+two source seats. Every authorization occupies one immutable revision ordinal:
+an abandoned revision consumes its ordinal even though it has no selection, and
+later selections are validated against their bound authorization ordinal rather
+than the smaller number of selection events. Completion remains blocked until
+the new dual-source result, disposition, selection, open-finding, and main-owner
+gates pass.
 
 ```json
 [

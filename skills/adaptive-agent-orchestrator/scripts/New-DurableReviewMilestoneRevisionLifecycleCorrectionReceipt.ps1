@@ -33,14 +33,11 @@ foreach ($candidate in @(
         )
     }
 }
-if ([string]::IsNullOrWhiteSpace(
-    (Get-Content -LiteralPath $AuthorizationMaterialPath -Raw)
-)) {
-    throw 'Milestone revision lifecycle correction authorization is empty.'
-}
-
 $authorization = Read-DurableReviewMilestoneRevisionAuthorization `
     -Path $AuthorizationReceiptPath -RunDirectory $runRoot
+$correctionAuthorization =
+    Read-MilestoneRevisionLifecycleCorrectionAuthorizationMaterial `
+        -Path $AuthorizationMaterialPath -Authorization $authorization
 $plan = Get-Content -LiteralPath (Join-Path $runRoot 'plan.json') -Raw |
     ConvertFrom-Json -Depth 100 -DateKind String
 $run = Get-Content -LiteralPath (Join-Path $runRoot 'run.json') -Raw |
@@ -83,7 +80,11 @@ $selectionItems = @(
 $sourceCorrections =
     Get-MilestoneRevisionLifecycleCorrectionSources `
         -RunDirectory $runRoot -Plan $plan -Authorization $authorization `
-        -Events $events -SelectionItems $selectionItems
+        -Events $events -SelectionItems $selectionItems `
+        -CorrectionMode ([string]$correctionAuthorization.correction_mode) `
+        -OmissionSourceNodeId (
+            [string]$correctionAuthorization.omission_source_node_id
+        )
 
 $receiptDirectory = Join-Path $runRoot 'receipts'
 $receiptName = (
@@ -99,7 +100,7 @@ $relative = {
     [IO.Path]::GetRelativePath($runRoot, $Path).Replace('\', '/')
 }
 $payload = [ordered]@{
-    schema_version = '1.0'
+    schema_version = '1.1'
     run_id = [string]$run.run_id
     plan_hash = [string]$run.plan_hash
     genesis_hash = [string]$events[0].hash
@@ -110,6 +111,8 @@ $payload = [ordered]@{
     authorization_receipt_path = & $relative $AuthorizationReceiptPath
     authorization_receipt_hash = [string]$authorization.receipt_hash
     selection_key = [string]$authorization.selection_key
+    correction_mode = [string]$correctionAuthorization.correction_mode
+    omission_source_node_id = $correctionAuthorization.omission_source_node_id
     source_journal_head = [string]$events[-1].hash
     source_journal_event_count = $events.Count
     checkpoint_material_path = [string]$authorization.checkpoint_material_path
@@ -158,7 +161,7 @@ try {
         -EventName 'milestone-revision-lifecycle-evidence-corrected' `
         -ReceiptName $receiptName -Receipt $receipt `
         -Message (
-            "Corrected validated evidence binding for revision " +
+            "Corrected lifecycle evidence binding for revision " +
             "'$($authorization.revision_id)'."
         ) -IdempotencyKey $CorrectionKey
     try {

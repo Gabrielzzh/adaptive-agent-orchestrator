@@ -56,8 +56,62 @@ $authorizedEvents = @($events | Where-Object {
 $selectedEvents = @($events | Where-Object {
     [string]$_.event -eq 'milestone-revision-selected'
 })
-if ($authorizedEvents.Count -ne $selectedEvents.Count) {
+$abandonedEvents = @($events | Where-Object {
+    [string]$_.event -eq 'milestone-revision-abandoned' -and
+    [string]$_.milestone_id -eq $MilestoneId
+})
+$previousAbandonmentEvent = $null
+$previousAbandonment = $null
+if ($abandonedEvents.Count -gt 0) {
+    $previousAbandonmentEvent = $abandonedEvents[-1]
+    $previousAbandonmentPath = Get-RunLocalReceiptPath `
+        -RunDirectory $runRoot -RelativePath (
+            [string]$previousAbandonmentEvent.
+                milestone_revision_abandonment_receipt_path
+        ) -Label 'Previous milestone revision abandonment'
+    if (-not (Test-Path -LiteralPath $previousAbandonmentPath -PathType Leaf)) {
+        throw 'Previous milestone revision abandonment receipt is missing.'
+    }
+    $null = Read-DurableReviewMilestoneRevisionAbandonment `
+        -Path $previousAbandonmentPath -RunDirectory $runRoot
+    $previousAbandonment = Get-Content -LiteralPath $previousAbandonmentPath -Raw |
+        ConvertFrom-Json -Depth 100 -DateKind String
+    $previousAbandonmentPayload = [ordered]@{}
+    foreach ($property in $previousAbandonment.PSObject.Properties) {
+        if ($property.Name -ne 'receipt_hash') {
+            $previousAbandonmentPayload[$property.Name] = $property.Value
+        }
+    }
+    if ([string]$previousAbandonment.run_id -ne [string]$run.run_id -or
+        [string]$previousAbandonment.milestone_id -ne $MilestoneId -or
+        [string]$previousAbandonment.decision -ne 'abandoned' -or
+        [bool]$previousAbandonment.completion_eligible -or
+        [string]$previousAbandonmentEvent.milestone_revision_id -ne
+            [string]$previousAbandonment.revision_id -or
+        [string]$previousAbandonmentEvent.milestone_revision_abandonment_receipt_hash -ne
+            [string]$previousAbandonment.receipt_hash -or
+        [string]$previousAbandonment.receipt_hash -ne (
+            Get-TextSha256 (
+                $previousAbandonmentPayload | ConvertTo-Json -Compress -Depth 100
+            )
+        )) {
+        throw 'Previous milestone revision abandonment binding changed.'
+    }
+}
+$closedRevisionIds = @(
+    @($selectedEvents + $abandonedEvents) |
+        ForEach-Object { [string]$_.milestone_revision_id } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+)
+$pendingAuthorizations = @($authorizedEvents | Where-Object {
+    $revisionId = [string]$_.milestone_revision_id
+    $revisionId -notin $closedRevisionIds
+})
+if ($pendingAuthorizations.Count -gt 0) {
     throw 'A prior milestone revision authorization is still pending selection.'
+}
+if ($authorizedEvents.Count -ne ($selectedEvents.Count + $abandonedEvents.Count)) {
+    throw 'Milestone revision authorization history has an orphaned or forked revision.'
 }
 $previousSelection = $null
 $previousSelectionEvent = $null
@@ -80,12 +134,36 @@ if ($selectedEvents.Count -gt 0) {
     }
     $previousSelection = $chain.activation_receipt
     $previousSelectionEvent = $selectedEvents[-1]
+    $previousSelectionAuthorizationOrdinals = @(
+        for ($authorizationIndex = 0;
+            $authorizationIndex -lt $authorizedEvents.Count;
+            $authorizationIndex++) {
+            $authorizationEvent = $authorizedEvents[$authorizationIndex]
+            if ([string]$authorizationEvent.milestone_id -eq $MilestoneId -and
+                [string]$authorizationEvent.milestone_revision_id -eq
+                    [string]$previousSelectionEvent.milestone_revision_id -and
+                [string]$authorizationEvent.milestone_revision_authorization_receipt_path -eq
+                    [string]$previousSelectionEvent.milestone_revision_authorization_receipt_path -and
+                [string]$authorizationEvent.milestone_revision_authorization_receipt_hash -eq
+                    [string]$previousSelectionEvent.milestone_revision_authorization_receipt_hash) {
+                $authorizationIndex + 1
+            }
+        }
+    )
     if ($null -eq $previousSelection -or
+        $previousSelectionAuthorizationOrdinals.Count -ne 1 -or
+        [string]$previousSelection.revision_id -ne
+            [string]$previousSelectionEvent.milestone_revision_id -or
+        [string]$previousSelection.authorization_receipt_path -ne
+            [string]$previousSelectionEvent.milestone_revision_authorization_receipt_path -or
+        [string]$previousSelection.authorization_receipt_hash -ne
+            [string]$previousSelectionEvent.milestone_revision_authorization_receipt_hash -or
         [string]$chain.activation_receipt_path -ne
             [string]$previousSelectionEvent.milestone_activation_receipt_path -or
         [string]$chain.activation_receipt_hash -ne
             [string]$previousSelectionEvent.milestone_activation_receipt_hash -or
-        [int]$previousSelection.revision_index -ne $selectedEvents.Count) {
+        [int]$previousSelection.revision_index -ne
+            [int]$previousSelectionAuthorizationOrdinals[0]) {
         throw 'The previous first-milestone revision selection is incomplete.'
     }
     $previousOpenInventory = Get-MilestoneRevisionOpenOccurrenceInventory `
@@ -158,8 +236,21 @@ foreach ($sourceNodeId in $requiredSourceIds) {
     $previousBinding = @($chain.active_source_bindings | Where-Object {
         [string]$_.source_node_id -eq $sourceNodeId
     })
+    $cancelledByAbandonment = @($events | Where-Object {
+        [string]$_.event -eq 'node-status' -and
+        [string]$_.node_id -eq $sourceNodeId -and
+        [string]$_.status -eq 'cancelled' -and
+        [string]$_.prior_state -eq 'running' -and
+        [string]$_.milestone_revision_abandonment_receipt_hash -and
+        [string]$_.milestone_revision_id -in $closedRevisionIds
+    }) | Select-Object -Last 1
+    $sourceStateAllowed = ($null -ne $nodeState -and (
+        [string]$nodeState.status -eq 'adopted' -or
+        ([string]$nodeState.status -eq 'cancelled' -and
+            $null -ne $cancelledByAbandonment)
+    ))
     if ($null -eq $node -or $null -eq $nodeState -or
-        [string]$nodeState.status -ne 'adopted' -or
+        -not $sourceStateAllowed -or
         [string]::IsNullOrWhiteSpace([string]$nodeState.thread_id) -or
         $material.Count -ne 1 -or $previousBinding.Count -ne 1 -or
         [string]$previousBinding[0].source_thread_id -ne
@@ -386,7 +477,7 @@ $payload = [ordered]@{
     milestone_id = $MilestoneId
     milestone_index = 0
     revision_id = $revisionId
-    revision_index = $selectedEvents.Count + 1
+    revision_index = $authorizedEvents.Count + 1
     previous_activation_receipt_path = [string]$chain.activation_receipt_path
     previous_activation_receipt_hash = [string]$chain.activation_receipt_hash
     previous_source_bindings = @($chain.active_source_bindings)
@@ -455,6 +546,23 @@ if ($selectedEvents.Count -gt 0) {
         [string]$previousOpenInventory.hash
     $payload.previous_open_occurrence_count =
         [int]$previousOpenInventory.count
+}
+if ($null -ne $previousAbandonmentEvent) {
+    $payload.previous_abandonment_receipt_path = [string](
+        $previousAbandonmentEvent.milestone_revision_abandonment_receipt_path
+    )
+    $payload.previous_abandonment_receipt_hash = [string](
+        $previousAbandonment.receipt_hash
+    )
+    $payload.previous_abandonment_event_sequence = [int](
+        $previousAbandonmentEvent.sequence
+    )
+    $payload.previous_abandonment_event_hash = [string](
+        $previousAbandonmentEvent.hash
+    )
+    $payload.previous_abandonment_revision_id = [string](
+        $previousAbandonment.revision_id
+    )
 }
 $payload.created_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
 $receipt = [ordered]@{}

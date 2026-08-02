@@ -34,6 +34,27 @@ function Assert-ThrowsLike {
     }))
 }
 
+function Assert-RecoveryRejectedWithoutJournalWrite {
+    param(
+        [Parameter(Mandatory)][string] $Run,
+        [Parameter(Mandatory)][scriptblock] $Action,
+        [Parameter(Mandatory)][string] $Expected,
+        [Parameter(Mandatory)][string] $Message
+    )
+    $journalPath = Join-Path $Run 'events.jsonl'
+    $beforeEvents = @(Read-OrchestrationJournal $journalPath)
+    $beforeHash = (Get-FileHash -LiteralPath $journalPath `
+        -Algorithm SHA256).Hash
+    Assert-ThrowsLike $Action $Expected $Message
+    $afterEvents = @(Read-OrchestrationJournal $journalPath)
+    Assert-True (
+        $afterEvents.Count -eq $beforeEvents.Count -and
+        [string]$afterEvents[-1].hash -eq [string]$beforeEvents[-1].hash -and
+        (Get-FileHash -LiteralPath $journalPath -Algorithm SHA256).Hash -eq
+            $beforeHash
+    ) "$Message must leave journal count, head, and file hash unchanged."
+}
+
 function New-ReviewPlan {
     param(
         [string] $Path,
@@ -539,6 +560,11 @@ function Resign-RevisionLifecycleCorrectionTail {
         [string]$receipt.checkpoint_material_hash
     $event.milestone_revision_input_hash = [string]$receipt.input_manifest_hash
     $event.milestone_revision_selection_key = [string]$receipt.selection_key
+    if ($receipt.Contains('correction_mode')) {
+        $event.lifecycle_correction_mode = [string]$receipt.correction_mode
+        $event.lifecycle_correction_omission_source_node_id =
+            $receipt.omission_source_node_id
+    }
     $event.idempotency_key = [string]$receipt.correction_key
     $event.request_fingerprint = [string]$receipt.receipt_hash
     $event.Remove('hash')
@@ -553,19 +579,45 @@ function Resign-RevisionInventorySupersessionTail {
         [Parameter(Mandatory)][string] $Run,
         [Parameter(Mandatory)][scriptblock] $ReceiptMutation
     )
-    $receiptFiles = @(
+    $legacyReceiptFiles = @(
         Get-ChildItem -LiteralPath (Join-Path $Run 'receipts') -File |
             Where-Object { $_.Name -like '*.inventory-supersession.json' }
     )
-    if ($receiptFiles.Count -ne 1) {
+    $dedicatedReceiptFiles = @(
+        Get-ChildItem -LiteralPath (Join-Path $Run 'receipts') -File |
+            Where-Object { $_.Name -like '*.cumulative-correction.json' }
+    )
+    if (($legacyReceiptFiles.Count -eq 1) -and
+        ($dedicatedReceiptFiles.Count -eq 0)) {
+        $dedicated = $false
+        $receiptPath = $legacyReceiptFiles[0].FullName
+    } elseif (($legacyReceiptFiles.Count -eq 0) -and
+        ($dedicatedReceiptFiles.Count -eq 1)) {
+        $dedicated = $true
+        $receiptPath = $dedicatedReceiptFiles[0].FullName
+    } else {
         throw 'Inventory supersession fixture needs exactly one receipt.'
     }
-    $receiptPath = $receiptFiles[0].FullName
     $receipt = Get-Content -LiteralPath $receiptPath -Raw |
         ConvertFrom-Json -AsHashtable -Depth 100
     & $ReceiptMutation $receipt
-    $receipt.source_supersessions_hash = Get-TextSha256 (
-        ConvertTo-Json -InputObject @($receipt.source_supersessions) `
+    $sourceField = if ($dedicated) {
+        'cumulative_correction_sources'
+    } else {
+        'source_supersessions'
+    }
+    $sourceHashField = if ($dedicated) {
+        'cumulative_correction_sources_hash'
+    } else {
+        'source_supersessions_hash'
+    }
+    $keyField = if ($dedicated) {
+        'cumulative_correction_key'
+    } else {
+        'supersession_key'
+    }
+    $receipt[$sourceHashField] = Get-TextSha256 (
+        ConvertTo-Json -InputObject @($receipt[$sourceField]) `
             -Compress -Depth 100
     )
     $receipt.Remove('receipt_hash')
@@ -585,8 +637,11 @@ function Resign-RevisionInventorySupersessionTail {
         [object[]]$events,
         [Predicate[object]]{
             param($event)
-            [string]$event.event -eq
+            [string]$event.event -eq $(if ($dedicated) {
+                'milestone-revision-cumulative-corrected'
+            } else {
                 'milestone-revision-inventory-superseded'
+            })
         }
     )
     if ($eventIndex -ne ($events.Count - 1)) {
@@ -602,7 +657,7 @@ function Resign-RevisionInventorySupersessionTail {
         [string]$receipt.input_manifest_hash
     $events[$eventIndex].milestone_revision_selection_key =
         [string]$receipt.selection_key
-    $events[$eventIndex].idempotency_key = [string]$receipt.supersession_key
+    $events[$eventIndex].idempotency_key = [string]$receipt[$keyField]
     $events[$eventIndex].request_fingerprint = [string]$receipt.receipt_hash
     $events[$eventIndex].Remove('hash')
     $events[$eventIndex].hash = Get-OrchestrationEventHash (
@@ -1204,12 +1259,25 @@ try {
         @{
             id = 'review'
             result = $revisionReview.result_path
+            disposition = $revisionReview.disposition_path
         },
         @{
             id = 'domain'
             result = $revisionDomain.result_path
+            disposition = $revisionDomain.disposition_path
         }
     )) {
+        $resultReceipt = Get-Content -LiteralPath (
+            Join-Path $evidenceCorrectionRun $source.result
+        ) -Raw | ConvertFrom-Json -Depth 100 -DateKind String
+        $completedIndex = [Array]::FindLastIndex(
+            [object[]]$evidenceCorrectionEvents,
+            [Predicate[object]]{
+                param($event)
+                [string]$event.node_id -eq [string]$source.id -and
+                [string]$event.status -eq 'completed'
+            }
+        )
         $validatedIndex = [Array]::FindLastIndex(
             [object[]]$evidenceCorrectionEvents,
             [Predicate[object]]{
@@ -1218,11 +1286,34 @@ try {
                 [string]$event.status -eq 'validated'
             }
         )
+        $adoptedIndex = [Array]::FindLastIndex(
+            [object[]]$evidenceCorrectionEvents,
+            [Predicate[object]]{
+                param($event)
+                [string]$event.node_id -eq [string]$source.id -and
+                [string]$event.status -eq 'adopted'
+            }
+        )
+        Assert-True ($completedIndex -ge 0 -and
+            $validatedIndex -ge 0 -and $adoptedIndex -ge 0) (
+            "The correction fixture needs all lifecycle events for '$($source.id)'."
+        )
+        $evidenceCorrectionEvents[$completedIndex].evidence = @(
+            "artifact:$($source.result)",
+            "artifact:$($resultReceipt.thread_read_path)"
+        )
         Assert-True ($validatedIndex -ge 0) (
             "The correction fixture needs a validated event for '$($source.id)'."
         )
         $evidenceCorrectionEvents[$validatedIndex].evidence = @(
-            "artifact:$($source.result)"
+            "artifact:$($source.result)",
+            "test:lifecycle-correction-extra-test-$($source.id)",
+            "source:lifecycle-correction-extra-source-$($source.id)",
+            "observation:lifecycle-correction-extra-observation-$($source.id)"
+        )
+        $evidenceCorrectionEvents[$adoptedIndex].evidence = @(
+            "artifact:$($source.disposition)",
+            "observation:lifecycle-correction-adopted-$($source.id)"
         )
     }
     for ($eventIndex = 0; $eventIndex -lt $evidenceCorrectionEvents.Count;
@@ -1256,14 +1347,266 @@ try {
     $evidenceCorrectionAuthorization = Join-Path (
         $evidenceCorrectionRun
     ) 'materials/revision-lifecycle-correction-authorization.md'
-    Set-Content -LiteralPath $evidenceCorrectionAuthorization -Value (
-        'Controller authorizes only the validated evidence pointer correction.'
+    [ordered]@{
+        schema_version = '1.0'
+        revision_id = [string]$revisionAuthorization.revision_id
+        authorization_receipt_hash = [string]$revisionAuthorization.receipt_hash
+        selection_key = $authorizedSelectionKey
+        correction_mode = 'legacy_whole_source_same_shape'
+        omission_source_node_id = $null
+    } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (
+        $evidenceCorrectionAuthorization
     )
     $evidenceCorrectionBeforeRun = Join-Path $testRoot (
         'revision-validated-evidence-before-correction'
     )
     Copy-Item -LiteralPath $evidenceCorrectionRun `
         -Destination $evidenceCorrectionBeforeRun -Recurse
+    $validatedEvidenceMutations = @(
+        @{
+            name = 'second-artifact'
+            build = {
+                param($source)
+                @(
+                    "artifact:$($source.result)",
+                    "artifact:$($source.disposition)",
+                    "observation:second-artifact"
+                )
+            }
+        },
+        @{
+            name = 'zero-artifact'
+            build = {
+                param($source)
+                @(
+                    "test:zero-artifact-$($source.id)",
+                    'observation:zero-artifact'
+                )
+            }
+        },
+        @{
+            name = 'artifact-non-result'
+            build = {
+                param($source)
+                @(
+                    "artifact:$($source.disposition)",
+                    'observation:artifact-non-result'
+                )
+            }
+        }
+    )
+    foreach ($mutation in $validatedEvidenceMutations) {
+        $mutationRun = Join-Path $testRoot (
+            "revision-lifecycle-correction-validated-$($mutation.name)"
+        )
+        Copy-Item -LiteralPath $evidenceCorrectionBeforeRun `
+            -Destination $mutationRun -Recurse
+        $mutationEventsPath = Join-Path $mutationRun 'events.jsonl'
+        $mutationEvents = @(
+            Get-Content -LiteralPath $mutationEventsPath | ForEach-Object {
+                $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+            }
+        )
+        foreach ($source in @(
+            @{
+                id = 'review'
+                result = $revisionReview.result_path
+                disposition = $revisionReview.disposition_path
+            },
+            @{
+                id = 'domain'
+                result = $revisionDomain.result_path
+                disposition = $revisionDomain.disposition_path
+            }
+        )) {
+            $validatedIndex = [Array]::FindLastIndex(
+                [object[]]$mutationEvents,
+                [Predicate[object]]{
+                    param($event)
+                    [string]$event.node_id -eq [string]$source.id -and
+                    [string]$event.status -eq 'validated'
+                }
+            )
+            Assert-True ($validatedIndex -ge 0) (
+                "The '$($mutation.name)' fixture needs a validated event."
+            )
+            $mutationEvents[$validatedIndex].evidence = @(
+                & $mutation.build $source
+            )
+        }
+        for ($eventIndex = 0; $eventIndex -lt $mutationEvents.Count;
+            $eventIndex++) {
+            $mutationEvents[$eventIndex].prev_hash = if (
+                $eventIndex -eq 0
+            ) { $null } else {
+                [string]$mutationEvents[$eventIndex - 1].hash
+            }
+            $mutationEvents[$eventIndex].hash = Get-OrchestrationEventHash (
+                [pscustomobject]$mutationEvents[$eventIndex]
+            )
+        }
+        @($mutationEvents | ForEach-Object {
+            [pscustomobject]$_ | ConvertTo-Json -Compress -Depth 100
+        }) | Set-Content -LiteralPath $mutationEventsPath
+        $beforeCount = $mutationEvents.Count
+        $beforeHead = [string]$mutationEvents[-1].hash
+        $beforeFileHash = (Get-FileHash -LiteralPath $mutationEventsPath `
+            -Algorithm SHA256).Hash
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+            )) -RunDirectory $mutationRun `
+                -AuthorizationReceiptPath (
+                    Join-Path $mutationRun $revisionAuthorizationRelative
+                ) -SelectionMaterialPath (
+                    Join-Path $mutationRun (
+                        'materials/method-1-revision-1-selection.json'
+                    )
+                ) -AuthorizationMaterialPath (
+                    Join-Path $mutationRun (
+                        'materials/revision-lifecycle-correction-authorization.md'
+                    )
+                ) -CorrectionKey "controller:reject-$($mutation.name)" |
+                Out-Null
+        } 'exact validated-result-pointer error shape' (
+            "The '$($mutation.name)' validated evidence mutation must fail closed."
+        )
+        $afterEvents = @(Read-OrchestrationJournal $mutationEventsPath)
+        Assert-True (
+            $afterEvents.Count -eq $beforeCount -and
+            [string]$afterEvents[-1].hash -eq $beforeHead -and
+            (Get-FileHash -LiteralPath $mutationEventsPath `
+                -Algorithm SHA256).Hash -eq $beforeFileHash
+        ) "The '$($mutation.name)' rejection must not mutate the journal."
+    }
+    $completedEvidenceMutations = @(
+        @{
+            name = 'third-artifact'
+            build = {
+                param($source)
+                @(
+                    "artifact:$($source.result)",
+                    "artifact:$($source.raw)",
+                    'artifact:receipts/third-artifact.json'
+                )
+            }
+        },
+        @{
+            name = 'wrong-raw-path'
+            build = {
+                param($source)
+                @(
+                    "artifact:$($source.result)",
+                    'artifact:thread-reads/wrong.raw.json'
+                )
+            }
+        },
+        @{
+            name = 'raw-other-artifact'
+            build = {
+                param($source)
+                @(
+                    "artifact:$($source.result)",
+                    "artifact:$($source.disposition)"
+                )
+            }
+        },
+        @{
+            name = 'zero-result'
+            build = {
+                param($source)
+                @("artifact:$($source.raw)")
+            }
+        }
+    )
+    foreach ($mutation in $completedEvidenceMutations) {
+        $mutationRun = Join-Path $testRoot (
+            "revision-lifecycle-correction-completed-$($mutation.name)"
+        )
+        Copy-Item -LiteralPath $evidenceCorrectionBeforeRun `
+            -Destination $mutationRun -Recurse
+        $mutationEventsPath = Join-Path $mutationRun 'events.jsonl'
+        $mutationEvents = @(
+            Get-Content -LiteralPath $mutationEventsPath | ForEach-Object {
+                $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+            }
+        )
+        foreach ($source in @(
+            @{
+                id = 'review'
+                result = $revisionReview.result_path
+                disposition = $revisionReview.disposition_path
+            },
+            @{
+                id = 'domain'
+                result = $revisionDomain.result_path
+                disposition = $revisionDomain.disposition_path
+            }
+        )) {
+            $receipt = Get-Content -LiteralPath (
+                Join-Path $mutationRun $source.result
+            ) -Raw | ConvertFrom-Json -Depth 100 -DateKind String
+            $source.raw = [string]$receipt.thread_read_path
+            $completedIndex = [Array]::FindLastIndex(
+                [object[]]$mutationEvents,
+                [Predicate[object]]{
+                    param($event)
+                    [string]$event.node_id -eq [string]$source.id -and
+                    [string]$event.status -eq 'completed'
+                }
+            )
+            Assert-True ($completedIndex -ge 0) (
+                "The '$($mutation.name)' fixture needs a completed event."
+            )
+            $mutationEvents[$completedIndex].evidence = @(
+                & $mutation.build $source
+            )
+        }
+        for ($eventIndex = 0; $eventIndex -lt $mutationEvents.Count;
+            $eventIndex++) {
+            $mutationEvents[$eventIndex].prev_hash = if (
+                $eventIndex -eq 0
+            ) { $null } else {
+                [string]$mutationEvents[$eventIndex - 1].hash
+            }
+            $mutationEvents[$eventIndex].hash = Get-OrchestrationEventHash (
+                [pscustomobject]$mutationEvents[$eventIndex]
+            )
+        }
+        @($mutationEvents | ForEach-Object {
+            [pscustomobject]$_ | ConvertTo-Json -Compress -Depth 100
+        }) | Set-Content -LiteralPath $mutationEventsPath
+        $beforeCount = $mutationEvents.Count
+        $beforeHead = [string]$mutationEvents[-1].hash
+        $beforeFileHash = (Get-FileHash -LiteralPath $mutationEventsPath `
+            -Algorithm SHA256).Hash
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+            )) -RunDirectory $mutationRun `
+                -AuthorizationReceiptPath (
+                    Join-Path $mutationRun $revisionAuthorizationRelative
+                ) -SelectionMaterialPath (
+                    Join-Path $mutationRun (
+                        'materials/method-1-revision-1-selection.json'
+                    )
+                ) -AuthorizationMaterialPath (
+                    Join-Path $mutationRun (
+                        'materials/revision-lifecycle-correction-authorization.md'
+                    )
+                ) -CorrectionKey "controller:reject-completed-$($mutation.name)" |
+                Out-Null
+        } 'exact validated-result-pointer error shape' (
+            "The completed '$($mutation.name)' mutation must fail closed."
+        )
+        $afterEvents = @(Read-OrchestrationJournal $mutationEventsPath)
+        Assert-True (
+            $afterEvents.Count -eq $beforeCount -and
+            [string]$afterEvents[-1].hash -eq $beforeHead -and
+            (Get-FileHash -LiteralPath $mutationEventsPath `
+                -Algorithm SHA256).Hash -eq $beforeFileHash
+        ) "The completed '$($mutation.name)' rejection must not mutate the journal."
+    }
     $evidenceCorrection = & (Join-Path $scriptRoot (
         'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
     )) -RunDirectory $evidenceCorrectionRun `
@@ -1273,9 +1616,26 @@ try {
         -CorrectionKey 'controller:revision-validated-evidence-correction' |
         ConvertFrom-Json -Depth 100
     Assert-True (
-        [string]$evidenceCorrection.schema_version -eq '1.0' -and
+        [string]$evidenceCorrection.schema_version -eq '1.1' -and
+        [string]$evidenceCorrection.correction_mode -eq
+            'legacy_whole_source_same_shape' -and
         @($evidenceCorrection.source_corrections).Count -eq 2
     ) 'One correction receipt must bind the complete durable source set.'
+    foreach ($source in @('review', 'domain')) {
+        $validatedEvent = @($evidenceCorrectionEvents | Where-Object {
+            [string]$_.node_id -eq $source -and
+            [string]$_.status -eq 'validated'
+        }) | Select-Object -Last 1
+        Assert-True (
+            @($validatedEvent.evidence).Count -eq 4 -and
+            [string]$validatedEvent.evidence[1] -eq
+                "test:lifecycle-correction-extra-test-$source" -and
+            [string]$validatedEvent.evidence[2] -eq
+                "source:lifecycle-correction-extra-source-$source" -and
+            [string]$validatedEvent.evidence[3] -eq
+                "observation:lifecycle-correction-extra-observation-$source"
+        ) 'Lifecycle correction must preserve extra non-artifact evidence.'
+    }
     $evidenceCorrectionPendingRun = Join-Path $testRoot (
         'revision-validated-evidence-corrected-pending-selection'
     )
@@ -1365,6 +1725,274 @@ try {
             ) -Algorithm SHA256
         ).Hash
     ) 'A rejected duplicate correction must not mutate the journal.'
+
+    # A valid lifecycle correction and a later result that omits previously
+    # resolved source occurrences must compose through one non-state cumulative
+    # supersession.  Old receipts/events remain immutable and the combined
+    # selection still cannot satisfy independent main acceptance.
+    $combinedCumulativeRun = Join-Path $testRoot (
+        'revision-lifecycle-plus-cumulative-supersession'
+    )
+    Copy-Item -LiteralPath $evidenceCorrectionBeforeRun `
+        -Destination $combinedCumulativeRun -Recurse
+    $combinedResultPath = Join-Path $combinedCumulativeRun $revisionReview.result_path
+    $combinedResult = Get-Content -LiteralPath $combinedResultPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $combinedOmittedFindingId = 'review-method-1-finding-r08'
+    $combinedResult.pending_findings = @(
+        $combinedResult.pending_findings | Where-Object {
+            [string]$_.finding_id -ne $combinedOmittedFindingId
+        }
+    )
+    $combinedResult.Remove('receipt_hash')
+    $combinedResult.receipt_hash = Get-ThreadResultReceiptCanonicalHash `
+        -Receipt ([pscustomobject]$combinedResult)
+    $combinedResult | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $combinedResultPath -Encoding utf8
+    $combinedDispositionPath = Join-Path $combinedCumulativeRun `
+        $revisionReview.disposition_path
+    $combinedDisposition = Get-Content -LiteralPath $combinedDispositionPath -Raw |
+        ConvertFrom-Json -AsHashtable -Depth 100
+    $combinedDisposition.source_result_receipt_hash =
+        [string]$combinedResult.receipt_hash
+    $combinedDisposition.decisions = @(
+        $combinedDisposition.decisions | Where-Object {
+            [string]$_.source_finding_id -ne $combinedOmittedFindingId
+        }
+    )
+    $combinedDisposition.blocking_open = @(
+        $combinedDisposition.decisions | Where-Object {
+            [string]$_.severity -in @('P0', 'P1') -and
+            [string]$_.resolution_status -ne 'resolved'
+        } | ForEach-Object { [string]$_.finding }
+    )
+    $combinedDisposition.Remove('receipt_hash')
+    $combinedDisposition.receipt_hash = Get-TextSha256 (
+        $combinedDisposition | ConvertTo-Json -Compress -Depth 100
+    )
+    $combinedDisposition | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $combinedDispositionPath -Encoding utf8
+    $combinedEventsPath = Join-Path $combinedCumulativeRun 'events.jsonl'
+    $combinedEventsBefore = @(Read-OrchestrationJournal $combinedEventsPath)
+    $combinedPrefixHash = (Get-FileHash -LiteralPath $combinedEventsPath `
+        -Algorithm SHA256).Hash
+    $combinedOldResultHash = (Get-FileHash -LiteralPath $combinedResultPath `
+        -Algorithm SHA256).Hash
+    $combinedOldDispositionHash = (Get-FileHash -LiteralPath $combinedDispositionPath `
+        -Algorithm SHA256).Hash
+    $combinedAuthorizationPath = Join-Path $combinedCumulativeRun `
+        $revisionAuthorizationRelative
+    $combinedSelectionPath = Join-Path $combinedCumulativeRun `
+        'materials/method-1-revision-1-selection.json'
+    $combinedAuthorizationMaterial = Join-Path $combinedCumulativeRun `
+        'materials/revision-lifecycle-correction-authorization.md'
+    $combinedEvents = @(
+        Get-Content -LiteralPath $combinedEventsPath | ForEach-Object {
+            $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+        }
+    )
+    foreach ($source in @(
+        @{ id = 'review'; result = $revisionReview.result_path; disposition = $revisionReview.disposition_path },
+        @{ id = 'domain'; result = $revisionDomain.result_path; disposition = $revisionDomain.disposition_path }
+    )) {
+        $resultReceipt = Get-Content -LiteralPath (
+            Join-Path $combinedCumulativeRun $source.result
+        ) -Raw | ConvertFrom-Json -Depth 100
+        $completedIndex = [Array]::FindLastIndex(
+            [object[]]$combinedEvents,
+            [Predicate[object]]{
+                param($event)
+                [string]$event.node_id -eq [string]$source.id -and
+                [string]$event.status -eq 'completed'
+            }
+        )
+        $validatedIndex = [Array]::FindLastIndex(
+            [object[]]$combinedEvents,
+            [Predicate[object]]{
+                param($event)
+                [string]$event.node_id -eq [string]$source.id -and
+                [string]$event.status -eq 'validated'
+            }
+        )
+        $adoptedIndex = [Array]::FindLastIndex(
+            [object[]]$combinedEvents,
+            [Predicate[object]]{
+                param($event)
+                [string]$event.node_id -eq [string]$source.id -and
+                [string]$event.status -eq 'adopted'
+            }
+        )
+        $combinedEvents[$completedIndex].evidence = @(
+            "artifact:$($source.result)",
+            "artifact:$($resultReceipt.thread_read_path)"
+        )
+        $combinedEvents[$validatedIndex].evidence = @(
+            "artifact:$($source.result)",
+            "test:combined-lifecycle-$($source.id)",
+            "source:combined-lifecycle-$($source.id)",
+            "observation:combined-lifecycle-$($source.id)"
+        )
+        $combinedEvents[$adoptedIndex].evidence = @(
+            "artifact:$($source.disposition)",
+            "observation:combined-adopted-$($source.id)"
+        )
+    }
+    for ($eventIndex = 0; $eventIndex -lt $combinedEvents.Count; $eventIndex++) {
+        $combinedEvents[$eventIndex].prev_hash = if ($eventIndex -eq 0) {
+            $null
+        } else { [string]$combinedEvents[$eventIndex - 1].hash }
+        $combinedEvents[$eventIndex].hash = Get-OrchestrationEventHash (
+            [pscustomobject]$combinedEvents[$eventIndex]
+        )
+    }
+    @($combinedEvents | ForEach-Object {
+        [pscustomobject]$_ | ConvertTo-Json -Compress -Depth 100
+    }) | Set-Content -LiteralPath $combinedEventsPath
+    $combinedLifecycleCorrection = & (Join-Path $scriptRoot `
+        'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1') `
+        -RunDirectory $combinedCumulativeRun `
+        -AuthorizationReceiptPath $combinedAuthorizationPath `
+        -SelectionMaterialPath $combinedSelectionPath `
+        -AuthorizationMaterialPath $combinedAuthorizationMaterial `
+            -CorrectionKey 'controller:revision-1-combined-lifecycle-correction' |
+        ConvertFrom-Json -Depth 100
+    $combinedSupersession = & (Join-Path $scriptRoot `
+        'New-DurableReviewMilestoneRevisionCumulativeCorrectionReceipt.ps1') `
+        -RunDirectory $combinedCumulativeRun `
+        -AuthorizationReceiptPath $combinedAuthorizationPath `
+        -SelectionMaterialPath $combinedSelectionPath `
+        -AuthorizationMaterialPath $combinedAuthorizationMaterial `
+        -CumulativeCorrectionKey 'controller:revision-1-combined-supersession' |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$combinedSupersession.schema_version -eq '1.0' -and
+        @($combinedSupersession.cumulative_correction_sources).Count -eq 2 -and
+        (@($combinedSupersession.cumulative_correction_sources |
+            ForEach-Object { [int]$_.restored_occurrence_count }) |
+            Measure-Object -Sum).Sum -eq 1 -and
+        $combinedEventsBefore.Count + 2 -eq @(
+            Read-OrchestrationJournal $combinedEventsPath
+        ).Count
+    ) 'Lifecycle correction plus cumulative supersession must restore one exact occurrence.'
+    Assert-True (
+        (Get-FileHash -LiteralPath $combinedResultPath -Algorithm SHA256).Hash -eq
+            $combinedOldResultHash -and
+        (Get-FileHash -LiteralPath $combinedDispositionPath -Algorithm SHA256).Hash -eq
+            $combinedOldDispositionHash -and
+        $combinedPrefixHash -ne (Get-FileHash -LiteralPath $combinedEventsPath `
+            -Algorithm SHA256).Hash
+    ) 'Combined supersession must preserve current receipts and append one event.'
+    $combinedSupersessionEvent = @(
+        Read-OrchestrationJournal $combinedEventsPath | Where-Object {
+            [string]$_.event -eq 'milestone-revision-cumulative-corrected'
+        }
+    )
+    Assert-True (
+        $combinedSupersessionEvent.Count -eq 1 -and
+        $null -eq $combinedSupersessionEvent[0].node_id -and
+        [string]$combinedSupersessionEvent[0].status -eq 'planned'
+    ) 'Combined supersession must remain non-state.'
+    $combinedSelectionPathEffective = Join-Path $combinedCumulativeRun `
+        ([string]$combinedSupersession.effective_selection_material_path)
+    $combinedSelection = & (Join-Path $scriptRoot `
+        'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1') `
+        -RunDirectory $combinedCumulativeRun `
+        -AuthorizationReceiptPath $combinedAuthorizationPath `
+        -SelectionMaterialPath $combinedSelectionPathEffective `
+        -SelectionKey $authorizedSelectionKey |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$combinedSelection.schema_version -eq '1.6' -and
+        [string]$combinedSelection.lifecycle_correction_receipt_hash -eq
+            [string]$combinedLifecycleCorrection.receipt_hash -and
+        [string]$combinedSelection.cumulative_correction_receipt_hash -eq
+            [string]$combinedSupersession.receipt_hash
+    ) 'Combined selection must bind both correction receipts.'
+    $combinedBlocked = $false
+    try {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $combinedCumulativeRun | Out-Null
+    } catch { $combinedBlocked = $true }
+    Assert-True $combinedBlocked (
+        'Combined correction and supersession must not satisfy main acceptance.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot `
+            'New-DurableReviewMilestoneRevisionCumulativeCorrectionReceipt.ps1') `
+            -RunDirectory $combinedCumulativeRun `
+            -AuthorizationReceiptPath $combinedAuthorizationPath `
+            -SelectionMaterialPath $combinedSelectionPath `
+            -AuthorizationMaterialPath $combinedAuthorizationMaterial `
+            -CumulativeCorrectionKey 'controller:revision-1-combined-replay' |
+            Out-Null
+    } 'unsuperseded authorization' 'A combined cumulative supersession cannot be replayed.'
+    $noLifecycleRun = Join-Path $testRoot 'cumulative-without-lifecycle-correction'
+    Copy-Item -LiteralPath $revisionRun -Destination $noLifecycleRun -Recurse
+    $noLifecycleBefore = (Get-FileHash -LiteralPath (
+        Join-Path $noLifecycleRun 'events.jsonl'
+    ) -Algorithm SHA256).Hash
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot `
+            'New-DurableReviewMilestoneRevisionCumulativeCorrectionReceipt.ps1') `
+            -RunDirectory $noLifecycleRun `
+            -AuthorizationReceiptPath (Join-Path $noLifecycleRun `
+                $revisionAuthorizationRelative) `
+            -SelectionMaterialPath (Join-Path $noLifecycleRun `
+                'materials/method-1-revision-1-selection.json') `
+            -AuthorizationMaterialPath (Join-Path $noLifecycleRun `
+                'materials/method-1-revision-1-controller-authorization.md') `
+            -CumulativeCorrectionKey 'controller:combined-without-lifecycle' |
+            Out-Null
+    } 'exact lifecycle correction' (
+        'Combined supersession must require the exact lifecycle correction.'
+    )
+    Assert-True (
+        $noLifecycleBefore -eq (Get-FileHash -LiteralPath (
+            Join-Path $noLifecycleRun 'events.jsonl'
+        ) -Algorithm SHA256).Hash
+    ) 'A missing lifecycle correction must fail before journal write.'
+    $combinedMutationRun = Join-Path $testRoot `
+        'combined-supersession-restored-text-mutation'
+    Copy-Item -LiteralPath $combinedCumulativeRun `
+        -Destination $combinedMutationRun -Recurse
+    $combinedMutationEventsPath = Join-Path $combinedMutationRun 'events.jsonl'
+    $combinedMutationEvents = @(Read-OrchestrationJournal $combinedMutationEventsPath)
+    if ([string]$combinedMutationEvents[-1].event -eq
+        'milestone-revision-selected') {
+        $selectionReceiptRelative = [string]$combinedMutationEvents[-1].
+            milestone_activation_receipt_path
+        $selectionReceiptPath = Join-Path $combinedMutationRun `
+            $selectionReceiptRelative
+        if (Test-Path -LiteralPath $selectionReceiptPath -PathType Leaf) {
+            Remove-Item -LiteralPath $selectionReceiptPath -Force
+        }
+        $combinedMutationEvents = @(
+            $combinedMutationEvents | Select-Object -SkipLast 1
+        )
+        @($combinedMutationEvents | ForEach-Object {
+            $_ | ConvertTo-Json -Compress -Depth 100
+        }) | Set-Content -LiteralPath $combinedMutationEventsPath
+    }
+    $combinedMutationReceipt = @(
+        Get-ChildItem -LiteralPath (Join-Path $combinedMutationRun 'receipts') `
+            -File -Filter '*.cumulative-correction.json'
+    )[0].FullName
+    Resign-RevisionInventorySupersessionTail -Run $combinedMutationRun `
+        -ReceiptMutation {
+            param($receipt)
+            $restored = @($receipt.cumulative_correction_sources | Where-Object {
+                [int]$_.restored_occurrence_count -gt 0
+            })[0]
+            $restored.restored_occurrences[0].pending_finding.text =
+                'forged combined occurrence text'
+        }
+    Assert-ThrowsLike {
+        Read-DurableReviewMilestoneRevisionCumulativeCorrection `
+            -Path $combinedMutationReceipt -RunDirectory $combinedMutationRun |
+            Out-Null
+    } 'changed finding status, evidence, or effective artifacts' (
+        'A re-signed combined supersession with changed restored text must fail closed.'
+    )
 
     $partialCorrectionRun = Join-Path $testRoot (
         'revision-lifecycle-correction-partial-source'
@@ -1805,6 +2433,1068 @@ try {
     )
     Copy-Item -LiteralPath $replacementRevisionRun `
         -Destination $replacementReadyRun -Recurse
+
+    # A legitimate same-revision replacement can need the narrow validated
+    # evidence correction. The correction still has to cover every source and
+    # the replacement must retain its full continuity/recovery/re-arm chain.
+    $replacementCorrectionRun = Join-Path $testRoot (
+        'first-milestone-revision-replacement-lifecycle-correction'
+    )
+    Copy-Item -LiteralPath $replacementReadyRun `
+        -Destination $replacementCorrectionRun -Recurse
+    $replacementCorrectionEventsPath = Join-Path $replacementCorrectionRun (
+        'events.jsonl'
+    )
+    $replacementCorrectionEvents = @(
+        Get-Content -LiteralPath $replacementCorrectionEventsPath |
+            ForEach-Object {
+                $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+            }
+    )
+    foreach ($source in @(
+        @{
+            id = 'review'
+            result = $replacementReview.result_path
+            disposition = $replacementReview.disposition_path
+        },
+        @{
+            id = 'domain'
+            result = $replacementDomain.result_path
+            disposition = $replacementDomain.disposition_path
+        }
+    )) {
+        $completedIndex = [Array]::FindLastIndex(
+            [object[]]$replacementCorrectionEvents,
+            [Predicate[object]]{
+                param($event)
+                [string]$event.node_id -eq [string]$source.id -and
+                [string]$event.status -eq 'completed'
+            }
+        )
+        $validatedIndex = [Array]::FindLastIndex(
+            [object[]]$replacementCorrectionEvents,
+            [Predicate[object]]{
+                param($event)
+                [string]$event.node_id -eq [string]$source.id -and
+                [string]$event.status -eq 'validated'
+            }
+        )
+        $adoptedIndex = [Array]::FindLastIndex(
+            [object[]]$replacementCorrectionEvents,
+            [Predicate[object]]{
+                param($event)
+                [string]$event.node_id -eq [string]$source.id -and
+                [string]$event.status -eq 'adopted'
+            }
+        )
+        Assert-True ($completedIndex -ge 0 -and $validatedIndex -ge 0 -and
+            $adoptedIndex -ge 0) (
+            "The replacement correction fixture needs '$($source.id)' lifecycle."
+        )
+        $replacementCorrectionEvents[$completedIndex].artifact =
+            [string]$source.result
+        $replacementCorrectionEvents[$completedIndex].evidence = @(
+            "test:completed-pointer-omission-$($source.id)",
+            "source:completed-pointer-omission-$($source.id)",
+            "observation:completed-pointer-omission-$($source.id)"
+        )
+        $replacementCorrectionEvents[$validatedIndex].evidence = @(
+            "artifact:$($source.result)"
+        )
+        $replacementCorrectionEvents[$validatedIndex].artifact =
+            [string]$source.disposition
+        $replacementCorrectionEvents[$adoptedIndex].artifact =
+            [string]$source.disposition
+    }
+    for ($eventIndex = 0; $eventIndex -lt $replacementCorrectionEvents.Count;
+        $eventIndex++) {
+        $replacementCorrectionEvents[$eventIndex].prev_hash = if (
+            $eventIndex -eq 0
+        ) { $null } else {
+            [string]$replacementCorrectionEvents[$eventIndex - 1].hash
+        }
+        $replacementCorrectionEvents[$eventIndex].Remove('hash')
+        $replacementCorrectionEvents[$eventIndex].hash =
+            Get-OrchestrationEventHash (
+                [pscustomobject]$replacementCorrectionEvents[$eventIndex]
+            )
+    }
+    @($replacementCorrectionEvents | ForEach-Object {
+        $_ | ConvertTo-Json -Compress -Depth 100
+    }) | Set-Content -LiteralPath $replacementCorrectionEventsPath
+    $replacementCorrectionJournalHash = (
+        Get-FileHash -LiteralPath $replacementCorrectionEventsPath `
+            -Algorithm SHA256
+    ).Hash
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+        )) -RunDirectory $replacementCorrectionRun `
+            -AuthorizationReceiptPath (
+                Join-Path $replacementCorrectionRun $revisionAuthorizationRelative
+            ) -SelectionMaterialPath (
+                Join-Path $replacementCorrectionRun (
+                    'materials/method-1-revision-1-replacement-selection.json'
+                )
+            ) -SelectionKey $authorizedSelectionKey | Out-Null
+    } 'lifecycle does not bind' (
+        'A replacement selection still requires the whole-source correction.'
+    )
+    Assert-True (
+        $replacementCorrectionJournalHash -eq (
+            Get-FileHash -LiteralPath $replacementCorrectionEventsPath `
+                -Algorithm SHA256
+        ).Hash
+    ) 'A rejected pre-correction replacement selection must not mutate the journal.'
+    $replacementCorrectionAuthorization = Join-Path $replacementCorrectionRun (
+        'materials/replacement-lifecycle-correction-authorization.md'
+    )
+    [ordered]@{
+        schema_version = '1.0'
+        revision_id = [string]$revisionAuthorization.revision_id
+        authorization_receipt_hash = [string]$revisionAuthorization.receipt_hash
+        selection_key = $authorizedSelectionKey
+        correction_mode = 'legacy_whole_source_same_shape'
+        omission_source_node_id = $null
+    } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (
+        $replacementCorrectionAuthorization
+    )
+    foreach ($omissionAttack in @(
+        @{
+            name = 'wrong-completed-artifact'
+            expected = 'exact validated-result-pointer error shape'
+            mutate = {
+                param($events)
+                $event = @($events | Where-Object {
+                    [string]$_.node_id -eq 'review' -and
+                    [string]$_.status -eq 'completed'
+                })[-1]
+                $event.artifact = [string]$replacementReview.disposition_path
+            }
+        },
+        @{
+            name = 'unexpected-completed-evidence-artifact'
+            expected = 'exact validated-result-pointer error shape'
+            mutate = {
+                param($events)
+                $event = @($events | Where-Object {
+                    [string]$_.node_id -eq 'review' -and
+                    [string]$_.status -eq 'completed'
+                })[-1]
+                $event.evidence = @(
+                    "artifact:$($replacementReview.disposition_path)",
+                    'observation:unexpected-completed-artifact'
+                )
+            }
+        },
+        @{
+            name = 'partial-source-omission'
+            expected = 'one exact error shape across the complete durable source set'
+            mutate = {
+                param($events)
+                $event = @($events | Where-Object {
+                    [string]$_.node_id -eq 'review' -and
+                    [string]$_.status -eq 'completed'
+                })[-1]
+                $event.evidence = @(
+                    "artifact:$($replacementReview.result_path)"
+                )
+            }
+        }
+    )) {
+        $attackRun = Join-Path $testRoot (
+            "replacement-completed-evidence-omission-$($omissionAttack.name)"
+        )
+        Copy-Item -LiteralPath $replacementCorrectionRun `
+            -Destination $attackRun -Recurse
+        $attackEventsPath = Join-Path $attackRun 'events.jsonl'
+        $attackEvents = @(
+            Get-Content -LiteralPath $attackEventsPath | ForEach-Object {
+                $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+            }
+        )
+        & $omissionAttack.mutate $attackEvents
+        for ($eventIndex = 0; $eventIndex -lt $attackEvents.Count; $eventIndex++) {
+            $attackEvents[$eventIndex].prev_hash = if ($eventIndex -eq 0) {
+                $null
+            } else { [string]$attackEvents[$eventIndex - 1].hash }
+            $attackEvents[$eventIndex].Remove('hash')
+            $attackEvents[$eventIndex].hash = Get-OrchestrationEventHash (
+                [pscustomobject]$attackEvents[$eventIndex]
+            )
+        }
+        @($attackEvents | ForEach-Object {
+            $_ | ConvertTo-Json -Compress -Depth 100
+        }) | Set-Content -LiteralPath $attackEventsPath
+        $beforeCount = $attackEvents.Count
+        $beforeHead = [string]$attackEvents[-1].hash
+        $beforeFileHash = (Get-FileHash -LiteralPath $attackEventsPath `
+            -Algorithm SHA256).Hash
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+            )) -RunDirectory $attackRun `
+                -AuthorizationReceiptPath (
+                    Join-Path $attackRun $revisionAuthorizationRelative
+                ) -SelectionMaterialPath (
+                    Join-Path $attackRun (
+                        'materials/method-1-revision-1-replacement-selection.json'
+                    )
+                ) -AuthorizationMaterialPath (
+                    Join-Path $attackRun (
+                        'materials/replacement-lifecycle-correction-authorization.md'
+                    )
+                ) -CorrectionKey "controller:reject-$($omissionAttack.name)" |
+                Out-Null
+        } ([string]$omissionAttack.expected) (
+            "The '$($omissionAttack.name)' omission mutation must fail closed."
+        )
+        $afterEvents = @(Read-OrchestrationJournal $attackEventsPath)
+        Assert-True (
+            $afterEvents.Count -eq $beforeCount -and
+            [string]$afterEvents[-1].hash -eq $beforeHead -and
+            (Get-FileHash -LiteralPath $attackEventsPath `
+                -Algorithm SHA256).Hash -eq $beforeFileHash
+        ) "The '$($omissionAttack.name)' rejection must not mutate the journal."
+    }
+    $validatedCompleteRun = Join-Path $testRoot (
+        'replacement-completed-evidence-omission-validated-complete'
+    )
+    Copy-Item -LiteralPath $replacementCorrectionRun `
+        -Destination $validatedCompleteRun -Recurse
+    $validatedCompleteEventsPath = Join-Path $validatedCompleteRun 'events.jsonl'
+    $validatedCompleteEvents = @(
+        Get-Content -LiteralPath $validatedCompleteEventsPath | ForEach-Object {
+            $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+        }
+    )
+    foreach ($source in @(
+        @{
+            id = 'review'
+            result = $replacementReview.result_path
+            disposition = $replacementReview.disposition_path
+        },
+        @{
+            id = 'domain'
+            result = $replacementDomain.result_path
+            disposition = $replacementDomain.disposition_path
+        }
+    )) {
+        $validatedEvent = @($validatedCompleteEvents | Where-Object {
+            [string]$_.node_id -eq [string]$source.id -and
+            [string]$_.status -eq 'validated'
+        })[-1]
+        $validatedEvent.evidence = @(
+            "artifact:$($source.result)",
+            "artifact:$($source.disposition)",
+            "test:validated-complete-$($source.id)",
+            "source:validated-complete-$($source.id)",
+            "observation:validated-complete-$($source.id)"
+        )
+    }
+    for ($eventIndex = 0; $eventIndex -lt $validatedCompleteEvents.Count;
+        $eventIndex++) {
+        $validatedCompleteEvents[$eventIndex].prev_hash = if ($eventIndex -eq 0) {
+            $null
+        } else { [string]$validatedCompleteEvents[$eventIndex - 1].hash }
+        $validatedCompleteEvents[$eventIndex].Remove('hash')
+        $validatedCompleteEvents[$eventIndex].hash = Get-OrchestrationEventHash (
+            [pscustomobject]$validatedCompleteEvents[$eventIndex]
+        )
+    }
+    @($validatedCompleteEvents | ForEach-Object {
+        $_ | ConvertTo-Json -Compress -Depth 100
+    }) | Set-Content -LiteralPath $validatedCompleteEventsPath
+    $validatedCompleteBeforeRun = Join-Path $testRoot (
+        'replacement-completed-evidence-omission-validated-complete-before'
+    )
+    Copy-Item -LiteralPath $validatedCompleteRun `
+        -Destination $validatedCompleteBeforeRun -Recurse
+    $validatedCompleteBeforeCount = $validatedCompleteEvents.Count
+    $validatedCompleteBeforeHash = (
+        Get-FileHash -LiteralPath $validatedCompleteEventsPath -Algorithm SHA256
+    ).Hash
+    $bothOmissionSingleModeRun = Join-Path $testRoot (
+        'replacement-completed-evidence-omission-single-mode-rejected'
+    )
+    Copy-Item -LiteralPath $validatedCompleteBeforeRun `
+        -Destination $bothOmissionSingleModeRun -Recurse
+    $bothOmissionSingleModeAuthorization = Join-Path (
+        $bothOmissionSingleModeRun
+    ) 'materials/replacement-lifecycle-correction-authorization.json'
+    [ordered]@{
+        schema_version = '1.0'
+        revision_id = [string]$revisionAuthorization.revision_id
+        authorization_receipt_hash = [string]$revisionAuthorization.receipt_hash
+        selection_key = $authorizedSelectionKey
+        correction_mode = 'single_source_omission'
+        omission_source_node_id = 'domain'
+    } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (
+        $bothOmissionSingleModeAuthorization
+    )
+    $bothOmissionSingleModeEventsPath = Join-Path (
+        $bothOmissionSingleModeRun
+    ) 'events.jsonl'
+    $bothOmissionSingleModeBefore = @(
+        Read-OrchestrationJournal $bothOmissionSingleModeEventsPath
+    )
+    $bothOmissionSingleModeBeforeHash = (
+        Get-FileHash -LiteralPath $bothOmissionSingleModeEventsPath `
+            -Algorithm SHA256
+    ).Hash
+    $bothOmissionSingleModeReceiptCount = @(
+        Get-ChildItem -LiteralPath (
+            Join-Path $bothOmissionSingleModeRun 'receipts'
+        ) -Filter '*.lifecycle-correction.json' -File -ErrorAction SilentlyContinue
+    ).Count
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+        )) -RunDirectory $bothOmissionSingleModeRun `
+            -AuthorizationReceiptPath (
+                Join-Path $bothOmissionSingleModeRun $revisionAuthorizationRelative
+            ) -SelectionMaterialPath (
+                Join-Path $bothOmissionSingleModeRun (
+                    'materials/method-1-revision-1-replacement-selection.json'
+                )
+            ) -AuthorizationMaterialPath $bothOmissionSingleModeAuthorization `
+            -CorrectionKey 'controller:reject-both-omission-single-mode' |
+            Out-Null
+    } 'requires exactly one omitted source' (
+        'single_source_omission must reject a two-source omission before write.'
+    )
+    $bothOmissionSingleModeAfter = @(
+        Read-OrchestrationJournal $bothOmissionSingleModeEventsPath
+    )
+    Assert-True (
+        $bothOmissionSingleModeAfter.Count -eq
+            $bothOmissionSingleModeBefore.Count -and
+        [string]$bothOmissionSingleModeAfter[-1].hash -eq
+            [string]$bothOmissionSingleModeBefore[-1].hash -and
+        (Get-FileHash -LiteralPath $bothOmissionSingleModeEventsPath `
+            -Algorithm SHA256).Hash -eq $bothOmissionSingleModeBeforeHash -and
+        @(Get-ChildItem -LiteralPath (
+            Join-Path $bothOmissionSingleModeRun 'receipts'
+        ) -Filter '*.lifecycle-correction.json' -File `
+            -ErrorAction SilentlyContinue).Count -eq
+            $bothOmissionSingleModeReceiptCount
+    ) 'A rejected two-source omission must preserve journal and receipt inventory.'
+    $validatedCompleteCorrection = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+    )) -RunDirectory $validatedCompleteRun `
+        -AuthorizationReceiptPath (
+            Join-Path $validatedCompleteRun $revisionAuthorizationRelative
+        ) -SelectionMaterialPath (
+            Join-Path $validatedCompleteRun (
+                'materials/method-1-revision-1-replacement-selection.json'
+            )
+        ) -AuthorizationMaterialPath (
+            Join-Path $validatedCompleteRun (
+                'materials/replacement-lifecycle-correction-authorization.md'
+            )
+        ) -CorrectionKey 'controller:validated-complete-correction' |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        @($validatedCompleteCorrection.source_corrections | Where-Object {
+            [string]$_.error_class -eq
+                'completed-missing-result-pointer-with-valid-validated-binding'
+        }).Count -eq 2 -and
+        @(Read-OrchestrationJournal $validatedCompleteEventsPath).Count -eq
+            ($validatedCompleteBeforeCount + 1) -and
+        $validatedCompleteBeforeHash -ne (
+            Get-FileHash -LiteralPath $validatedCompleteEventsPath -Algorithm SHA256
+        ).Hash
+    ) (
+        'The whole-source correction must accept completed evidence omission ' +
+        'when validated already binds the current result and disposition.'
+    )
+    $validatedCompleteSelection = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+    )) -RunDirectory $validatedCompleteRun `
+        -AuthorizationReceiptPath (
+            Join-Path $validatedCompleteRun $revisionAuthorizationRelative
+        ) -SelectionMaterialPath (
+            Join-Path $validatedCompleteRun (
+                'materials/method-1-revision-1-replacement-selection.json'
+            )
+        ) -SelectionKey $authorizedSelectionKey |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$validatedCompleteSelection.schema_version -eq '1.5' -and
+        [string]$validatedCompleteSelection.lifecycle_correction_receipt_hash -eq
+            [string]$validatedCompleteCorrection.receipt_hash
+    ) (
+        'The corrected replacement lifecycle must remain selectable through ' +
+        'the existing schema 1.5 path.'
+    )
+    $singleSourceOmissionRun = Join-Path $testRoot (
+        'replacement-single-source-completed-evidence-omission'
+    )
+    Copy-Item -LiteralPath $validatedCompleteBeforeRun `
+        -Destination $singleSourceOmissionRun -Recurse
+    $singleSourceOmissionEventsPath = Join-Path $singleSourceOmissionRun (
+        'events.jsonl'
+    )
+    $singleSourceOmissionEvents = @(
+        Get-Content -LiteralPath $singleSourceOmissionEventsPath | ForEach-Object {
+            $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+        }
+    )
+    $unchangedCompleted = @($singleSourceOmissionEvents | Where-Object {
+        [string]$_.node_id -eq 'review' -and
+        [string]$_.status -eq 'completed'
+    })[-1]
+    $unchangedCompleted.evidence = @(
+        "artifact:$($replacementReview.result_path)",
+        'test:unchanged-replacement-completed',
+        'source:unchanged-replacement-completed',
+        'observation:unchanged-replacement-completed'
+    )
+    for ($eventIndex = 0; $eventIndex -lt $singleSourceOmissionEvents.Count;
+        $eventIndex++) {
+        $singleSourceOmissionEvents[$eventIndex].prev_hash = if (
+            $eventIndex -eq 0
+        ) { $null } else {
+            [string]$singleSourceOmissionEvents[$eventIndex - 1].hash
+        }
+        $singleSourceOmissionEvents[$eventIndex].Remove('hash')
+        $singleSourceOmissionEvents[$eventIndex].hash = Get-OrchestrationEventHash (
+            [pscustomobject]$singleSourceOmissionEvents[$eventIndex]
+        )
+    }
+    @($singleSourceOmissionEvents | ForEach-Object {
+        $_ | ConvertTo-Json -Compress -Depth 100
+    }) | Set-Content -LiteralPath $singleSourceOmissionEventsPath
+    $singleSourceOmissionAuthorization = Join-Path $singleSourceOmissionRun (
+        'materials/replacement-lifecycle-correction-authorization.md'
+    )
+    [ordered]@{
+        schema_version = '1.0'
+        revision_id = [string]$revisionAuthorization.revision_id
+        authorization_receipt_hash = [string]$revisionAuthorization.receipt_hash
+        selection_key = $authorizedSelectionKey
+        correction_mode = 'single_source_omission'
+        omission_source_node_id = 'domain'
+    } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (
+        $singleSourceOmissionAuthorization
+    )
+    foreach ($ordinalMutation in @(
+        @{
+            name = 'mode-case'
+            property = 'correction_mode'
+            value = 'Single_Source_Omission'
+            expected = 'authorization binding is invalid'
+        },
+        @{
+            name = 'mode-leading-space'
+            property = 'correction_mode'
+            value = ' single_source_omission'
+            expected = 'authorization binding is invalid'
+        },
+        @{
+            name = 'mode-trailing-space'
+            property = 'correction_mode'
+            value = 'single_source_omission '
+            expected = 'authorization binding is invalid'
+        },
+        @{
+            name = 'mode-unicode-near'
+            property = 'correction_mode'
+            value = [string]::Concat(
+                'single_source_omissi', [char]0x043E, 'n'
+            )
+            expected = 'authorization binding is invalid'
+        },
+        @{
+            name = 'source-case'
+            property = 'omission_source_node_id'
+            value = 'Domain'
+            expected = 'omission source is unauthorized'
+        },
+        @{
+            name = 'source-leading-space'
+            property = 'omission_source_node_id'
+            value = ' domain'
+            expected = 'omission source is unauthorized'
+        },
+        @{
+            name = 'source-trailing-space'
+            property = 'omission_source_node_id'
+            value = 'domain '
+            expected = 'omission source is unauthorized'
+        },
+        @{
+            name = 'source-unicode-near'
+            property = 'omission_source_node_id'
+            value = [string]::Concat('d', [char]0x043E, 'main')
+            expected = 'omission source is unauthorized'
+        }
+    )) {
+        $ordinalMutationRun = Join-Path $testRoot (
+            "replacement-single-source-omission-$($ordinalMutation.name)"
+        )
+        Copy-Item -LiteralPath $singleSourceOmissionRun `
+            -Destination $ordinalMutationRun -Recurse
+        $ordinalMutationAuthorization = Join-Path $ordinalMutationRun (
+            'materials/replacement-lifecycle-correction-authorization.md'
+        )
+        $ordinalMutationMaterial = Get-Content -LiteralPath (
+            $ordinalMutationAuthorization
+        ) -Raw | ConvertFrom-Json -Depth 20 -DateKind String
+        $ordinalMutationMaterial.([string]$ordinalMutation.property) =
+            [string]$ordinalMutation.value
+        $ordinalMutationMaterial | ConvertTo-Json -Depth 20 | Set-Content `
+            -LiteralPath $ordinalMutationAuthorization
+        $ordinalMutationEventsPath = Join-Path $ordinalMutationRun 'events.jsonl'
+        $ordinalMutationBefore = @(
+            Read-OrchestrationJournal $ordinalMutationEventsPath
+        )
+        $ordinalMutationBeforeHash = (
+            Get-FileHash -LiteralPath $ordinalMutationEventsPath -Algorithm SHA256
+        ).Hash
+        $ordinalMutationReceiptCount = @(
+            Get-ChildItem -LiteralPath (Join-Path $ordinalMutationRun 'receipts') `
+                -Filter '*.lifecycle-correction.json' -File `
+                -ErrorAction SilentlyContinue
+        ).Count
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+            )) -RunDirectory $ordinalMutationRun `
+                -AuthorizationReceiptPath (
+                    Join-Path $ordinalMutationRun $revisionAuthorizationRelative
+                ) -SelectionMaterialPath (
+                    Join-Path $ordinalMutationRun (
+                        'materials/method-1-revision-1-replacement-selection.json'
+                    )
+                ) -AuthorizationMaterialPath $ordinalMutationAuthorization `
+                -CorrectionKey (
+                    "controller:reject-$($ordinalMutation.name)"
+                ) | Out-Null
+        } ([string]$ordinalMutation.expected) (
+            "The '$($ordinalMutation.name)' ordinal mutation must be rejected."
+        )
+        $ordinalMutationAfter = @(
+            Read-OrchestrationJournal $ordinalMutationEventsPath
+        )
+        Assert-True (
+            $ordinalMutationAfter.Count -eq $ordinalMutationBefore.Count -and
+            [string]$ordinalMutationAfter[-1].hash -eq
+                [string]$ordinalMutationBefore[-1].hash -and
+            (Get-FileHash -LiteralPath $ordinalMutationEventsPath `
+                -Algorithm SHA256).Hash -eq $ordinalMutationBeforeHash -and
+            @(Get-ChildItem -LiteralPath (
+                Join-Path $ordinalMutationRun 'receipts'
+            ) -Filter '*.lifecycle-correction.json' -File `
+                -ErrorAction SilentlyContinue).Count -eq
+                $ordinalMutationReceiptCount
+        ) (
+            "Rejected '$($ordinalMutation.name)' must preserve journal and receipts."
+        )
+    }
+    $allCorrectRun = Join-Path $testRoot (
+        'replacement-lifecycle-correction-all-sources-correct'
+    )
+    Copy-Item -LiteralPath $singleSourceOmissionRun `
+        -Destination $allCorrectRun -Recurse
+    $allCorrectEventsPath = Join-Path $allCorrectRun 'events.jsonl'
+    $allCorrectEvents = @(
+        Get-Content -LiteralPath $allCorrectEventsPath | ForEach-Object {
+            $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+        }
+    )
+    $secondCorrectCompleted = @($allCorrectEvents | Where-Object {
+        [string]$_.node_id -eq 'domain' -and
+        [string]$_.status -eq 'completed'
+    })[-1]
+    $secondCorrectCompleted.evidence = @(
+        "artifact:$($replacementDomain.result_path)",
+        'test:unchanged-domain-completed'
+    )
+    for ($eventIndex = 0; $eventIndex -lt $allCorrectEvents.Count; $eventIndex++) {
+        $allCorrectEvents[$eventIndex].prev_hash = if ($eventIndex -eq 0) {
+            $null
+        } else { [string]$allCorrectEvents[$eventIndex - 1].hash }
+        $allCorrectEvents[$eventIndex].Remove('hash')
+        $allCorrectEvents[$eventIndex].hash = Get-OrchestrationEventHash (
+            [pscustomobject]$allCorrectEvents[$eventIndex]
+        )
+    }
+    @($allCorrectEvents | ForEach-Object {
+        $_ | ConvertTo-Json -Compress -Depth 100
+    }) | Set-Content -LiteralPath $allCorrectEventsPath
+    $allCorrectBeforeCount = $allCorrectEvents.Count
+    $allCorrectBeforeHead = [string]$allCorrectEvents[-1].hash
+    $allCorrectBeforeHash = (Get-FileHash -LiteralPath $allCorrectEventsPath `
+        -Algorithm SHA256).Hash
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+        )) -RunDirectory $allCorrectRun `
+            -AuthorizationReceiptPath (
+                Join-Path $allCorrectRun $revisionAuthorizationRelative
+            ) -SelectionMaterialPath (
+                Join-Path $allCorrectRun (
+                    'materials/method-1-revision-1-replacement-selection.json'
+                )
+            ) -AuthorizationMaterialPath (
+                Join-Path $allCorrectRun (
+                    'materials/replacement-lifecycle-correction-authorization.md'
+                )
+            ) -CorrectionKey 'controller:reject-all-correct-correction' |
+            Out-Null
+    } 'requires exactly one omitted source' (
+        'A fully correct source set must not create a lifecycle correction.'
+    )
+    $allCorrectAfter = @(Read-OrchestrationJournal $allCorrectEventsPath)
+    Assert-True (
+        $allCorrectAfter.Count -eq $allCorrectBeforeCount -and
+        [string]$allCorrectAfter[-1].hash -eq $allCorrectBeforeHead -and
+        (Get-FileHash -LiteralPath $allCorrectEventsPath -Algorithm SHA256).Hash -eq
+            $allCorrectBeforeHash
+    ) 'A rejected all-correct lifecycle must not mutate the journal.'
+    $singleSourceOmissionBeforeCount = $singleSourceOmissionEvents.Count
+    $singleSourceOmissionCorrection = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+    )) -RunDirectory $singleSourceOmissionRun `
+        -AuthorizationReceiptPath (
+            Join-Path $singleSourceOmissionRun $revisionAuthorizationRelative
+        ) -SelectionMaterialPath (
+            Join-Path $singleSourceOmissionRun (
+                'materials/method-1-revision-1-replacement-selection.json'
+            )
+        ) -AuthorizationMaterialPath (
+            $singleSourceOmissionAuthorization
+        ) -CorrectionKey 'controller:single-source-omission-correction' |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$singleSourceOmissionCorrection.schema_version -eq '1.1' -and
+        [string]$singleSourceOmissionCorrection.correction_mode -eq
+            'single_source_omission' -and
+        [string]$singleSourceOmissionCorrection.omission_source_node_id -eq
+            'domain' -and
+        @($singleSourceOmissionCorrection.source_corrections | Where-Object {
+            [string]$_.error_class -eq
+                'completed-missing-result-pointer-with-valid-validated-binding'
+        }).Count -eq 1 -and
+        @($singleSourceOmissionCorrection.source_corrections | Where-Object {
+            [string]$_.error_class -eq 'lifecycle-binding-unchanged'
+        }).Count -eq 1 -and
+        @(Read-OrchestrationJournal $singleSourceOmissionEventsPath).Count -eq
+            ($singleSourceOmissionBeforeCount + 1)
+    ) (
+        'A whole-source correction must preserve one exact source lifecycle ' +
+        'while correcting the sibling source completed evidence omission.'
+    )
+    $singleSourceOmissionPendingRun = Join-Path $testRoot (
+        'replacement-single-source-omission-pending-selection'
+    )
+    Copy-Item -LiteralPath $singleSourceOmissionRun `
+        -Destination $singleSourceOmissionPendingRun -Recurse
+    foreach ($modeMutation in @(
+        @{
+            name = 'mode-downgrade'
+            expected = 'mode binding changed'
+            action = {
+                param($receipt)
+                $receipt.correction_mode = 'legacy_whole_source_same_shape'
+                $receipt.omission_source_node_id = $null
+            }
+        },
+        @{
+            name = 'omission-source-switch'
+            expected = 'mode binding changed'
+            action = {
+                param($receipt)
+                $receipt.omission_source_node_id = 'review'
+            }
+        }
+    )) {
+        $modeMutationRun = Join-Path $testRoot (
+            "replacement-single-source-omission-$($modeMutation.name)"
+        )
+        Copy-Item -LiteralPath $singleSourceOmissionPendingRun `
+            -Destination $modeMutationRun -Recurse
+        Resign-RevisionLifecycleCorrectionTail -Run $modeMutationRun `
+            -ReceiptMutation $modeMutation.action
+        $modeMutationReceipt = @(
+            Get-ChildItem -LiteralPath (Join-Path $modeMutationRun 'receipts') `
+                -Filter '*.lifecycle-correction.json' -File
+        )[0].FullName
+        Assert-ThrowsLike {
+            Read-DurableReviewMilestoneRevisionLifecycleCorrection `
+                -Path $modeMutationReceipt -RunDirectory $modeMutationRun |
+                Out-Null
+        } ([string]$modeMutation.expected) (
+            "The '$($modeMutation.name)' correction mutation must be rejected."
+        )
+    }
+    $singleSourceOmissionSelection = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+    )) -RunDirectory $singleSourceOmissionRun `
+        -AuthorizationReceiptPath (
+            Join-Path $singleSourceOmissionRun $revisionAuthorizationRelative
+        ) -SelectionMaterialPath (
+            Join-Path $singleSourceOmissionRun (
+                'materials/method-1-revision-1-replacement-selection.json'
+            )
+        ) -SelectionKey $authorizedSelectionKey |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$singleSourceOmissionSelection.schema_version -eq '1.5' -and
+        [string]$singleSourceOmissionSelection.lifecycle_correction_receipt_hash -eq
+            [string]$singleSourceOmissionCorrection.receipt_hash -and
+        [string]$singleSourceOmissionSelection.lifecycle_correction_mode -eq
+            'single_source_omission' -and
+        [string]$singleSourceOmissionSelection.
+            lifecycle_correction_omission_source_node_id -eq 'domain'
+    ) (
+        'A single-source omission correction must remain selectable through ' +
+        'the existing replacement correction schema.'
+    )
+    foreach ($validatedCompleteAttack in @(
+        @{
+            name = 'duplicate-result'
+            expected = 'exact validated-result-pointer error shape'
+            mutate = {
+                param($event)
+                $event.evidence = @(
+                    "artifact:$($replacementReview.result_path)",
+                    "artifact:$($replacementReview.result_path)",
+                    "artifact:$($replacementReview.disposition_path)"
+                )
+            }
+        },
+        @{
+            name = 'third-artifact'
+            expected = 'exact validated-result-pointer error shape'
+            mutate = {
+                param($event)
+                $event.evidence = @(
+                    "artifact:$($replacementReview.result_path)",
+                    "artifact:$($replacementReview.disposition_path)",
+                    'artifact:receipts/unexpected-third.json'
+                )
+            }
+        },
+        @{
+            name = 'missing-result'
+            expected = 'exact validated-result-pointer error shape'
+            mutate = {
+                param($event)
+                $event.evidence = @(
+                    "artifact:$($replacementReview.disposition_path)",
+                    'observation:validated-result-omitted'
+                )
+            }
+        },
+        @{
+            name = 'mixed-source-shapes'
+            expected = 'one exact error shape'
+            mutate = {
+                param($event)
+                $event.evidence = @(
+                    "artifact:$($replacementReview.result_path)"
+                )
+            }
+        }
+    )) {
+        $attackRun = Join-Path $testRoot (
+            "validated-complete-$($validatedCompleteAttack.name)"
+        )
+        Copy-Item -LiteralPath $validatedCompleteBeforeRun `
+            -Destination $attackRun -Recurse
+        $attackEventsPath = Join-Path $attackRun 'events.jsonl'
+        $attackEvents = @(
+            Get-Content -LiteralPath $attackEventsPath | ForEach-Object {
+                $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+            }
+        )
+        $reviewValidated = @($attackEvents | Where-Object {
+            [string]$_.node_id -eq 'review' -and
+            [string]$_.status -eq 'validated'
+        })[-1]
+        & $validatedCompleteAttack.mutate $reviewValidated
+        for ($eventIndex = 0; $eventIndex -lt $attackEvents.Count; $eventIndex++) {
+            $attackEvents[$eventIndex].prev_hash = if ($eventIndex -eq 0) {
+                $null
+            } else { [string]$attackEvents[$eventIndex - 1].hash }
+            $attackEvents[$eventIndex].Remove('hash')
+            $attackEvents[$eventIndex].hash = Get-OrchestrationEventHash (
+                [pscustomobject]$attackEvents[$eventIndex]
+            )
+        }
+        @($attackEvents | ForEach-Object {
+            $_ | ConvertTo-Json -Compress -Depth 100
+        }) | Set-Content -LiteralPath $attackEventsPath
+        $beforeCount = $attackEvents.Count
+        $beforeHead = [string]$attackEvents[-1].hash
+        $beforeFileHash = (Get-FileHash -LiteralPath $attackEventsPath `
+            -Algorithm SHA256).Hash
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+            )) -RunDirectory $attackRun `
+                -AuthorizationReceiptPath (
+                    Join-Path $attackRun $revisionAuthorizationRelative
+                ) -SelectionMaterialPath (
+                    Join-Path $attackRun (
+                        'materials/method-1-revision-1-replacement-selection.json'
+                    )
+                ) -AuthorizationMaterialPath (
+                    Join-Path $attackRun (
+                        'materials/replacement-lifecycle-correction-authorization.md'
+                    )
+                ) -CorrectionKey "controller:reject-$($validatedCompleteAttack.name)" |
+                Out-Null
+        } ([string]$validatedCompleteAttack.expected) (
+            "The '$($validatedCompleteAttack.name)' validated binding must fail closed."
+        )
+        $afterEvents = @(Read-OrchestrationJournal $attackEventsPath)
+        Assert-True (
+            $afterEvents.Count -eq $beforeCount -and
+            [string]$afterEvents[-1].hash -eq $beforeHead -and
+            (Get-FileHash -LiteralPath $attackEventsPath `
+                -Algorithm SHA256).Hash -eq $beforeFileHash
+        ) (
+            "The '$($validatedCompleteAttack.name)' rejection must not mutate " +
+            'the journal.'
+        )
+    }
+    $replacementCorrection = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+    )) -RunDirectory $replacementCorrectionRun `
+        -AuthorizationReceiptPath (
+            Join-Path $replacementCorrectionRun $revisionAuthorizationRelative
+        ) -SelectionMaterialPath (
+            Join-Path $replacementCorrectionRun (
+                'materials/method-1-revision-1-replacement-selection.json'
+            )
+        ) -AuthorizationMaterialPath $replacementCorrectionAuthorization `
+        -CorrectionKey 'controller:replacement-lifecycle-correction' |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        @($replacementCorrection.source_corrections).Count -eq 2 -and
+        @($replacementCorrection.source_corrections | Where-Object {
+            [string]$_.error_class -eq
+                'completed-missing-result-pointer-and-validated-missing-disposition-pointer'
+        }).Count -eq 2 -and
+        [string](@($replacementCorrection.source_corrections | Where-Object {
+            [string]$_.source_node_id -eq 'review'
+        })[0].source_thread_id) -eq 'review-replacement-thread'
+    ) 'A replacement correction must bind the selected replacement thread.'
+    $replacementCorrectionPendingRun = Join-Path $testRoot (
+        'first-milestone-revision-replacement-corrected-pending-selection'
+    )
+    Copy-Item -LiteralPath $replacementCorrectionRun `
+        -Destination $replacementCorrectionPendingRun -Recurse
+    foreach ($correctionEventAttack in @(
+        @{
+            name = 'noncanonical-status'
+            mutate = {
+                param($event)
+                $event.status = 'completed'
+            }
+        },
+        @{
+            name = 'noncanonical-prior-state'
+            mutate = {
+                param($event)
+                $event.prior_state = 'running'
+            }
+        }
+    )) {
+        $correctionEventAttackRun = Join-Path $testRoot (
+            "revision-replacement-correction-event-$($correctionEventAttack.name)"
+        )
+        Copy-Item -LiteralPath $replacementCorrectionPendingRun `
+            -Destination $correctionEventAttackRun -Recurse
+        $correctionEventAttackJournal = Join-Path $correctionEventAttackRun (
+            'events.jsonl'
+        )
+        $correctionEventAttackLines = @(
+            Get-Content -LiteralPath $correctionEventAttackJournal
+        )
+        $correctionEventAttackTail = $correctionEventAttackLines[-1] |
+            ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+        & $correctionEventAttack.mutate $correctionEventAttackTail
+        $correctionEventAttackTail.Remove('hash')
+        $correctionEventAttackTail.hash = Get-OrchestrationEventHash (
+            [pscustomobject]$correctionEventAttackTail
+        )
+        $correctionEventAttackLines[-1] = $correctionEventAttackTail |
+            ConvertTo-Json -Compress -Depth 100
+        $correctionEventAttackLines |
+            Set-Content -LiteralPath $correctionEventAttackJournal -Encoding utf8
+        $correctionEventAttackBefore = @(
+            Read-OrchestrationJournal $correctionEventAttackJournal
+        )
+        $correctionEventAttackFileHash = (
+            Get-FileHash -LiteralPath $correctionEventAttackJournal -Algorithm SHA256
+        ).Hash
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+            )) -RunDirectory $correctionEventAttackRun `
+                -AuthorizationReceiptPath (
+                    Join-Path $correctionEventAttackRun $revisionAuthorizationRelative
+                ) -SelectionMaterialPath (
+                    Join-Path $correctionEventAttackRun (
+                        'materials/method-1-revision-1-replacement-selection.json'
+                    )
+                ) -SelectionKey $authorizedSelectionKey | Out-Null
+        } 'lacks its exact append-only journal event' (
+            "A $($correctionEventAttack.name) correction event must fail closed."
+        )
+        $correctionEventAttackAfter = @(
+            Read-OrchestrationJournal $correctionEventAttackJournal
+        )
+        Assert-True (
+            $correctionEventAttackAfter.Count -eq
+                $correctionEventAttackBefore.Count -and
+            [string]$correctionEventAttackAfter[-1].hash -eq
+                [string]$correctionEventAttackBefore[-1].hash -and
+            (Get-FileHash -LiteralPath $correctionEventAttackJournal `
+                -Algorithm SHA256).Hash -eq $correctionEventAttackFileHash
+        ) (
+            "A rejected $($correctionEventAttack.name) correction event " +
+            'must not mutate the journal.'
+        )
+    }
+    $replacementCorrectionPreSelectionEvents = @(
+        Read-OrchestrationJournal (
+            Join-Path $replacementCorrectionRun 'events.jsonl'
+        )
+    )
+    $replacementCorrectionSelection = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+    )) -RunDirectory $replacementCorrectionRun `
+        -AuthorizationReceiptPath (
+            Join-Path $replacementCorrectionRun $revisionAuthorizationRelative
+        ) -SelectionMaterialPath (
+            Join-Path $replacementCorrectionRun (
+                'materials/method-1-revision-1-replacement-selection.json'
+            )
+        ) -SelectionKey $authorizedSelectionKey |
+        ConvertFrom-Json -Depth 100
+    $replacementCorrectionLifecycle = @(
+        $replacementCorrectionSelection.source_lifecycle_bindings | Where-Object {
+            [string]$_.source_node_id -eq 'review'
+        }
+    )[0]
+    Assert-True (
+        [string]$replacementCorrectionSelection.schema_version -eq '1.5' -and
+        [string]$replacementCorrectionSelection.
+            lifecycle_correction_receipt_hash -eq
+            [string]$replacementCorrection.receipt_hash -and
+        [string]$replacementCorrectionLifecycle.source_kind -eq 'replacement' -and
+        [string]$replacementCorrectionLifecycle.source_thread_id -eq
+            'review-replacement-thread' -and
+        @($replacementCorrectionLifecycle.recovery_event_bindings).Count -eq 3 -and
+        [int]$replacementCorrectionLifecycle.replacement_running_event_sequence -gt
+            [int]$replacementCorrectionLifecycle.
+                replacement_pending_event_sequence -and
+        @(Read-OrchestrationJournal (
+            Join-Path $replacementCorrectionRun 'events.jsonl'
+        )).Count -eq ($replacementCorrectionPreSelectionEvents.Count + 1)
+    ) (
+        'One schema 1.5 selection must bind the complete correction and the ' +
+        'same replacement continuity chain.'
+    )
+    $replacementCorrectionSelectionPath = Join-Path $replacementCorrectionRun (
+        "receipts/durable-review-milestone.method-1.revision-" +
+        "$($revisionAuthorization.revision_id).selection.json"
+    )
+    $replacementCorrectionReadback =
+        Read-DurableReviewMilestoneRevisionSelection `
+            -Path $replacementCorrectionSelectionPath `
+            -RunDirectory $replacementCorrectionRun
+    Assert-True (
+        [string]$replacementCorrectionReadback.receipt_hash -eq
+            [string]$replacementCorrectionSelection.receipt_hash
+    ) 'A schema 1.5 replacement correction selection must read back.'
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+        )) -RunDirectory $replacementCorrectionRun `
+            -AuthorizationReceiptPath (
+                Join-Path $replacementCorrectionRun $revisionAuthorizationRelative
+            ) -SelectionMaterialPath (
+                Join-Path $replacementCorrectionRun (
+                    'materials/method-1-revision-1-replacement-selection.json'
+                )
+            ) -SelectionKey $authorizedSelectionKey | Out-Null
+    } 'already selected' (
+        'A corrected replacement revision cannot create a duplicate selection.'
+    )
+
+    foreach ($correctionAttack in @(
+        @{
+            name = 'partial-source-set'
+            expected = 'source set is incomplete'
+            mutate = {
+                param($receipt)
+                $receipt.source_corrections = @(
+                    $receipt.source_corrections | Select-Object -First 1
+                )
+            }
+        },
+        @{
+            name = 'cross-thread'
+            expected = 'lifecycle correction source'
+            mutate = {
+                param($receipt)
+                @($receipt.source_corrections | Where-Object {
+                    [string]$_.source_node_id -eq 'review'
+                })[0].source_thread_id = 'domain-thread'
+            }
+        },
+        @{
+            name = 'completed-hash'
+            expected = 'lifecycle correction source'
+            mutate = {
+                param($receipt)
+                @($receipt.source_corrections | Where-Object {
+                    [string]$_.source_node_id -eq 'review'
+                })[0].completed_event_hash = ('0' * 64)
+            }
+        }
+    )) {
+        $correctionAttackRun = Join-Path $testRoot (
+            "revision-replacement-correction-$($correctionAttack.name)"
+        )
+        Copy-Item -LiteralPath $replacementCorrectionPendingRun `
+            -Destination $correctionAttackRun -Recurse
+        Resign-RevisionLifecycleCorrectionTail -Run $correctionAttackRun `
+            -ReceiptMutation $correctionAttack.mutate
+        $correctionAttackJournal = Join-Path $correctionAttackRun 'events.jsonl'
+        $correctionAttackJournalHash = (
+            Get-FileHash -LiteralPath $correctionAttackJournal -Algorithm SHA256
+        ).Hash
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+            )) -RunDirectory $correctionAttackRun `
+                -AuthorizationReceiptPath (
+                    Join-Path $correctionAttackRun $revisionAuthorizationRelative
+                ) -SelectionMaterialPath (
+                    Join-Path $correctionAttackRun (
+                        'materials/method-1-revision-1-replacement-selection.json'
+                    )
+                ) -SelectionKey $authorizedSelectionKey | Out-Null
+        } ([string]$correctionAttack.expected) (
+            "A $($correctionAttack.name) replacement correction must fail closed."
+        )
+        Assert-True (
+            $correctionAttackJournalHash -eq (
+                Get-FileHash -LiteralPath $correctionAttackJournal `
+                    -Algorithm SHA256
+            ).Hash
+        ) (
+            "A rejected $($correctionAttack.name) replacement correction " +
+            'must not mutate the journal.'
+        )
+    }
     $replacementPreSelectionEvents = @(
         Read-OrchestrationJournal (
             Join-Path $replacementRevisionRun 'events.jsonl'
@@ -2514,6 +4204,14 @@ try {
             }
         },
         @{
+            name = 'revision-index-rewrite'
+            expected = 'predecessor state is invalid'
+            mutate = {
+                param($receipt)
+                $receipt.revision_index = [int]$receipt.revision_index + 1
+            }
+        },
+        @{
             name = 'cross-run-replay'
             expected = 'run or milestone binding is invalid'
             mutate = {
@@ -2531,6 +4229,11 @@ try {
         Resign-RevisionAuthorizationTail -Run $mutationRun `
             -ReceiptRelativePath $revision2AuthorizationRelative `
             -ReceiptMutation $mutation.mutate
+        $mutationJournalPath = Join-Path $mutationRun 'events.jsonl'
+        $mutationEventsBefore = @(Read-OrchestrationJournal $mutationJournalPath)
+        $mutationJournalHashBefore = (
+            Get-FileHash -LiteralPath $mutationJournalPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
         Assert-ThrowsLike {
             Read-DurableReviewMilestoneRevisionAuthorization -Path (
                 Join-Path $mutationRun $revision2AuthorizationRelative
@@ -2538,6 +4241,14 @@ try {
         } ([string]$mutation.expected) (
             "A re-signed $([string]$mutation.name) must fail closed."
         )
+        $mutationEventsAfter = @(Read-OrchestrationJournal $mutationJournalPath)
+        Assert-True (
+            $mutationEventsAfter.Count -eq $mutationEventsBefore.Count -and
+            [string]$mutationEventsAfter[-1].hash -eq
+                [string]$mutationEventsBefore[-1].hash -and
+            (Get-FileHash -LiteralPath $mutationJournalPath -Algorithm SHA256).
+                Hash.ToLowerInvariant() -eq $mutationJournalHashBefore
+        ) "Rejected $([string]$mutation.name) must not mutate the journal."
     }
 
     foreach ($source in @(
@@ -3214,6 +4925,11 @@ try {
         'receipts/durable-review-milestone.method-1.revision-' +
         "$($replacementRevision2Authorization.revision_id).authorization.json"
     )
+    $replacementRevision2AuthorizedRun = Join-Path $testRoot (
+        'replacement-consecutive-revision-2-authorized'
+    )
+    Copy-Item -LiteralPath $replacementConsecutiveRun `
+        -Destination $replacementRevision2AuthorizedRun -Recurse
     foreach ($source in @(
         @{ id = 'review'; thread = 'review-replacement-thread' },
         @{ id = 'domain'; thread = 'domain-thread' }
@@ -3233,6 +4949,274 @@ try {
     )
     Copy-Item -LiteralPath $replacementConsecutiveRun `
         -Destination $replacementRevision2ReadyRun -Recurse
+    $replacementRevision2RecoveryRun = Join-Path $testRoot (
+        'replacement-consecutive-revision-2-recovery'
+    )
+    Copy-Item -LiteralPath $replacementRevision2ReadyRun `
+        -Destination $replacementRevision2RecoveryRun -Recurse
+    $replacementRevision2Progress = Join-Path $replacementRevision2RecoveryRun (
+        'materials/review.replacement-revision-2-progress.json'
+    )
+    New-ProgressCapture -Path $replacementRevision2Progress `
+        -ThreadId 'review-replacement-thread' `
+        -TurnId 'review-replacement-revision-2-progress'
+    $replacementRevision2Recovery = & (Join-Path $scriptRoot (
+        'New-ThreadResultRecoveryReceipt.ps1'
+    )) -RunDirectory $replacementRevision2RecoveryRun -SourceNodeId 'review' `
+        -OriginalThreadId 'review-replacement-thread' `
+        -CheckpointManifestPath (Join-Path $replacementRevision2RecoveryRun (
+            'materials/checkpoint-method-1-replacement-revision-2.json'
+        )) -InputManifestPath (Join-Path $replacementRevision2RecoveryRun (
+            'materials/input-method-1-replacement-revision-2.json'
+        )) -ThreadReadPath $replacementRevision2Progress `
+        -RecoveryStage replacement -ReplacementContinuityReceiptPath (
+            Join-Path $replacementRevision2RecoveryRun (
+                'receipts/review.replacement-continuity.json'
+            )
+        ) -MilestoneId method-1 `
+        -MilestoneRevisionAuthorizationReceiptPath (Join-Path (
+            $replacementRevision2RecoveryRun
+        ) $replacementRevision2AuthorizationRelative) -Attempt 1 |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$replacementRevision2Recovery.schema_version -eq '1.4' -and
+        [string]$replacementRevision2Recovery.recovery_stage -eq 'replacement' -and
+        [string]$replacementRevision2Recovery.
+            milestone_revision_authorization_receipt_hash -eq
+            [string]$replacementRevision2Authorization.receipt_hash
+    ) (
+        'A replacement missing-final at a consecutive revision must bind its ' +
+        'parent continuity and exact revision authority.'
+    )
+    $replacementRevision2RecoveryRelative = [IO.Path]::GetRelativePath(
+        $replacementRevision2RecoveryRun,
+        (Get-ChildItem -LiteralPath (Join-Path (
+            $replacementRevision2RecoveryRun
+        ) 'receipts') -File -Filter (
+            'review.replacement-cycle-*.attempt-1.result-recovery.json'
+        ) | Select-Object -First 1).FullName
+    ).Replace('\\', '/')
+    $recoveryEventsBefore = @(
+        Read-OrchestrationJournal (Join-Path (
+            $replacementRevision2RecoveryRun
+        ) 'events.jsonl')
+    )
+    & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+        -RunDirectory $replacementRevision2RecoveryRun -NodeId review `
+        -Status result_pending -ThreadId 'review-replacement-thread' `
+        -Message 'Replacement revision two final is missing.' `
+        -ErrorClass final_missing_with_progress_evidence `
+        -RecoveryReceiptPath $replacementRevision2RecoveryRelative `
+        -IdempotencyKey 'replacement-revision-2-result-pending' | Out-Null
+    $recoveryEventsAfter = @(
+        Read-OrchestrationJournal (Join-Path (
+            $replacementRevision2RecoveryRun
+        ) 'events.jsonl')
+    )
+    $recoveryPendingEvent = $recoveryEventsAfter[-1]
+    Assert-True (
+        $recoveryEventsAfter.Count -eq ($recoveryEventsBefore.Count + 1) -and
+        [string]$recoveryPendingEvent.status -eq 'result_pending' -and
+        [string]$recoveryPendingEvent.recovery_cycle_id -eq
+            [string]$replacementRevision2Recovery.recovery_cycle_id -and
+        [string]$recoveryPendingEvent.
+            milestone_revision_authorization_receipt_hash -eq
+            [string]$replacementRevision2Authorization.receipt_hash -and
+        [string]$recoveryPendingEvent.milestone_revision_rearm_event_hash -eq
+            [string]$replacementRevision2Recovery.
+                milestone_revision_rearm_event_hash
+    ) (
+        'The result_pending event must bind the exact revision recovery cycle, ' +
+        'authorization, and re-arm event.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $replacementRevision2RecoveryRun | Out-Null
+    } 'not validated' (
+        'Replacement milestone revision recovery must keep completion blocked.'
+    )
+
+    foreach ($attack in @(
+        [ordered]@{ name = 'missing-authority'; expected = 'roll-forward receipt' },
+        [ordered]@{ name = 'missing-authorization-file'; expected = 'existing file inside the run' },
+        [ordered]@{ name = 'changed-authorization'; expected = 'authorization event changed' },
+        [ordered]@{ name = 'no-rearm'; expected = 'lacks one fresh re-arm' },
+        [ordered]@{ name = 'old-checkpoint'; expected = 'does not match its milestone or checkpoint' },
+        [ordered]@{ name = 'old-revision'; expected = 'does not match its milestone or checkpoint' },
+        [ordered]@{ name = 'changed-input'; expected = 'input does not match' },
+        [ordered]@{ name = 'cross-source'; expected = 'lifecycle binding' },
+        [ordered]@{ name = 'cross-thread'; expected = 'lifecycle binding' },
+        [ordered]@{ name = 'cross-role'; expected = 'changed role' },
+        [ordered]@{ name = 'attempt-2-direct'; expected = 'does not exist' },
+        [ordered]@{ name = 'mixed-authority'; expected = 'cannot be combined' }
+    )) {
+        $attackRun = Join-Path $testRoot (
+            "replacement-revision-recovery-$($attack.name)"
+        )
+        $attackBase = if ($attack.name -eq 'no-rearm') {
+            $replacementRevision2AuthorizedRun
+        } else { $replacementRevision2ReadyRun }
+        Copy-Item -LiteralPath $attackBase -Destination $attackRun -Recurse
+        $attackProgress = Join-Path $attackRun (
+            'materials/review.replacement-revision-2-progress.json'
+        )
+        New-ProgressCapture -Path $attackProgress `
+            -ThreadId 'review-replacement-thread' `
+            -TurnId "replacement-recovery-$($attack.name)"
+        $arguments = @{
+            RunDirectory = $attackRun
+            SourceNodeId = 'review'
+            OriginalThreadId = 'review-replacement-thread'
+            CheckpointManifestPath = Join-Path $attackRun (
+                'materials/checkpoint-method-1-replacement-revision-2.json'
+            )
+            InputManifestPath = Join-Path $attackRun (
+                'materials/input-method-1-replacement-revision-2.json'
+            )
+            ThreadReadPath = $attackProgress
+            RecoveryStage = 'replacement'
+            ReplacementContinuityReceiptPath = Join-Path $attackRun (
+                'receipts/review.replacement-continuity.json'
+            )
+            MilestoneId = 'method-1'
+            MilestoneRevisionAuthorizationReceiptPath = Join-Path $attackRun (
+                $replacementRevision2AuthorizationRelative
+            )
+            Attempt = 1
+        }
+        switch ($attack.name) {
+            'missing-authority' {
+                $arguments.Remove(
+                    'MilestoneRevisionAuthorizationReceiptPath'
+                )
+                $arguments.Remove('MilestoneId')
+            }
+            'missing-authorization-file' {
+                $arguments.MilestoneRevisionAuthorizationReceiptPath = Join-Path (
+                    $attackRun
+                ) 'receipts/missing.authorization.json'
+            }
+            'changed-authorization' {
+                $authorizationPath =
+                    $arguments.MilestoneRevisionAuthorizationReceiptPath
+                $authorization = Get-Content -LiteralPath $authorizationPath -Raw |
+                    ConvertFrom-Json -AsHashtable -Depth 100
+                $authorization.required_sources[0].thread_id = 'changed-thread'
+                $authorization.required_sources_hash = Get-TextSha256 (
+                    @($authorization.required_sources) |
+                        ConvertTo-Json -Compress -Depth 50
+                )
+                $authorization.Remove('receipt_hash')
+                $authorization.receipt_hash = Get-TextSha256 (
+                    $authorization | ConvertTo-Json -Compress -Depth 100
+                )
+                $authorization | ConvertTo-Json -Depth 100 |
+                    Set-Content -LiteralPath $authorizationPath -Encoding utf8
+            }
+            'old-checkpoint' {
+                $oldAuthorization = Read-DurableReviewMilestoneRevisionAuthorization `
+                    -Path (Join-Path $attackRun $revisionAuthorizationRelative) `
+                    -RunDirectory $attackRun
+                $arguments.CheckpointManifestPath = Join-Path $attackRun (
+                    [string]$oldAuthorization.checkpoint_material_path
+                )
+            }
+            'old-revision' {
+                $arguments.MilestoneRevisionAuthorizationReceiptPath = Join-Path (
+                    $attackRun
+                ) $revisionAuthorizationRelative
+            }
+            'changed-input' {
+                $arguments.InputManifestPath = Join-Path $attackRun (
+                    'materials/review-replacement-revision-2.md'
+                )
+            }
+            'cross-source' {
+                $arguments.SourceNodeId = 'domain'
+            }
+            'cross-thread' {
+                $arguments.OriginalThreadId = 'domain-thread'
+            }
+            'cross-role' {
+                $continuityPath = $arguments.ReplacementContinuityReceiptPath
+                $continuity = Get-Content -LiteralPath $continuityPath -Raw |
+                    ConvertFrom-Json -AsHashtable -Depth 100
+                $continuity.role_id = 'domain-role'
+                $continuity.Remove('receipt_hash')
+                $continuity.receipt_hash = Get-TextSha256 (
+                    $continuity | ConvertTo-Json -Compress -Depth 100
+                )
+                $continuity | ConvertTo-Json -Depth 100 |
+                    Set-Content -LiteralPath $continuityPath -Encoding utf8
+            }
+            'attempt-2-direct' { $arguments.Attempt = 2 }
+            'mixed-authority' {
+                $arguments.ReplacementCheckpointRollForwardReceiptPath =
+                    $arguments.ReplacementContinuityReceiptPath
+            }
+        }
+        Assert-RecoveryRejectedWithoutJournalWrite -Run $attackRun `
+            -Action {
+                & (Join-Path $scriptRoot (
+                    'New-ThreadResultRecoveryReceipt.ps1'
+                )) @arguments | Out-Null
+            } -Expected $attack.expected -Message (
+                "Replacement revision recovery attack '$($attack.name)'"
+            )
+    }
+
+    Assert-RecoveryRejectedWithoutJournalWrite `
+        -Run $replacementRevision2RecoveryRun -Action {
+            & (Join-Path $scriptRoot 'New-ThreadResultRecoveryReceipt.ps1') `
+                -RunDirectory $replacementRevision2RecoveryRun `
+                -SourceNodeId review `
+                -OriginalThreadId 'review-replacement-thread' `
+                -CheckpointManifestPath (Join-Path (
+                    $replacementRevision2RecoveryRun
+                ) 'materials/checkpoint-method-1-replacement-revision-2.json') `
+                -InputManifestPath (Join-Path (
+                    $replacementRevision2RecoveryRun
+                ) 'materials/input-method-1-replacement-revision-2.json') `
+                -ThreadReadPath $replacementRevision2Progress `
+                -RecoveryStage replacement `
+                -ReplacementContinuityReceiptPath (Join-Path (
+                    $replacementRevision2RecoveryRun
+                ) 'receipts/review.replacement-continuity.json') `
+                -MilestoneId method-1 `
+                -MilestoneRevisionAuthorizationReceiptPath (Join-Path (
+                    $replacementRevision2RecoveryRun
+                ) $replacementRevision2AuthorizationRelative) -Attempt 1 |
+                Out-Null
+        } -Expected 'already exists' -Message (
+            'Replacement revision recovery receipt replay'
+        )
+    Assert-RecoveryRejectedWithoutJournalWrite `
+        -Run $replacementRevision2RecoveryRun -Action {
+            & (Join-Path $scriptRoot 'New-ThreadResultRecoveryReceipt.ps1') `
+                -RunDirectory $replacementRevision2RecoveryRun `
+                -SourceNodeId review `
+                -OriginalThreadId 'review-replacement-thread' `
+                -CheckpointManifestPath (Join-Path (
+                    $replacementRevision2RecoveryRun
+                ) 'materials/checkpoint-method-1-replacement-revision-2.json') `
+                -InputManifestPath (Join-Path (
+                    $replacementRevision2RecoveryRun
+                ) 'materials/input-method-1-replacement-revision-2.json') `
+                -ThreadReadPath $replacementRevision2Progress `
+                -RecoveryStage replacement `
+                -ReplacementContinuityReceiptPath (Join-Path (
+                    $replacementRevision2RecoveryRun
+                ) 'receipts/review.replacement-continuity.json') `
+                -MilestoneId method-1 `
+                -MilestoneRevisionAuthorizationReceiptPath (Join-Path (
+                    $replacementRevision2RecoveryRun
+                ) $replacementRevision2AuthorizationRelative) -Attempt 1 `
+                -OutputPath (Join-Path (
+                    $replacementRevision2RecoveryRun
+                ) 'receipts/review.replacement-recovery-fork.json') | Out-Null
+        } -Expected 'filename must be' -Message (
+            'Replacement revision recovery receipt fork'
+        )
     Assert-ThrowsLike {
         New-SourceChain -Run $replacementRevision2ReadyRun `
             -SourceNodeId 'review' -ThreadId 'review-replacement-thread' `
@@ -6024,6 +8008,701 @@ try {
             -SuccessorPlanPath $successorPlanPath | Out-Null
     } 'bound runs' (
         'Copying a predecessor directory cannot replay its export.'
+    )
+
+    # A pending revision whose control material is self-contradictory may be
+    # abandoned exactly once.  The audit must bind two run-local objects and
+    # the full prior source inventory before any cancellation event is written.
+    $abandonmentRun = Join-Path $testRoot 'pending-revision-abandonment'
+    Copy-Item -LiteralPath $revision2ReadyRun -Destination $abandonmentRun -Recurse
+    $abandonmentCheckpoint = Join-Path $abandonmentRun (
+        'materials/checkpoint-method-1-abandonment.json'
+    )
+    $abandonmentInput = Join-Path $abandonmentRun (
+        'materials/input-method-1-abandonment.json'
+    )
+    $abandonmentReviewManifest = Join-Path $abandonmentRun (
+        'materials/method-1-revision-2-review-materials.json'
+    )
+    $abandonmentExcludedManifest = Join-Path $abandonmentRun (
+        'materials/method-1-revision-2-excluded-evidence.json'
+    )
+    $abandonmentAuthorizationMaterial = Join-Path $abandonmentRun (
+        'materials/method-1-revision-2-controller-authorization.md'
+    )
+    $abandonmentAcceptanceAuthorization = Join-Path $abandonmentRun (
+        'materials/method-1-revision-2-acceptance-authorization.json'
+    )
+    $abandonmentActualMatrix = Join-Path $abandonmentRun (
+        'materials/abandonment-matrix.json'
+    )
+    $abandonmentDeclaredMatrix = Join-Path $abandonmentRun (
+        'references/abandonment-declared-matrix.json'
+    )
+    Set-Content -LiteralPath $abandonmentCheckpoint `
+        -Value '{"milestone":"method-1","revision":"abandonment"}'
+    Set-Content -LiteralPath $abandonmentActualMatrix `
+        -Value '{"object":"actual-run-local-matrix"}'
+    $null = New-Item -ItemType Directory -Force -Path (
+        Split-Path -Parent $abandonmentDeclaredMatrix
+    )
+    Set-Content -LiteralPath $abandonmentDeclaredMatrix `
+        -Value '{"object":"declared-hash-object"}'
+    $abandonmentDeclaredHash = (
+        Get-FileHash -LiteralPath $abandonmentDeclaredMatrix -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    $abandonmentActualHash = (
+        Get-FileHash -LiteralPath $abandonmentActualMatrix -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    [ordered]@{
+        scope = 'method-1-abandonment'
+        matrix_path = 'materials/abandonment-matrix.json'
+        matrix_hash = $abandonmentDeclaredHash
+    } | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $abandonmentInput
+    $abandonmentAuthorization = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionAuthorizationReceipt.ps1'
+    )) -RunDirectory $abandonmentRun -MilestoneId 'method-1' `
+        -CheckpointMaterialPath $abandonmentCheckpoint `
+        -InputManifestPath $abandonmentInput `
+        -ReviewMaterialManifestPath $abandonmentReviewManifest `
+        -ExcludedEvidenceManifestPath $abandonmentExcludedManifest `
+        -AuthorizationMaterialPath $abandonmentAuthorizationMaterial `
+        -AcceptanceAuthorizationMaterialPath $abandonmentAcceptanceAuthorization `
+        -SelectionKey 'controller:select-method-1-abandonment' `
+        -ActivationKey 'controller:method-1-abandonment' |
+        ConvertFrom-Json -Depth 100
+    $abandonmentAuthorizationRelative = (
+        'receipts/durable-review-milestone.method-1.revision-' +
+        "$($abandonmentAuthorization.revision_id).authorization.json"
+    )
+    foreach ($source in @($abandonmentAuthorization.required_sources)) {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $abandonmentRun `
+            -NodeId ([string]$source.source_node_id) -Status running `
+            -ThreadId ([string]$source.thread_id) `
+            -MilestoneRevisionAuthorizationReceiptPath $abandonmentAuthorizationRelative `
+            -Message "Re-armed $($source.source_node_id) for abandonment test." `
+            -Evidence @("artifact:$abandonmentAuthorizationRelative") `
+            -IdempotencyKey "abandonment-rearm-$($source.source_node_id)" |
+            Out-Null
+    }
+    $abandonmentEventsBefore = @(
+        Read-OrchestrationJournal (Join-Path $abandonmentRun 'events.jsonl')
+    )
+    $firstAbandonmentSource = @(
+        $abandonmentAuthorization.previous_source_bindings
+    )[0]
+    $firstAbandonmentDisposition = Get-Content -LiteralPath (
+        Join-Path $abandonmentRun $firstAbandonmentSource.disposition_receipt_path
+    ) -Raw | ConvertFrom-Json -Depth 100
+    $firstAbandonmentDecision = @(
+        $firstAbandonmentDisposition.decisions
+    )[0]
+    $inventory = [ordered]@{}
+    $descriptorInventory = [Collections.Generic.List[object]]::new()
+    $inventoryTotal = 0
+    foreach ($source in @($abandonmentAuthorization.previous_source_bindings)) {
+        $disposition = Get-Content -LiteralPath (
+            Join-Path $abandonmentRun $source.disposition_receipt_path
+        ) -Raw | ConvertFrom-Json -Depth 100
+        $inventory[[string]$source.source_node_id] = @(
+            $disposition.decisions | ForEach-Object {
+                [string]$_.source_finding_id
+            }
+        )
+        foreach ($decision in @($disposition.decisions)) {
+            $descriptorInventory.Add(
+                (New-DurableReviewOccurrenceDescriptor `
+                    -SourceNodeId ([string]$source.source_node_id) `
+                    -Decision $decision)
+            )
+        }
+        $inventoryTotal += @($disposition.decisions).Count
+    }
+    $inventory.total_source_occurrences = $inventoryTotal
+    $abandonmentAudit = Join-Path $abandonmentRun (
+        'materials/method-1-abandonment-audit.json'
+    )
+    $abandonmentPendingFinding = Join-Path $abandonmentRun (
+        'materials/method-1-abandonment-pending-finding.json'
+    )
+    @([ordered]@{
+        finding_id = [string]$firstAbandonmentDecision.source_finding_id
+        severity = [string]$firstAbandonmentDecision.severity
+        text = [string]$firstAbandonmentDecision.finding
+    }) | ConvertTo-Json -Depth 20 |
+        Set-Content -LiteralPath $abandonmentPendingFinding
+    [ordered]@{
+        failed_input_binding = [ordered]@{
+            input_manifest_path = 'materials/input-method-1-abandonment.json'
+            input_manifest_sha256 = (
+                Get-FileHash -LiteralPath $abandonmentInput -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+            declared_matrix_path = 'materials/abandonment-matrix.json'
+            actual_declared_matrix_path_sha256 = $abandonmentActualHash
+            declared_matrix_hash = $abandonmentDeclaredHash
+            actual_object_for_declared_matrix_hash =
+                'references/abandonment-declared-matrix.json'
+            failure_class = 'matrix_path_hash_object_mismatch'
+        }
+        source_finding = [ordered]@{
+            source_node_id = [string]$firstAbandonmentSource.source_node_id
+            source_finding_id = [string]$firstAbandonmentDecision.source_finding_id
+            canonical_finding_id = [string]$firstAbandonmentDecision.canonical_finding_id
+            severity = [string]$firstAbandonmentDecision.severity
+            status = [string]$firstAbandonmentDecision.resolution_status
+            exact_text = [string]$firstAbandonmentDecision.finding
+            finding_hash = Get-TextSha256 ([string]$firstAbandonmentDecision.finding)
+            pending_finding_material_path =
+                'materials/method-1-abandonment-pending-finding.json'
+            pending_finding_material_sha256 = (
+                Get-FileHash -LiteralPath $abandonmentPendingFinding -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+        }
+        cumulative_source_inventory = $inventory
+        cumulative_source_occurrence_descriptors = @($descriptorInventory)
+    } | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $abandonmentAudit
+    $abandonmentPreRun = Join-Path $testRoot 'pending-revision-abandonment-pre'
+    Copy-Item -LiteralPath $abandonmentRun -Destination $abandonmentPreRun -Recurse
+    $abandonmentReceipt = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionAbandonmentReceipt.ps1'
+    )) -RunDirectory $abandonmentRun `
+        -AuthorizationReceiptPath (Join-Path $abandonmentRun $abandonmentAuthorizationRelative) `
+        -InvalidityAuditMaterialPath $abandonmentAudit `
+        -AbandonmentKey 'controller:method-1-abandonment' |
+        ConvertFrom-Json -Depth 100
+    $abandonmentEventsAfter = @(
+        Read-OrchestrationJournal (Join-Path $abandonmentRun 'events.jsonl')
+    )
+    Assert-True (
+        [string]$abandonmentReceipt.decision -eq 'abandoned' -and
+        [bool]$abandonmentReceipt.invalidity_audit.raw_evidence_non_adoptable -and
+        $abandonmentEventsAfter.Count -eq ($abandonmentEventsBefore.Count + 3)
+    ) 'A contradictory pending revision must append one abandonment and two cancellations.'
+    $abandonmentReceiptPath = Join-Path $abandonmentRun (
+        'receipts/durable-review-milestone.method-1.revision-' +
+        "$($abandonmentAuthorization.revision_id).abandonment.json"
+    )
+    $abandonmentReadback = Read-DurableReviewMilestoneRevisionAbandonment `
+        -Path $abandonmentReceiptPath -RunDirectory $abandonmentRun
+    Assert-True (
+        [string]$abandonmentReadback.receipt_hash -eq
+            [string]$abandonmentReceipt.receipt_hash
+    ) 'Abandonment receipt must survive full pure-reader validation.'
+    $abandonmentJournalHash = (
+        Get-FileHash -LiteralPath (Join-Path $abandonmentRun 'events.jsonl') `
+            -Algorithm SHA256
+    ).Hash
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionAbandonmentReceipt.ps1'
+        )) -RunDirectory $abandonmentRun `
+            -AuthorizationReceiptPath (Join-Path $abandonmentRun $abandonmentAuthorizationRelative) `
+            -InvalidityAuditMaterialPath $abandonmentAudit `
+            -AbandonmentKey 'controller:duplicate-abandonment' | Out-Null
+    } 'not-yet-abandoned' (
+        'A pending revision may be abandoned only once.'
+    )
+    Assert-True (
+        $abandonmentJournalHash -eq (
+            Get-FileHash -LiteralPath (Join-Path $abandonmentRun 'events.jsonl') `
+                -Algorithm SHA256
+        ).Hash
+    ) 'A duplicate abandonment must not append to the journal.'
+
+    function Assert-AbandonmentAuditMutationRejected {
+        param(
+            [string] $Name,
+            [scriptblock] $Mutation,
+            [string] $Expected
+        )
+        $mutationRun = Join-Path $testRoot "abandonment-$Name"
+        Copy-Item -LiteralPath $abandonmentPreRun -Destination $mutationRun -Recurse
+        $mutationAudit = Join-Path $mutationRun 'materials/method-1-abandonment-audit.json'
+        $audit = Get-Content -LiteralPath $abandonmentAudit -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        & $Mutation $audit
+        $audit | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $mutationAudit
+        $before = (Get-FileHash -LiteralPath (Join-Path $mutationRun 'events.jsonl') -Algorithm SHA256).Hash
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-DurableReviewMilestoneRevisionAbandonmentReceipt.ps1'
+            )) -RunDirectory $mutationRun `
+                -AuthorizationReceiptPath (Join-Path $mutationRun $abandonmentAuthorizationRelative) `
+                -InvalidityAuditMaterialPath $mutationAudit `
+                -AbandonmentKey "controller:abandonment-$Name" | Out-Null
+        } $Expected "Abandonment audit mutation '$Name' must fail before journal write."
+        Assert-True (
+            $before -eq (Get-FileHash -LiteralPath (Join-Path $mutationRun 'events.jsonl') -Algorithm SHA256).Hash
+        ) "Abandonment audit mutation '$Name' must not change the journal."
+    }
+    Assert-AbandonmentAuditMutationRejected -Name 'outside-object' -Expected 'existing file inside the run' -Mutation {
+        param($audit)
+        $audit.failed_input_binding.actual_object_for_declared_matrix_hash = 'C:\outside-declared-object.json'
+    }
+    Assert-AbandonmentAuditMutationRejected -Name 'actual-hash-drift' -Expected 'actual control hash changed' -Mutation {
+        param($audit)
+        $audit.failed_input_binding.actual_declared_matrix_path_sha256 = ('0' * 64)
+    }
+    Assert-AbandonmentAuditMutationRejected -Name 'partial-inventory' -Expected 'cumulative source inventory' -Mutation {
+        param($audit)
+        $audit.cumulative_source_inventory[[string]$firstAbandonmentSource.source_node_id] = @(
+            $audit.cumulative_source_inventory[[string]$firstAbandonmentSource.source_node_id] |
+                Select-Object -Skip 1
+        )
+        $audit.cumulative_source_inventory.total_source_occurrences =
+            [int]$audit.cumulative_source_inventory.total_source_occurrences - 1
+    }
+    Assert-AbandonmentAuditMutationRejected -Name 'missing-simple-inventory' `
+        -Expected 'simple cumulative source inventory' -Mutation {
+        param($audit)
+        $audit.Remove('cumulative_source_inventory')
+    }
+
+    function Assert-AbandonmentReaderMutationRejected {
+        param(
+            [string] $Name,
+            [scriptblock] $Mutation,
+            [string] $Expected
+        )
+        $mutationRun = Join-Path $testRoot "abandonment-reader-$Name"
+        Copy-Item -LiteralPath $abandonmentRun -Destination $mutationRun -Recurse
+        $mutationReceiptPath = Join-Path $mutationRun (
+            'receipts/durable-review-milestone.method-1.revision-' +
+            "$($abandonmentAuthorization.revision_id).abandonment.json"
+        )
+        $receipt = Get-Content -LiteralPath $mutationReceiptPath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        & $Mutation $mutationRun $receipt
+        $receiptPayload = [ordered]@{}
+        foreach ($key in $receipt.Keys) {
+            if ($key -ne 'receipt_hash') { $receiptPayload[$key] = $receipt[$key] }
+        }
+        $receipt.receipt_hash = Get-TextSha256 (
+            $receiptPayload | ConvertTo-Json -Compress -Depth 100
+        )
+        $receipt | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $mutationReceiptPath
+        # Keep the copied journal internally consistent with the mutated
+        # receipt so the reader reaches the specific binding under test.
+        $mutationEvents = @(
+            Read-OrchestrationJournal (Join-Path $mutationRun 'events.jsonl')
+        )
+        $abandonmentEventIndex = [int]$receipt.source_journal_event_count
+        if ($abandonmentEventIndex -lt $mutationEvents.Count) {
+            $mutationEvents[$abandonmentEventIndex].
+                milestone_revision_abandonment_receipt_hash =
+                [string]$receipt.receipt_hash
+            $previousHash = $null
+            foreach ($mutationEvent in $mutationEvents) {
+                $mutationEvent.prev_hash = $previousHash
+                $mutationEvent.hash = Get-OrchestrationEventHash $mutationEvent
+                $previousHash = [string]$mutationEvent.hash
+            }
+            $mutationEvents | ForEach-Object {
+                $_ | ConvertTo-Json -Compress -Depth 100
+            } | Set-Content -LiteralPath (Join-Path $mutationRun 'events.jsonl')
+        }
+        $before = (Get-FileHash -LiteralPath (Join-Path $mutationRun 'events.jsonl') `
+            -Algorithm SHA256).Hash
+        Assert-ThrowsLike {
+            Read-DurableReviewMilestoneRevisionAbandonment `
+                -Path $mutationReceiptPath -RunDirectory $mutationRun | Out-Null
+        } $Expected "Reader mutation '$Name' must fail closed."
+        Assert-True (
+            $before -eq (Get-FileHash -LiteralPath (Join-Path $mutationRun 'events.jsonl') `
+                -Algorithm SHA256).Hash
+        ) "Reader mutation '$Name' must not change the journal."
+    }
+    Assert-AbandonmentReaderMutationRejected -Name 'authorization-binding-rehash' `
+        -Expected 'authorization binding changed' -Mutation {
+        param($mutationRun, $receipt)
+        $receipt.authorization_receipt_hash = '0' * 64
+    }
+    Assert-AbandonmentReaderMutationRejected -Name 'prior-disposition-rehash' `
+        -Expected 'identity, text hash, and severity' -Mutation {
+        param($mutationRun, $receipt)
+        $previous = @($abandonmentAuthorization.previous_source_bindings)[0]
+        $dispositionPath = Join-Path $mutationRun $previous.disposition_receipt_path
+        $disposition = Get-Content -LiteralPath $dispositionPath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        $decision = $disposition.decisions[0]
+        $decision.finding = 'mutated prior occurrence text'
+        $decision.finding_hash = Get-TextSha256 ([string]$decision.finding)
+        $dispositionPayload = [ordered]@{
+            schema_version = [string]$disposition.schema_version
+            run_id = [string]$disposition.run_id
+            milestone_id = [string]$disposition.milestone_id
+            source_node_id = [string]$disposition.source_node_id
+            source_thread_id = [string]$disposition.source_thread_id
+            source_result_receipt_path = [string]$disposition.source_result_receipt_path
+            source_result_receipt_hash = [string]$disposition.source_result_receipt_hash
+            decisions = $disposition.decisions
+            blocking_open = $disposition.blocking_open
+            created_at_utc = [string]$disposition.created_at_utc
+        }
+        $disposition.receipt_hash = Get-TextSha256 (
+            $dispositionPayload | ConvertTo-Json -Compress -Depth 50
+        )
+        $disposition | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $dispositionPath
+    }
+    Assert-AbandonmentReaderMutationRejected -Name 'missing-simple-inventory' `
+        -Expected 'lacks the simple cumulative source inventory' -Mutation {
+        param($mutationRun, $receipt)
+        $auditPath = Join-Path $mutationRun $receipt.invalidity_audit_material_path
+        $audit = Get-Content -LiteralPath $auditPath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        $audit.Remove('cumulative_source_inventory')
+        $audit | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $auditPath
+        $receipt.invalidity_audit_material_hash = (
+            Get-FileHash -LiteralPath $auditPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+    }
+    Assert-AbandonmentReaderMutationRejected -Name 'rehashed-simple-inventory' `
+        -Expected 'invalidity audit inventory changed' -Mutation {
+        param($mutationRun, $receipt)
+        $auditPath = Join-Path $mutationRun $receipt.invalidity_audit_material_path
+        $audit = Get-Content -LiteralPath $auditPath -Raw |
+            ConvertFrom-Json -AsHashtable -Depth 100
+        $sourceKey = [string]$firstAbandonmentSource.source_node_id
+        $audit.cumulative_source_inventory[$sourceKey][0] = 'mutated-same-slot'
+        $audit | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $auditPath
+        $receipt.invalidity_audit_material_hash = (
+            Get-FileHash -LiteralPath $auditPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+    }
+
+    # The abandoned pending revision is non-adoptable evidence only.  A fresh
+    # same-milestone authorization must bind the abandonment and start both
+    # original source seats again with new result/disposition artifacts.
+    $freshAfterAbandonmentCheckpoint = Join-Path $abandonmentRun (
+        'materials/checkpoint-method-1-after-abandonment.json'
+    )
+    $freshAfterAbandonmentInput = Join-Path $abandonmentRun (
+        'materials/input-method-1-after-abandonment.json'
+    )
+    Set-Content -LiteralPath $freshAfterAbandonmentCheckpoint `
+        -Value '{"milestone":"method-1","revision":"after-abandonment"}'
+    Set-Content -LiteralPath $freshAfterAbandonmentInput `
+        -Value '{"scope":"method-1-after-abandonment"}'
+    $freshReviewPrompt = Join-Path $abandonmentRun `
+        'materials/review-after-abandonment.md'
+    $freshDomainPrompt = Join-Path $abandonmentRun `
+        'materials/domain-after-abandonment.md'
+    Set-Content -LiteralPath $freshReviewPrompt `
+        -Value 'Fresh review after the invalid pending revision was abandoned.'
+    Set-Content -LiteralPath $freshDomainPrompt `
+        -Value 'Fresh domain audit after the invalid pending revision was abandoned.'
+    $freshReviewManifest = Join-Path $abandonmentRun `
+        'materials/method-1-after-abandonment-review-materials.json'
+    @(
+        [ordered]@{
+            source_node_id = 'review'
+            material_path = 'materials/review-after-abandonment.md'
+        },
+        [ordered]@{
+            source_node_id = 'domain'
+            material_path = 'materials/domain-after-abandonment.md'
+        }
+    ) | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $freshReviewManifest
+    $freshExcludedManifest = Join-Path $abandonmentRun `
+        'materials/method-1-after-abandonment-excluded-evidence.json'
+    $freshEventsForInventory = @(
+        Read-OrchestrationJournal (Join-Path $abandonmentRun 'events.jsonl')
+    )
+    $freshExcludedInventory = Get-MilestoneRevisionExcludedInventory `
+        -RunDirectory $abandonmentRun -Events $freshEventsForInventory `
+        -RequiredSourceIds @('domain', 'review') `
+        -CheckpointHash (
+            Get-FileHash -LiteralPath $freshAfterAbandonmentCheckpoint `
+                -Algorithm SHA256
+        ).Hash.ToLowerInvariant() `
+        -EventCount $freshEventsForInventory.Count
+    $freshExcludedEntries = [Collections.Generic.List[object]]::new()
+    foreach ($sourceNodeId in @('domain', 'review')) {
+        $freshExcludedEntries.Add([ordered]@{
+            source_node_id = $sourceNodeId
+            reason = 'caller-timing-error/non-completion evidence'
+            event_bindings = @($freshExcludedInventory.events | Where-Object {
+                [string]$_.source_node_id -eq $sourceNodeId
+            } | ForEach-Object {
+                [ordered]@{
+                    sequence = [int]$_.event_sequence
+                    event_hash = [string]$_.event_hash
+                }
+            })
+            artifacts = @($freshExcludedInventory.artifacts | Where-Object {
+                [string]$_.source_node_id -eq $sourceNodeId
+            } | ForEach-Object {
+                [ordered]@{
+                    type = [string]$_.type
+                    path = [string]$_.path
+                    file_hash = [string]$_.file_hash
+                    internal_hash = [string]$_.internal_hash
+                }
+            })
+        })
+    }
+    @($freshExcludedEntries) | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $freshExcludedManifest
+    $freshAuthorizationMaterial = Join-Path $abandonmentRun `
+        'materials/method-1-after-abandonment-controller-authorization.md'
+    Set-Content -LiteralPath $freshAuthorizationMaterial `
+        -Value 'Controller authorizes one fresh same-milestone review after abandonment.'
+    $freshAcceptanceEvidence = Join-Path $abandonmentRun `
+        'materials/method-1-after-abandonment-main-acceptance.md'
+    Set-Content -LiteralPath $freshAcceptanceEvidence `
+        -Value 'Main owner acceptance remains independent and is intentionally absent.'
+    $freshAcceptanceAuthorization = Join-Path $abandonmentRun `
+        'materials/method-1-after-abandonment-acceptance-authorization.json'
+    [ordered]@{
+        schema_version = '1.0'
+        milestone_id = 'method-1'
+        main_node_id = 'integrate'
+        acceptance_key = 'controller:method-1-after-abandonment-acceptance'
+        evidence_material_path = [IO.Path]::GetRelativePath(
+            $abandonmentRun, $freshAcceptanceEvidence
+        ).Replace('\', '/')
+        evidence_material_hash = (
+            Get-FileHash -LiteralPath $freshAcceptanceEvidence -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+    } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $freshAcceptanceAuthorization
+    $freshAuthorization = & (Join-Path $scriptRoot `
+        'New-DurableReviewMilestoneRevisionAuthorizationReceipt.ps1') `
+        -RunDirectory $abandonmentRun -MilestoneId 'method-1' `
+        -CheckpointMaterialPath $freshAfterAbandonmentCheckpoint `
+        -InputManifestPath $freshAfterAbandonmentInput `
+        -ReviewMaterialManifestPath $freshReviewManifest `
+        -ExcludedEvidenceManifestPath $freshExcludedManifest `
+        -AuthorizationMaterialPath $freshAuthorizationMaterial `
+        -AcceptanceAuthorizationMaterialPath $freshAcceptanceAuthorization `
+        -SelectionKey 'controller:select-method-1-after-abandonment' `
+        -ActivationKey 'controller:method-1-after-abandonment' |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [int]$freshAuthorization.revision_index -gt
+            [int]$abandonmentAuthorization.revision_index -and
+        [string]$freshAuthorization.previous_abandonment_revision_id -eq
+            [string]$abandonmentAuthorization.revision_id
+    ) 'A fresh authorization must bind the abandoned pending revision.'
+    $freshAuthorizationRelative = (
+        'receipts/durable-review-milestone.method-1.revision-' +
+        "$($freshAuthorization.revision_id).authorization.json"
+    )
+    foreach ($source in @(
+        @{ id = 'review'; thread = 'review-thread' },
+        @{ id = 'domain'; thread = 'domain-thread' }
+    )) {
+        & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+            -RunDirectory $abandonmentRun -NodeId $source.id -Status running `
+            -ThreadId $source.thread `
+            -MilestoneRevisionAuthorizationReceiptPath $freshAuthorizationRelative `
+            -Message "Fresh post-abandonment review for $($source.id)." `
+            -Evidence @('observation:fresh-post-abandonment-review') `
+            -IdempotencyKey "fresh-after-abandonment-rearm-$($source.id)" |
+            Out-Null
+    }
+    $freshReview = New-SourceChain -Run $abandonmentRun `
+        -SourceNodeId 'review' -ThreadId 'review-thread' `
+        -MilestoneId 'method-1' -CheckpointPath $freshAfterAbandonmentCheckpoint `
+        -Stem 'review.method-1-after-abandonment' -Severity 'P0' `
+        -FindingText 'baseline-review-p0' -Resolution 'open' `
+        -FindingId 'review-method-1-finding' `
+        -CanonicalFindingId 'canonical-review-method-1-finding' `
+        -AdditionalFindingId 'review-method-1-finding-r08' `
+        -AdditionalFindingText 'baseline-review-p0-second-occurrence' `
+        -AdditionalSeverity 'P0' `
+        -AdditionalCanonicalFindingId 'canonical-review-method-1-finding'
+    $freshDomain = New-SourceChain -Run $abandonmentRun `
+        -SourceNodeId 'domain' -ThreadId 'domain-thread' `
+        -MilestoneId 'method-1' -CheckpointPath $freshAfterAbandonmentCheckpoint `
+        -Stem 'domain.method-1-after-abandonment' -Severity 'P0' `
+        -FindingText 'baseline-domain-p0' -Resolution 'open' `
+        -FindingId 'domain-method-1-finding' `
+        -CanonicalFindingId 'canonical-domain-method-1-finding'
+    foreach ($source in @(
+        @{ id = 'review'; thread = 'review-thread'; result = $freshReview.result_path; disposition = $freshReview.disposition_path },
+        @{ id = 'domain'; thread = 'domain-thread'; result = $freshDomain.result_path; disposition = $freshDomain.disposition_path }
+    )) {
+        foreach ($status in @('completed', 'validated', 'adopted')) {
+            $pointer = if ($status -eq 'completed') {
+                "artifact:$($source.result)"
+            } else {
+                "artifact:$($source.disposition)"
+            }
+            & (Join-Path $scriptRoot 'Add-OrchestrationEvent.ps1') `
+                -RunDirectory $abandonmentRun -NodeId $source.id `
+                -Status $status -ThreadId $source.thread `
+                -Message "Fresh post-abandonment $($source.id) $status." `
+                -Evidence @($pointer) `
+                -IdempotencyKey "fresh-after-abandonment-$($source.id)-$status" |
+                Out-Null
+        }
+    }
+    Assert-True (
+        [string]$freshReview.result_path -ne [string]$firstAbandonmentSource.result_receipt_path -and
+        [string]$freshDomain.result_path -ne [string]$firstAbandonmentSource.result_receipt_path
+    ) 'Fresh review must not reuse the abandoned revision result artifacts.'
+    $freshSelectionMaterial = Join-Path $abandonmentRun `
+        'materials/method-1-after-abandonment-selection.json'
+    @(
+        [ordered]@{ source_node_id = 'review'; disposition_receipt_path = $freshReview.disposition_path },
+        [ordered]@{ source_node_id = 'domain'; disposition_receipt_path = $freshDomain.disposition_path }
+    ) | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $freshSelectionMaterial
+    $freshSelection = & (Join-Path $scriptRoot `
+        'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1') `
+        -RunDirectory $abandonmentRun `
+        -AuthorizationReceiptPath (Join-Path $abandonmentRun $freshAuthorizationRelative) `
+        -SelectionMaterialPath $freshSelectionMaterial `
+        -SelectionKey ([string]$freshAuthorization.selection_key) |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$freshSelection.schema_version -in @('1.1', '1.2', '1.3', '1.4') -and
+        [string]$freshSelection.revision_id -eq [string]$freshAuthorization.revision_id
+    ) 'A fresh post-abandonment result/disposition pair must be selectable.'
+
+    # An abandoned revision still consumes its authorization ordinal.  The
+    # next authorization must follow the selected revision's bound
+    # authorization, not the smaller count of selection events.
+    $postAbandonmentCheckpoint = Join-Path $abandonmentRun (
+        'materials/checkpoint-method-1-post-abandonment-selection.json'
+    )
+    $postAbandonmentInput = Join-Path $abandonmentRun (
+        'materials/input-method-1-post-abandonment-selection.json'
+    )
+    Set-Content -LiteralPath $postAbandonmentCheckpoint `
+        -Value '{"milestone":"method-1","revision":"post-abandonment-selection"}'
+    Set-Content -LiteralPath $postAbandonmentInput `
+        -Value '{"scope":"method-1-post-abandonment-selection"}'
+    $postAbandonmentEvents = @(
+        Read-OrchestrationJournal (Join-Path $abandonmentRun 'events.jsonl')
+    )
+    $postAbandonmentInventory = Get-MilestoneRevisionExcludedInventory `
+        -RunDirectory $abandonmentRun -Events $postAbandonmentEvents `
+        -RequiredSourceIds @('domain', 'review') `
+        -CheckpointHash (
+            Get-FileHash -LiteralPath $postAbandonmentCheckpoint -Algorithm SHA256
+        ).Hash.ToLowerInvariant() -EventCount $postAbandonmentEvents.Count
+    $postAbandonmentExcludedEntries = [Collections.Generic.List[object]]::new()
+    foreach ($sourceNodeId in @('domain', 'review')) {
+        $postAbandonmentExcludedEntries.Add([ordered]@{
+            source_node_id = $sourceNodeId
+            reason = 'caller-timing-error/non-completion evidence'
+            event_bindings = @($postAbandonmentInventory.events | Where-Object {
+                [string]$_.source_node_id -eq $sourceNodeId
+            } | ForEach-Object {
+                [ordered]@{
+                    sequence = [int]$_.event_sequence
+                    event_hash = [string]$_.event_hash
+                }
+            })
+            artifacts = @($postAbandonmentInventory.artifacts | Where-Object {
+                [string]$_.source_node_id -eq $sourceNodeId
+            } | ForEach-Object {
+                [ordered]@{
+                    type = [string]$_.type
+                    path = [string]$_.path
+                    file_hash = [string]$_.file_hash
+                    internal_hash = [string]$_.internal_hash
+                }
+            })
+        })
+    }
+    $postAbandonmentExcludedManifest = Join-Path $abandonmentRun (
+        'materials/method-1-post-abandonment-selection-excluded-evidence.json'
+    )
+    @($postAbandonmentExcludedEntries) | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath $postAbandonmentExcludedManifest
+    $postAbandonmentAuthorizationMaterial = Join-Path $abandonmentRun (
+        'materials/method-1-post-abandonment-selection-controller-authorization.md'
+    )
+    Set-Content -LiteralPath $postAbandonmentAuthorizationMaterial -Value (
+        'Controller authorizes the revision after a selected post-abandonment review.'
+    )
+    $postAbandonmentAuthorization = & (Join-Path $scriptRoot `
+        'New-DurableReviewMilestoneRevisionAuthorizationReceipt.ps1') `
+        -RunDirectory $abandonmentRun -MilestoneId 'method-1' `
+        -CheckpointMaterialPath $postAbandonmentCheckpoint `
+        -InputManifestPath $postAbandonmentInput `
+        -ReviewMaterialManifestPath $freshReviewManifest `
+        -ExcludedEvidenceManifestPath $postAbandonmentExcludedManifest `
+        -AuthorizationMaterialPath $postAbandonmentAuthorizationMaterial `
+        -AcceptanceAuthorizationMaterialPath $freshAcceptanceAuthorization `
+        -SelectionKey 'controller:select-method-1-post-abandonment-selection' `
+        -ActivationKey 'controller:method-1-post-abandonment-selection' |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [int]$postAbandonmentAuthorization.revision_index -eq
+            ([int]$freshAuthorization.revision_index + 1)
+    ) 'An abandoned revision ordinal must not deadlock the next authorization.'
+
+    $freshEvents = @(Read-OrchestrationJournal (Join-Path $abandonmentRun 'events.jsonl'))
+    $freshAuthorizationEvent = @($freshEvents | Where-Object {
+        [string]$_.event -eq 'milestone-revision-authorized' -and
+        [string]$_.milestone_revision_id -eq [string]$freshAuthorization.revision_id
+    })[0]
+    $freshDomainSource = @($freshAuthorization.required_sources | Where-Object {
+        [string]$_.source_node_id -eq 'domain'
+    })[0]
+    $ordinaryCancelledAuthorization = $freshAuthorization |
+        ConvertTo-Json -Depth 100 | ConvertFrom-Json -Depth 100
+    foreach ($name in @(
+        'previous_abandonment_receipt_path',
+        'previous_abandonment_receipt_hash',
+        'previous_abandonment_event_sequence',
+        'previous_abandonment_event_hash',
+        'previous_abandonment_revision_id'
+    )) {
+        $ordinaryCancelledAuthorization.PSObject.Properties.Remove($name)
+    }
+    Assert-ThrowsLike {
+        Get-DurableReviewMilestoneRevisionRearmEvent `
+            -RunDirectory $abandonmentRun -Events $freshEvents `
+            -Authorization $ordinaryCancelledAuthorization `
+            -RequiredSource $freshDomainSource `
+            -AuthorizationEventSequence ([int]$freshAuthorizationEvent.sequence) |
+            Out-Null
+    } 'lacks one fresh re-arm' (
+        'An ordinary cancelled source cannot re-arm without abandonment continuity.'
+    )
+    $wrongAbandonmentAuthorization = $freshAuthorization |
+        ConvertTo-Json -Depth 100 | ConvertFrom-Json -Depth 100
+    $wrongAbandonmentAuthorization.previous_abandonment_receipt_hash =
+        ('0' * 64)
+    Assert-ThrowsLike {
+        Get-DurableReviewMilestoneRevisionRearmEvent `
+            -RunDirectory $abandonmentRun -Events $freshEvents `
+            -Authorization $wrongAbandonmentAuthorization `
+            -RequiredSource $freshDomainSource `
+            -AuthorizationEventSequence ([int]$freshAuthorizationEvent.sequence) |
+            Out-Null
+    } 'abandonment binding changed' (
+        'A cancelled re-arm with the wrong abandonment receipt must fail closed.'
+    )
+    $crossSource = [pscustomobject]@{
+        source_node_id = 'domain'
+        role_id = 'adversarial-reviewer'
+        thread_id = 'review-thread'
+    }
+    Assert-ThrowsLike {
+        Get-DurableReviewMilestoneRevisionRearmEvent `
+            -RunDirectory $abandonmentRun -Events $freshEvents `
+            -Authorization $freshAuthorization `
+            -RequiredSource $crossSource `
+            -AuthorizationEventSequence ([int]$freshAuthorizationEvent.sequence) |
+            Out-Null
+    } 'abandonment source binding changed' (
+        'A cancelled re-arm cannot borrow another source or thread.'
+    )
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot 'Test-OrchestrationCompletion.ps1') `
+            -RunDirectory $abandonmentRun | Out-Null
+    } 'main' (
+        'Fresh selection must not satisfy independent main acceptance.'
     )
 
     [pscustomobject]@{

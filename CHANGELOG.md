@@ -1,8 +1,26 @@
 # Changelog
 
+## 0.7.18 - 2026-08-02
+
+Durable-review recovery and exact correction-identity release.
+
+- Allow an invalid, still-unselected same-milestone revision to be abandoned
+  append-only, then authorize fresh review work without rewriting prior history.
+- Preserve revision ordinals across selected and legally abandoned revisions,
+  including replacement-source recovery under the current consecutive revision.
+- Add narrowly bound lifecycle-evidence corrections for documented pointer
+  omissions while keeping state, findings, checkpoint, input, and receipts fixed.
+- Require structured correction mode and omission-source identity to match exact
+  lowercase ordinal values. Case variants, surrounding whitespace, and Unicode
+  lookalikes now fail before journal write.
+- Describe orchestration as task-shaped company organization: simple work stays
+  one layer, complex work may add leads and executors, and staffing flows upward.
+- Preserve boundaries: only public Codex GPT routes are documented, and no
+  open-finding or main-acceptance completion gate is changed.
+
 ## 0.7.17 - 2026-08-01
 
-Same-revision cumulative review-inventory supersession release.
+Same-revision cumulative review-inventory correction release.
 
 - Fix a fail-closed deadlock where a new checkpoint's signed result and
   disposition listed only currently open findings, omitting earlier source
@@ -13,15 +31,15 @@ Same-revision cumulative review-inventory supersession release.
   restores only omitted occurrences from the previous selected inventory,
   preserves each source, canonical ID, severity, exact text/hash, status, and
   evidence, and never overwrites old receipts or lifecycle events.
-- Bind schema 1.4 selection to that single supersession receipt, the same
-  authorization/selection key, journal head, checkpoint/input, source/role/task
-  identities, and both source-specific result/disposition chains. Duplicate,
-  partial, downgraded, rewritten, cross-source, stale, forked, or alias-path
-  attempts fail before journal write.
-- Validate the fixed 74-file package and the real 109-event run. The run
-  advanced 109 -> 110 -> 111 while the original 109-event prefix stayed
+- Keep the old standalone inventory-supersession contract separate from the
+  new lifecycle-correction combination. The dedicated cumulative receipt uses
+  its own schema 1.0 fields and event, and schema 1.6 selection binds both the
+  lifecycle correction and cumulative correction. Legacy fields, paths, and
+  events cannot be mixed into the dedicated protocol.
+- Validate the fixed 76-file package and the real 127-event run. The run
+  advanced 127 -> 128 -> 129 while the original 127-event prefix stayed
   byte-identical; completion remained correctly `BLOCKED` by missing main-owner
-  acceptance and `LY-TR-P1-09`.
+  acceptance and the still-open `LY-TR-P1-09` timing finding.
 - Preserve the boundary: this release does not repair platform `systemError`,
   claim measured Token savings or business accuracy, change multi-divination
   product files, or add a new path for non-blocking P2 findings.
