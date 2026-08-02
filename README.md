@@ -5,11 +5,11 @@
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
 `adaptive-agent-orchestrator` improves research, coding, writing, analysis,
-creative, and operational work. For each invocation, the current Agent becomes
-the task lead: it understands the goal, forms only the useful workstreams and
-levels, routes bounded execution, validates results, integrates delivery, and
-retires temporary roles and worktrees. Simple work stays one layer; complex or
-multi-project work may add project leads and independently owned workstreams.
+creative, and operational work. The Agent that invokes the Skill owns the
+current task: it understands the goal, splits independent workflows, and
+chooses the required hierarchy, roles, and models. Simple tasks may stay in one
+layer; complex tasks may form a project lead -> executors, while multiple
+project leads are reserved for multiple projects.
 
 The goal is lower total task Token use. Users do not configure a Token budget,
 and the Skill does not pretend it can predict the total cost of an open-ended
@@ -24,14 +24,22 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   prompts.
 - **Progressive disclosure:** the Skill body stays compact; references and
   project files are read only when a workstream needs them.
-- **Task-shaped organization:** small, sequential, high-overlap, and narrow-edit
-  tasks stay one layer; deeper lead-to-executor structures exist only when the
-  task actually needs them.
+- **Single-layer by default:** small, sequential, high-overlap, and narrow-edit
+  tasks remain with the responsible task Agent.
 - **Durable work when it pays:** independent, bounded, checkable work that can
   use smaller context or a lower-cost model is proposed as a visible durable
   Codex task instead of silently staying in the expensive main context.
-- **Dynamic work ownership:** the main agent owns the global spine and final
-  integration, then re-evaluates delegation only at meaningful task events.
+- **Dynamic company-style organization:** the responsible task Agent creates
+  only the hierarchy the task needs. A project lead coordinates its project and
+  executors own bounded workflows; multiple project leads appear only for
+  multiple projects.
+- **Upward staffing boundary:** a non-lead executor cannot recursively recruit.
+  It submits a bounded request for more capacity to its immediate superior,
+  who decides whether to add people and where the work belongs.
+- **Writer isolation and cleanup:** every writer uses an independent worktree.
+  After completion, the responsible task or project owner verifies and adopts
+  the result, archives the completed task, and cleans the worktree and temporary
+  artifacts.
 - **Zero to two first-wave Workers:** dispatch none for simple work, one for
   one isolated lane, or two only when both are ready and context-disjoint.
 - **Isolated context by default:** native subagents receive compact packets and
@@ -51,8 +59,8 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
 - **Result collection gate:** required independent-background results must be
   explicitly read and recorded in a hash-bound receipt before completion.
 - **Durable review loop:** long-running research or Skill development can keep
-  read-only domain and dissent roles across milestones. The main agent remains
-  the only writer and must disposition every captured finding.
+  read-only domain and dissent roles across milestones. The responsible task or
+  project owner remains accountable for adopting every captured finding.
 - **Independent-source integrity:** each review source keeps its own report,
   evidence, disposition, and re-review obligation. One source cannot replace
   another, and unresolved P0/P1 findings always block completion.
@@ -63,13 +71,13 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   fresh run with new read-only, nondelegating seats instead of reusing old tasks.
 - **Cross-milestone review roll-forward:** the same durable review run can
   activate its next declared milestone through an append-only receipt. Exact
-  source chains and fresh main-owner acceptance replace stale fixed paths
+  source chains and fresh responsible-owner acceptance replace stale fixed paths
   without rewriting the plan or guessing from file timestamps.
 - **Scoped finding conservation:** when the current milestone has finished its
   own scope but retains P0/P1 assigned to later stages, one pre-bound scope
   transition may advance to the next declared milestone. Every finding remains
   bound to its source, severity, and exact text unless resolved by that same
-  source; stage progression is not final main-owner acceptance.
+  source; stage progression is not final responsible-owner acceptance.
 - **First-milestone review revisions:** before advancing to a later milestone,
   one pre-authorized revision may re-arm every required read-only source and
   select one exact set of fresh cumulative results. Older evidence remains
@@ -107,7 +115,7 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   current runtime policy through an append-only receipt without rewriting its
   plan, run metadata, genesis event, or journal. Existing replacements remain
   bound to their source and continuity evidence.
-- **Untrusted-result boundary:** the main-agent control policy treats Worker
+- **Untrusted-result boundary:** the task-owner control policy treats Worker
   outputs as untrusted data, never direct authorization; verified, inferred,
   and assumed findings have different review and adoption rules.
 - **Receipt-bound archive:** a durable background task cannot be archived after
@@ -121,23 +129,21 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
 - **Protected active capacity:** target six active Workers while keeping two
   transient-subagent slots available beside four active persistent Workers;
   actual capacity is clamped to the runtime.
-- **Cost-aware static model routing:** Luna handles bounded mechanical work and
-  ordinary implementation/testing at maximum effort; Sol handles architecture,
-  ambiguous debugging, and formal domain or adversarial review. Terra remains
-  explicit-request-only, and no benchmark Agent is launched before work.
-  Requested and actual models remain separate when the platform does not expose
-  the runtime model.
-  Sol `max` is preferred for very hard bounded work; Ultra remains a last-resort,
-  explicitly authorized route because it also enables automatic delegation.
+- **Cost-aware model routing:** ordinary execution prefers Luna High/Max.
+  Complex management, judgment, architecture, and formal review use Sol
+  High/Max. Terra is not a default and requires an explicit user request or
+  authorization. Ultra requires explicit per-node approval. Requested and
+  actual models remain separate when the runtime does not expose the actual
+  model.
 - **Deterministic modes:** `auto` resolves to a lightweight quick path,
   independent team, or recoverable workflow without another routing Agent.
 - **Reusable research evidence:** an on-demand curator builds a source
   registry only when multiple downstream workstreams will reuse it.
 - **On-demand professional roles:** built-in industry role packs expose only
   the selected contract and can expand without bloating every Worker prompt.
-- **General producer ownership:** specialists may own bounded sections,
-  modules, investigations, datasets, or design surfaces while the main agent
-  preserves the global spine and final delivery.
+- **General producer ownership:** the responsible task Agent owns task-wide
+  integration; a project lead owns project integration; executors may own
+  bounded sections, modules, investigations, datasets, or design surfaces.
 - **Lightweight project knowledge:** durable projects may reuse sourced
   decisions, verified facts, interfaces, and unresolved risks; one-off work
   creates no knowledge store.
@@ -150,8 +156,9 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   accepted only for the same node in a hash-checked failed run, and an
   every deterministic Worker failure requires event-bound user authorization
   before another Worker launch.
-- **Upward staffing:** an executor that needs another role asks its lead; it
-  cannot recursively create workers or grow an organization without approval.
+- **Upward staffing control:** non-lead executors may request additional
+  capacity only from their immediate superior and cannot recursively create an
+  unlimited organization.
 - **Recoverable execution:** immutable plans, hash-chained events, handoffs
   only when resume/reuse needs them, write-scope checks, and completion gates.
 
@@ -207,8 +214,8 @@ PowerShell 7.5 or later is required for the deterministic scripts.
 
 ```text
 Use $adaptive-agent-orchestrator only if this migration contains genuinely
-independent workstreams. Keep shared context in the main agent, give workers
-references instead of copied content, and dispatch progressively.
+independent workstreams. Let the current Agent choose the required hierarchy,
+give workers references instead of copied content, and dispatch progressively.
 ```
 
 ```text
@@ -219,8 +226,8 @@ escalation conditions before dispatch.
 
 ```text
 Use $adaptive-agent-orchestrator for this supply-chain study. Show the compact
-role map first, explain which responsibilities stay with the main agent, and
-ask before creating any Worker I have not auto-authorized.
+role map first, explain the task and project ownership, and ask before creating
+any Worker I have not auto-authorized.
 ```
 
 ```text
@@ -237,13 +244,13 @@ replace the official feature.
 | Capability | Official subagents | Adaptive Agent Orchestrator |
 | --- | --- | --- |
 | One-off delegation | Built in and simpler | Stays out of the way |
-| Context selection | Controller judgment | Reference-first inputs, exclusions, overlap check |
+| Context selection | Owner judgment | Reference-first inputs, exclusions, overlap check |
 | Dispatch timing | Prompt-driven | Dynamic ownership, zero to two independent first-wave Workers |
 | Review | Controller judgment | Risk-only or sampled; no default reviewer ensemble |
 | Retry | Session-dependent | Delta repair packet and failure-class rules |
 | Write ownership | Prompt/sandbox dependent | Rejects overlapping writer scopes |
 | Recovery | Thread history and summaries | Hashed plan, append-only journal, immutable handoff |
-| Completion | Main agent consolidation | Node, artifact, evidence, and human-gate checks |
+| Completion | Task/project owner integration | Node, artifact, evidence, and human-gate checks |
 | Token savings | Not automatically measured | Offline end-to-end benchmark gate |
 
 Use official subagents directly for short, obvious delegation. Use this Skill
@@ -254,24 +261,26 @@ when coordination itself creates risk or repeated context.
 ```text
 request
    ↓
-main agent claims the global spine and productive work
+current Agent takes responsibility, understands the goal, and chooses one layer
+or a project lead -> executor hierarchy
    ↓
-find independently checkable work that needs less context
+find independent workflows and assign bounded ownership
    ↓
-start zero to two context-disjoint first-wave Workers
+start only the workers that add accepted value
    ↓
-main agent keeps producing and validates Worker evidence
+responsible task/project owner validates and adopts the results
    ↓
-optional later wave only when it adds new accepted value
+writer worktrees are archived and cleaned by the responsible owner
    ↓
-risk-based review + main-agent integration
+risk-based review and owner integration
    ↓
 artifact/evidence/human-gate completion checks
 ```
 
-The scripts validate structure and lifecycle state. The Codex controller still
-selects available execution tools, materializes workers, reads real thread
-state, integrates results, and performs authorized external actions.
+The scripts validate structure and lifecycle state. The responsible task Agent
+and any project leads select available execution tools, materialize workers,
+read real thread state, integrate results, and perform authorized external
+actions within their assigned scope.
 
 ## Validation
 
@@ -319,7 +328,7 @@ The v0.7.16 release passes:
 - the real 37-event run used pre-authorization to enter declared Group2. Four
   of eleven P1 occurrences were resolved by same-source review, seven remained
   open, and completion stayed `BLOCKED` by those seven findings plus missing
-  final main-owner acceptance. P1-03 through P1-06 did not reappear.
+  final responsible-owner acceptance. P1-03 through P1-06 did not reappear.
 - the real 39-event run preserved its exact prefix, then let the same traditional
   source enter checkpoint12 `result_pending` and `running` by binding the
   current Group2 result, disposition, and activation event. The original
@@ -384,10 +393,11 @@ pwsh -NoProfile -File `
 - Natural-language exclusions cannot erase history already injected by a host;
   use fresh workers and explicit input references.
 - Exact context-overlap checks cannot detect two differently named references
-  that contain the same semantics; the main agent must still reject them.
-- Separate projects do not share a machine-level calibration ledger. The
-  controller enforces the root-task Worker ceiling and must reconcile visible
-  state after recovery.
+  that contain the same semantics; the responsible task Agent must still reject
+  them.
+- Separate projects do not share a machine-level calibration ledger. Each
+  project lead requests additional capacity from the responsible task Agent,
+  which reconciles visible state after recovery.
 - Calibration records snapshot-observation intervals, not exact platform
   visibility latency.
 - Token usage is diagnostic only when the execution surface exposes it.
@@ -403,8 +413,9 @@ pwsh -NoProfile -File `
 The Skill rejects recursive delegation, overlapping writer scopes, unsafe
 paths, forged run metadata, journal tampering, unverified handoff hashes, and
 human-gate completion without recorded user evidence. External publication,
-deletion, payments, account changes, and production operations remain
-controller-owned and require user authority.
+deletion, payments, account changes, and production operations remain with the
+responsible task owner or an explicitly assigned owner and require user
+authority.
 
 ## Contributing
 
