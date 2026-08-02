@@ -502,6 +502,12 @@ if ($null -ne $lifecycleCorrection) {
         [int]$correctionEvents[0].sequence
     $payload.lifecycle_correction_event_hash =
         [string]$correctionEvents[0].hash
+    if ([string]$lifecycleCorrection.schema_version -eq '1.1') {
+        $payload.lifecycle_correction_mode =
+            [string]$lifecycleCorrection.correction_mode
+        $payload.lifecycle_correction_omission_source_node_id =
+            $lifecycleCorrection.omission_source_node_id
+    }
 }
 if ($null -ne $inventorySupersession) {
     if ($useCombinedSupersession) {

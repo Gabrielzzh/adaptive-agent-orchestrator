@@ -350,7 +350,10 @@ sibling shape where one source's `completed.artifact` is the current result but
 `completed.evidence` omitted that same pointer while every other source has the
 exact correct lifecycle binding. It appends one non-state correction for the
 full source set; a fully correct set, partial set, or any other mixed error
-shape does not qualify.
+shape does not qualify. New corrections require structured authorization that
+fixes `correction_mode`; this sibling uses `single_source_omission` and names
+the one omitted source. A legacy whole-source same-shape correction requires a
+different explicit mode and cannot be selected as an implicit fallback.
 If the lifecycle is correct but the current result/disposition files omitted
 older source occurrences, use the cumulative inventory supersession command in
 the workflow contract before selection. It derives one full-source, non-state

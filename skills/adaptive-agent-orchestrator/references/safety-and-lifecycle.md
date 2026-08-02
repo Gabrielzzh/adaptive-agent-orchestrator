@@ -323,8 +323,12 @@ the full-source lifecycle correction receipt and its non-state event. The only
 eligible sibling is one exact source omission where its top-level
 `completed.artifact` is the current result but `completed.evidence` contains no
 artifact pointer, while every other source has the exact correct lifecycle
-binding. Never rewrite the original lifecycle events or accept any other mixed
-error shape.
+binding. Its structured authorization must fix
+`correction_mode=single_source_omission` and the omitted source; the receipt,
+event, selection reader, and completion readback revalidate both. A legacy
+whole-source same-shape correction requires its own explicit mode and is never
+an implicit fallback. Never rewrite the original lifecycle events or accept any
+other mixed error shape.
 For the separate cumulative-inventory omission shape, append one full-source
 inventory supersession and its non-state event. It may only copy omitted
 occurrences exactly from the prior selected receipts into new cumulative

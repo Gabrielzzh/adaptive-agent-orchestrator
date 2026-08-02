@@ -560,6 +560,11 @@ function Resign-RevisionLifecycleCorrectionTail {
         [string]$receipt.checkpoint_material_hash
     $event.milestone_revision_input_hash = [string]$receipt.input_manifest_hash
     $event.milestone_revision_selection_key = [string]$receipt.selection_key
+    if ($receipt.Contains('correction_mode')) {
+        $event.lifecycle_correction_mode = [string]$receipt.correction_mode
+        $event.lifecycle_correction_omission_source_node_id =
+            $receipt.omission_source_node_id
+    }
     $event.idempotency_key = [string]$receipt.correction_key
     $event.request_fingerprint = [string]$receipt.receipt_hash
     $event.Remove('hash')
@@ -1342,8 +1347,15 @@ try {
     $evidenceCorrectionAuthorization = Join-Path (
         $evidenceCorrectionRun
     ) 'materials/revision-lifecycle-correction-authorization.md'
-    Set-Content -LiteralPath $evidenceCorrectionAuthorization -Value (
-        'Controller authorizes only the validated evidence pointer correction.'
+    [ordered]@{
+        schema_version = '1.0'
+        revision_id = [string]$revisionAuthorization.revision_id
+        authorization_receipt_hash = [string]$revisionAuthorization.receipt_hash
+        selection_key = $authorizedSelectionKey
+        correction_mode = 'legacy_whole_source_same_shape'
+        omission_source_node_id = $null
+    } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (
+        $evidenceCorrectionAuthorization
     )
     $evidenceCorrectionBeforeRun = Join-Path $testRoot (
         'revision-validated-evidence-before-correction'
@@ -1604,7 +1616,9 @@ try {
         -CorrectionKey 'controller:revision-validated-evidence-correction' |
         ConvertFrom-Json -Depth 100
     Assert-True (
-        [string]$evidenceCorrection.schema_version -eq '1.0' -and
+        [string]$evidenceCorrection.schema_version -eq '1.1' -and
+        [string]$evidenceCorrection.correction_mode -eq
+            'legacy_whole_source_same_shape' -and
         @($evidenceCorrection.source_corrections).Count -eq 2
     ) 'One correction receipt must bind the complete durable source set.'
     foreach ($source in @('review', 'domain')) {
@@ -2535,8 +2549,15 @@ try {
     $replacementCorrectionAuthorization = Join-Path $replacementCorrectionRun (
         'materials/replacement-lifecycle-correction-authorization.md'
     )
-    Set-Content -LiteralPath $replacementCorrectionAuthorization -Value (
-        'Controller authorizes only the whole-source validated evidence correction.'
+    [ordered]@{
+        schema_version = '1.0'
+        revision_id = [string]$revisionAuthorization.revision_id
+        authorization_receipt_hash = [string]$revisionAuthorization.receipt_hash
+        selection_key = $authorizedSelectionKey
+        correction_mode = 'legacy_whole_source_same_shape'
+        omission_source_node_id = $null
+    } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (
+        $replacementCorrectionAuthorization
     )
     foreach ($omissionAttack in @(
         @{
@@ -2693,6 +2714,71 @@ try {
     $validatedCompleteBeforeHash = (
         Get-FileHash -LiteralPath $validatedCompleteEventsPath -Algorithm SHA256
     ).Hash
+    $bothOmissionSingleModeRun = Join-Path $testRoot (
+        'replacement-completed-evidence-omission-single-mode-rejected'
+    )
+    Copy-Item -LiteralPath $validatedCompleteBeforeRun `
+        -Destination $bothOmissionSingleModeRun -Recurse
+    $bothOmissionSingleModeAuthorization = Join-Path (
+        $bothOmissionSingleModeRun
+    ) 'materials/replacement-lifecycle-correction-authorization.json'
+    [ordered]@{
+        schema_version = '1.0'
+        revision_id = [string]$revisionAuthorization.revision_id
+        authorization_receipt_hash = [string]$revisionAuthorization.receipt_hash
+        selection_key = $authorizedSelectionKey
+        correction_mode = 'single_source_omission'
+        omission_source_node_id = 'domain'
+    } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (
+        $bothOmissionSingleModeAuthorization
+    )
+    $bothOmissionSingleModeEventsPath = Join-Path (
+        $bothOmissionSingleModeRun
+    ) 'events.jsonl'
+    $bothOmissionSingleModeBefore = @(
+        Read-OrchestrationJournal $bothOmissionSingleModeEventsPath
+    )
+    $bothOmissionSingleModeBeforeHash = (
+        Get-FileHash -LiteralPath $bothOmissionSingleModeEventsPath `
+            -Algorithm SHA256
+    ).Hash
+    $bothOmissionSingleModeReceiptCount = @(
+        Get-ChildItem -LiteralPath (
+            Join-Path $bothOmissionSingleModeRun 'receipts'
+        ) -Filter '*.lifecycle-correction.json' -File -ErrorAction SilentlyContinue
+    ).Count
+    Assert-ThrowsLike {
+        & (Join-Path $scriptRoot (
+            'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+        )) -RunDirectory $bothOmissionSingleModeRun `
+            -AuthorizationReceiptPath (
+                Join-Path $bothOmissionSingleModeRun $revisionAuthorizationRelative
+            ) -SelectionMaterialPath (
+                Join-Path $bothOmissionSingleModeRun (
+                    'materials/method-1-revision-1-replacement-selection.json'
+                )
+            ) -AuthorizationMaterialPath $bothOmissionSingleModeAuthorization `
+            -CorrectionKey 'controller:reject-both-omission-single-mode' |
+            Out-Null
+    } 'requires exactly one omitted source' (
+        'single_source_omission must reject a two-source omission before write.'
+    )
+    $bothOmissionSingleModeAfter = @(
+        Read-OrchestrationJournal $bothOmissionSingleModeEventsPath
+    )
+    Assert-True (
+        $bothOmissionSingleModeAfter.Count -eq
+            $bothOmissionSingleModeBefore.Count -and
+        [string]$bothOmissionSingleModeAfter[-1].hash -eq
+            [string]$bothOmissionSingleModeBefore[-1].hash -and
+        (Get-FileHash -LiteralPath $bothOmissionSingleModeEventsPath `
+            -Algorithm SHA256).Hash -eq $bothOmissionSingleModeBeforeHash -and
+        @(Get-ChildItem -LiteralPath (
+            Join-Path $bothOmissionSingleModeRun 'receipts'
+        ) -Filter '*.lifecycle-correction.json' -File `
+            -ErrorAction SilentlyContinue).Count -eq
+            $bothOmissionSingleModeReceiptCount
+    ) 'A rejected two-source omission must preserve journal and receipt inventory.'
     $validatedCompleteCorrection = & (Join-Path $scriptRoot (
         'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
     )) -RunDirectory $validatedCompleteRun `
@@ -2779,6 +2865,19 @@ try {
     @($singleSourceOmissionEvents | ForEach-Object {
         $_ | ConvertTo-Json -Compress -Depth 100
     }) | Set-Content -LiteralPath $singleSourceOmissionEventsPath
+    $singleSourceOmissionAuthorization = Join-Path $singleSourceOmissionRun (
+        'materials/replacement-lifecycle-correction-authorization.md'
+    )
+    [ordered]@{
+        schema_version = '1.0'
+        revision_id = [string]$revisionAuthorization.revision_id
+        authorization_receipt_hash = [string]$revisionAuthorization.receipt_hash
+        selection_key = $authorizedSelectionKey
+        correction_mode = 'single_source_omission'
+        omission_source_node_id = 'domain'
+    } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (
+        $singleSourceOmissionAuthorization
+    )
     $allCorrectRun = Join-Path $testRoot (
         'replacement-lifecycle-correction-all-sources-correct'
     )
@@ -2830,7 +2929,7 @@ try {
                 )
             ) -CorrectionKey 'controller:reject-all-correct-correction' |
             Out-Null
-    } 'requires one exact error shape' (
+    } 'requires exactly one omitted source' (
         'A fully correct source set must not create a lifecycle correction.'
     )
     $allCorrectAfter = @(Read-OrchestrationJournal $allCorrectEventsPath)
@@ -2851,12 +2950,15 @@ try {
                 'materials/method-1-revision-1-replacement-selection.json'
             )
         ) -AuthorizationMaterialPath (
-            Join-Path $singleSourceOmissionRun (
-                'materials/replacement-lifecycle-correction-authorization.md'
-            )
+            $singleSourceOmissionAuthorization
         ) -CorrectionKey 'controller:single-source-omission-correction' |
         ConvertFrom-Json -Depth 100
     Assert-True (
+        [string]$singleSourceOmissionCorrection.schema_version -eq '1.1' -and
+        [string]$singleSourceOmissionCorrection.correction_mode -eq
+            'single_source_omission' -and
+        [string]$singleSourceOmissionCorrection.omission_source_node_id -eq
+            'domain' -and
         @($singleSourceOmissionCorrection.source_corrections | Where-Object {
             [string]$_.error_class -eq
                 'completed-missing-result-pointer-with-valid-validated-binding'
@@ -2870,6 +2972,49 @@ try {
         'A whole-source correction must preserve one exact source lifecycle ' +
         'while correcting the sibling source completed evidence omission.'
     )
+    $singleSourceOmissionPendingRun = Join-Path $testRoot (
+        'replacement-single-source-omission-pending-selection'
+    )
+    Copy-Item -LiteralPath $singleSourceOmissionRun `
+        -Destination $singleSourceOmissionPendingRun -Recurse
+    foreach ($modeMutation in @(
+        @{
+            name = 'mode-downgrade'
+            expected = 'mode binding changed'
+            action = {
+                param($receipt)
+                $receipt.correction_mode = 'legacy_whole_source_same_shape'
+                $receipt.omission_source_node_id = $null
+            }
+        },
+        @{
+            name = 'omission-source-switch'
+            expected = 'mode binding changed'
+            action = {
+                param($receipt)
+                $receipt.omission_source_node_id = 'review'
+            }
+        }
+    )) {
+        $modeMutationRun = Join-Path $testRoot (
+            "replacement-single-source-omission-$($modeMutation.name)"
+        )
+        Copy-Item -LiteralPath $singleSourceOmissionPendingRun `
+            -Destination $modeMutationRun -Recurse
+        Resign-RevisionLifecycleCorrectionTail -Run $modeMutationRun `
+            -ReceiptMutation $modeMutation.action
+        $modeMutationReceipt = @(
+            Get-ChildItem -LiteralPath (Join-Path $modeMutationRun 'receipts') `
+                -Filter '*.lifecycle-correction.json' -File
+        )[0].FullName
+        Assert-ThrowsLike {
+            Read-DurableReviewMilestoneRevisionLifecycleCorrection `
+                -Path $modeMutationReceipt -RunDirectory $modeMutationRun |
+                Out-Null
+        } ([string]$modeMutation.expected) (
+            "The '$($modeMutation.name)' correction mutation must be rejected."
+        )
+    }
     $singleSourceOmissionSelection = & (Join-Path $scriptRoot (
         'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
     )) -RunDirectory $singleSourceOmissionRun `
@@ -2884,7 +3029,11 @@ try {
     Assert-True (
         [string]$singleSourceOmissionSelection.schema_version -eq '1.5' -and
         [string]$singleSourceOmissionSelection.lifecycle_correction_receipt_hash -eq
-            [string]$singleSourceOmissionCorrection.receipt_hash
+            [string]$singleSourceOmissionCorrection.receipt_hash -and
+        [string]$singleSourceOmissionSelection.lifecycle_correction_mode -eq
+            'single_source_omission' -and
+        [string]$singleSourceOmissionSelection.
+            lifecycle_correction_omission_source_node_id -eq 'domain'
     ) (
         'A single-source omission correction must remain selectable through ' +
         'the existing replacement correction schema.'

@@ -407,23 +407,34 @@ already has the exact current result/disposition lifecycle binding.
 For the original shape, completed evidence may additionally include only the
 raw capture path named and hash-bound by that result receipt. For the sibling
 shape, completed evidence contains no artifact at all; a raw-only or different
-artifact does not qualify. Validated and adopted retain one result/disposition
-artifact respectively; all three stages may retain only typed `test:`,
+artifact does not qualify. In the sibling shape, validated retains the current
+result and disposition while adopted retains the disposition. All three stages
+may retain only typed `test:`,
 `source:`, or `observation:` evidence, which correction preserves. The receipt
 still binds the complete source set. A fully correct set, partial source set,
 or a source with any other error shape does not qualify.
+
+New correction authorization material is structured JSON. It binds schema
+`1.0`, the revision ID, authorization receipt hash, selection key,
+`correction_mode`, and `omission_source_node_id`. Use
+`single_source_omission` only when exactly the named source has the sibling
+omission and every other required source is unchanged. Historical whole-source
+same-shape correction is available for new writes only through explicit
+`legacy_whole_source_same_shape` authorization with a null omission source;
+there is no implicit fallback between modes.
 
 ```powershell
 pwsh -File scripts/New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1 `
   -RunDirectory <run> `
   -AuthorizationReceiptPath <run>/receipts/<revision-authorization>.json `
   -SelectionMaterialPath <run>/materials/<revision-selection>.json `
-  -AuthorizationMaterialPath <run>/materials/<correction-authorization>.md `
+  -AuthorizationMaterialPath <run>/materials/<correction-authorization>.json `
   -CorrectionKey "controller:<stable-correction-reference>"
 ```
 
 The correction binds the authorization and its pre-bound selection key, the
-current journal head/count, checkpoint/input, complete source/role/thread set,
+current journal head/count, checkpoint/input, correction mode and omission
+source, complete source/role/thread set,
 exact lifecycle event sequence/hash, and result/disposition file and internal
 hashes. It appends a non-state event: it cannot change a source state, resolve a
 finding, resend review, or replace main acceptance. Partial, repeated, forked,
