@@ -5565,6 +5565,16 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
             [string]$_ -cne $resultPointer -and
             [string]$_ -cne $rawPointer
         })
+        $validatedResultCount = @($validatedArtifacts | Where-Object {
+            [string]$_ -ceq $resultPointer
+        }).Count
+        $validatedDispositionCount = @($validatedArtifacts | Where-Object {
+            [string]$_ -ceq $dispositionPointer
+        }).Count
+        $validatedUnexpectedArtifacts = @($validatedArtifacts | Where-Object {
+            [string]$_ -cne $resultPointer -and
+            [string]$_ -cne $dispositionPointer
+        })
         $validatedPointerErrorShape = (
             $completedResultCount -eq 1 -and
             $completedArtifacts.Count -in @(1, 2) -and
@@ -5576,6 +5586,24 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
             $completedResultCount -eq 0 -and
             $completedRawCount -eq 0
         )
+        $validatedMissingDispositionShape = (
+            $validatedArtifacts.Count -eq 1 -and
+            $validatedResultCount -eq 1 -and
+            $validatedDispositionCount -eq 0 -and
+            $validatedUnexpectedArtifacts.Count -eq 0
+        )
+        $validatedCompleteShape = (
+            $validatedArtifacts.Count -eq 2 -and
+            $validatedResultCount -eq 1 -and
+            $validatedDispositionCount -eq 1 -and
+            $validatedUnexpectedArtifacts.Count -eq 0
+        )
+        $acceptedLifecycleShape = (
+            ($validatedPointerErrorShape -and
+                $validatedMissingDispositionShape) -or
+            ($completedPointerOmissionShape -and
+                ($validatedMissingDispositionShape -or $validatedCompleteShape))
+        )
         if (($completedPointerOmissionShape -and (
                 [string]$completed.artifact -cne
                     [string]$binding.result_receipt_path -or
@@ -5584,14 +5612,12 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
                 [string]$adopted.artifact -cne
                     [string]$binding.disposition_receipt_path
             )) -or
-            (-not $validatedPointerErrorShape -and
-                -not $completedPointerOmissionShape) -or
+            -not $acceptedLifecycleShape -or
             $completedUnexpectedArtifacts.Count -gt 0 -or
             @($completedNonArtifacts | Where-Object {
                 [string]$_ -notmatch $typedEvidencePattern
             }).Count -gt 0 -or
-            $validatedArtifacts.Count -ne 1 -or
-            [string]$validatedArtifacts[0] -cne $resultPointer -or
+            $validatedUnexpectedArtifacts.Count -gt 0 -or
             @($validatedNonArtifacts | Where-Object {
                 [string]$_ -notmatch $typedEvidencePattern
             }).Count -gt 0 -or
@@ -5607,10 +5633,15 @@ function Get-MilestoneRevisionLifecycleCorrectionSources {
                 'has one result artifact, adopted has one disposition artifact, ' +
                 'and all extra evidence is typed; or its exact whole-source ' +
                 'completed-result-pointer-omission sibling, where completed.artifact ' +
-                'is the current result and completed.evidence has no artifact.'
+                'is the current result, completed.evidence has no artifact, and ' +
+                'validated either has only the current result or exactly the ' +
+                'current result and disposition.'
             )
         }
-        $errorClass = if ($completedPointerOmissionShape) {
+        $errorClass = if ($completedPointerOmissionShape -and
+            $validatedCompleteShape) {
+            'completed-missing-result-pointer-with-valid-validated-binding'
+        } elseif ($completedPointerOmissionShape) {
             'completed-missing-result-pointer-and-validated-missing-disposition-pointer'
         } else {
             'validated-missing-disposition-pointer'

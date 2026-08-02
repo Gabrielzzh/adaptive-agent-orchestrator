@@ -2615,6 +2615,220 @@ try {
                 -Algorithm SHA256).Hash -eq $beforeFileHash
         ) "The '$($omissionAttack.name)' rejection must not mutate the journal."
     }
+    $validatedCompleteRun = Join-Path $testRoot (
+        'replacement-completed-evidence-omission-validated-complete'
+    )
+    Copy-Item -LiteralPath $replacementCorrectionRun `
+        -Destination $validatedCompleteRun -Recurse
+    $validatedCompleteEventsPath = Join-Path $validatedCompleteRun 'events.jsonl'
+    $validatedCompleteEvents = @(
+        Get-Content -LiteralPath $validatedCompleteEventsPath | ForEach-Object {
+            $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+        }
+    )
+    foreach ($source in @(
+        @{
+            id = 'review'
+            result = $replacementReview.result_path
+            disposition = $replacementReview.disposition_path
+        },
+        @{
+            id = 'domain'
+            result = $replacementDomain.result_path
+            disposition = $replacementDomain.disposition_path
+        }
+    )) {
+        $validatedEvent = @($validatedCompleteEvents | Where-Object {
+            [string]$_.node_id -eq [string]$source.id -and
+            [string]$_.status -eq 'validated'
+        })[-1]
+        $validatedEvent.evidence = @(
+            "artifact:$($source.result)",
+            "artifact:$($source.disposition)",
+            "test:validated-complete-$($source.id)",
+            "source:validated-complete-$($source.id)",
+            "observation:validated-complete-$($source.id)"
+        )
+    }
+    for ($eventIndex = 0; $eventIndex -lt $validatedCompleteEvents.Count;
+        $eventIndex++) {
+        $validatedCompleteEvents[$eventIndex].prev_hash = if ($eventIndex -eq 0) {
+            $null
+        } else { [string]$validatedCompleteEvents[$eventIndex - 1].hash }
+        $validatedCompleteEvents[$eventIndex].Remove('hash')
+        $validatedCompleteEvents[$eventIndex].hash = Get-OrchestrationEventHash (
+            [pscustomobject]$validatedCompleteEvents[$eventIndex]
+        )
+    }
+    @($validatedCompleteEvents | ForEach-Object {
+        $_ | ConvertTo-Json -Compress -Depth 100
+    }) | Set-Content -LiteralPath $validatedCompleteEventsPath
+    $validatedCompleteBeforeRun = Join-Path $testRoot (
+        'replacement-completed-evidence-omission-validated-complete-before'
+    )
+    Copy-Item -LiteralPath $validatedCompleteRun `
+        -Destination $validatedCompleteBeforeRun -Recurse
+    $validatedCompleteBeforeCount = $validatedCompleteEvents.Count
+    $validatedCompleteBeforeHash = (
+        Get-FileHash -LiteralPath $validatedCompleteEventsPath -Algorithm SHA256
+    ).Hash
+    $validatedCompleteCorrection = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+    )) -RunDirectory $validatedCompleteRun `
+        -AuthorizationReceiptPath (
+            Join-Path $validatedCompleteRun $revisionAuthorizationRelative
+        ) -SelectionMaterialPath (
+            Join-Path $validatedCompleteRun (
+                'materials/method-1-revision-1-replacement-selection.json'
+            )
+        ) -AuthorizationMaterialPath (
+            Join-Path $validatedCompleteRun (
+                'materials/replacement-lifecycle-correction-authorization.md'
+            )
+        ) -CorrectionKey 'controller:validated-complete-correction' |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        @($validatedCompleteCorrection.source_corrections | Where-Object {
+            [string]$_.error_class -eq
+                'completed-missing-result-pointer-with-valid-validated-binding'
+        }).Count -eq 2 -and
+        @(Read-OrchestrationJournal $validatedCompleteEventsPath).Count -eq
+            ($validatedCompleteBeforeCount + 1) -and
+        $validatedCompleteBeforeHash -ne (
+            Get-FileHash -LiteralPath $validatedCompleteEventsPath -Algorithm SHA256
+        ).Hash
+    ) (
+        'The whole-source correction must accept completed evidence omission ' +
+        'when validated already binds the current result and disposition.'
+    )
+    $validatedCompleteSelection = & (Join-Path $scriptRoot (
+        'New-DurableReviewMilestoneRevisionSelectionReceipt.ps1'
+    )) -RunDirectory $validatedCompleteRun `
+        -AuthorizationReceiptPath (
+            Join-Path $validatedCompleteRun $revisionAuthorizationRelative
+        ) -SelectionMaterialPath (
+            Join-Path $validatedCompleteRun (
+                'materials/method-1-revision-1-replacement-selection.json'
+            )
+        ) -SelectionKey $authorizedSelectionKey |
+        ConvertFrom-Json -Depth 100
+    Assert-True (
+        [string]$validatedCompleteSelection.schema_version -eq '1.5' -and
+        [string]$validatedCompleteSelection.lifecycle_correction_receipt_hash -eq
+            [string]$validatedCompleteCorrection.receipt_hash
+    ) (
+        'The corrected replacement lifecycle must remain selectable through ' +
+        'the existing schema 1.5 path.'
+    )
+    foreach ($validatedCompleteAttack in @(
+        @{
+            name = 'duplicate-result'
+            expected = 'exact validated-result-pointer error shape'
+            mutate = {
+                param($event)
+                $event.evidence = @(
+                    "artifact:$($replacementReview.result_path)",
+                    "artifact:$($replacementReview.result_path)",
+                    "artifact:$($replacementReview.disposition_path)"
+                )
+            }
+        },
+        @{
+            name = 'third-artifact'
+            expected = 'exact validated-result-pointer error shape'
+            mutate = {
+                param($event)
+                $event.evidence = @(
+                    "artifact:$($replacementReview.result_path)",
+                    "artifact:$($replacementReview.disposition_path)",
+                    'artifact:receipts/unexpected-third.json'
+                )
+            }
+        },
+        @{
+            name = 'missing-result'
+            expected = 'exact validated-result-pointer error shape'
+            mutate = {
+                param($event)
+                $event.evidence = @(
+                    "artifact:$($replacementReview.disposition_path)",
+                    'observation:validated-result-omitted'
+                )
+            }
+        },
+        @{
+            name = 'mixed-source-shapes'
+            expected = 'one exact error shape'
+            mutate = {
+                param($event)
+                $event.evidence = @(
+                    "artifact:$($replacementReview.result_path)"
+                )
+            }
+        }
+    )) {
+        $attackRun = Join-Path $testRoot (
+            "validated-complete-$($validatedCompleteAttack.name)"
+        )
+        Copy-Item -LiteralPath $validatedCompleteBeforeRun `
+            -Destination $attackRun -Recurse
+        $attackEventsPath = Join-Path $attackRun 'events.jsonl'
+        $attackEvents = @(
+            Get-Content -LiteralPath $attackEventsPath | ForEach-Object {
+                $_ | ConvertFrom-Json -AsHashtable -Depth 100 -DateKind String
+            }
+        )
+        $reviewValidated = @($attackEvents | Where-Object {
+            [string]$_.node_id -eq 'review' -and
+            [string]$_.status -eq 'validated'
+        })[-1]
+        & $validatedCompleteAttack.mutate $reviewValidated
+        for ($eventIndex = 0; $eventIndex -lt $attackEvents.Count; $eventIndex++) {
+            $attackEvents[$eventIndex].prev_hash = if ($eventIndex -eq 0) {
+                $null
+            } else { [string]$attackEvents[$eventIndex - 1].hash }
+            $attackEvents[$eventIndex].Remove('hash')
+            $attackEvents[$eventIndex].hash = Get-OrchestrationEventHash (
+                [pscustomobject]$attackEvents[$eventIndex]
+            )
+        }
+        @($attackEvents | ForEach-Object {
+            $_ | ConvertTo-Json -Compress -Depth 100
+        }) | Set-Content -LiteralPath $attackEventsPath
+        $beforeCount = $attackEvents.Count
+        $beforeHead = [string]$attackEvents[-1].hash
+        $beforeFileHash = (Get-FileHash -LiteralPath $attackEventsPath `
+            -Algorithm SHA256).Hash
+        Assert-ThrowsLike {
+            & (Join-Path $scriptRoot (
+                'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
+            )) -RunDirectory $attackRun `
+                -AuthorizationReceiptPath (
+                    Join-Path $attackRun $revisionAuthorizationRelative
+                ) -SelectionMaterialPath (
+                    Join-Path $attackRun (
+                        'materials/method-1-revision-1-replacement-selection.json'
+                    )
+                ) -AuthorizationMaterialPath (
+                    Join-Path $attackRun (
+                        'materials/replacement-lifecycle-correction-authorization.md'
+                    )
+                ) -CorrectionKey "controller:reject-$($validatedCompleteAttack.name)" |
+                Out-Null
+        } ([string]$validatedCompleteAttack.expected) (
+            "The '$($validatedCompleteAttack.name)' validated binding must fail closed."
+        )
+        $afterEvents = @(Read-OrchestrationJournal $attackEventsPath)
+        Assert-True (
+            $afterEvents.Count -eq $beforeCount -and
+            [string]$afterEvents[-1].hash -eq $beforeHead -and
+            (Get-FileHash -LiteralPath $attackEventsPath `
+                -Algorithm SHA256).Hash -eq $beforeFileHash
+        ) (
+            "The '$($validatedCompleteAttack.name)' rejection must not mutate " +
+            'the journal.'
+        )
+    }
     $replacementCorrection = & (Join-Path $scriptRoot (
         'New-DurableReviewMilestoneRevisionLifecycleCorrectionReceipt.ps1'
     )) -RunDirectory $replacementCorrectionRun `
