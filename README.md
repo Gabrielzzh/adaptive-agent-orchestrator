@@ -1,13 +1,15 @@
 # Adaptive Agent Orchestrator
 
-[简体中文](README.zh-CN.md) · [v0.7.17 release notes](docs/releases/v0.7.17.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
+[简体中文](README.zh-CN.md) · [v0.7.18 release notes](docs/releases/v0.7.18.md) · [Release history](docs/releases/README.md) · [Installation](#installation) · [How it works](#how-it-works) · [Limitations](#current-limitations)
 
 ![Adaptive Agent Orchestrator v0.7.0 launch visual](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
 `adaptive-agent-orchestrator` improves research, coding, writing, analysis,
-creative, and operational work. The main agent remains a core producer while
-bounded subagents or durable tasks isolate only the work that can be completed
-and verified with less context.
+creative, and operational work. For each invocation, the current Agent becomes
+the task lead: it understands the goal, forms only the useful workstreams and
+levels, routes bounded execution, validates results, integrates delivery, and
+retires temporary roles and worktrees. Simple work stays one layer; complex or
+multi-project work may add project leads and independently owned workstreams.
 
 The goal is lower total task Token use. Users do not configure a Token budget,
 and the Skill does not pretend it can predict the total cost of an open-ended
@@ -22,8 +24,9 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   prompts.
 - **Progressive disclosure:** the Skill body stays compact; references and
   project files are read only when a workstream needs them.
-- **Single-agent by default:** small, sequential, high-overlap, and narrow-edit
-  tasks remain in the main agent.
+- **Task-shaped organization:** small, sequential, high-overlap, and narrow-edit
+  tasks stay one layer; deeper lead-to-executor structures exist only when the
+  task actually needs them.
 - **Durable work when it pays:** independent, bounded, checkable work that can
   use smaller context or a lower-cost model is proposed as a visible durable
   Codex task instead of silently staying in the expensive main context.
@@ -147,7 +150,8 @@ task. Savings must be demonstrated by fair end-to-end benchmarks.
   accepted only for the same node in a hash-checked failed run, and an
   every deterministic Worker failure requires event-bound user authorization
   before another Worker launch.
-- **One controller:** workers cannot recursively create workers.
+- **Upward staffing:** an executor that needs another role asks its lead; it
+  cannot recursively create workers or grow an organization without approval.
 - **Recoverable execution:** immutable plans, hash-chained events, handoffs
   only when resume/reuse needs them, write-scope checks, and completion gates.
 

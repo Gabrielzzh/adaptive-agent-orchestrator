@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.7.18 - 2026-08-02
+
+Durable-review recovery and exact correction-identity release.
+
+- Allow an invalid, still-unselected same-milestone revision to be abandoned
+  append-only, then authorize fresh review work without rewriting prior history.
+- Preserve revision ordinals across selected and legally abandoned revisions,
+  including replacement-source recovery under the current consecutive revision.
+- Add narrowly bound lifecycle-evidence corrections for documented pointer
+  omissions while keeping state, findings, checkpoint, input, and receipts fixed.
+- Require structured correction mode and omission-source identity to match exact
+  lowercase ordinal values. Case variants, surrounding whitespace, and Unicode
+  lookalikes now fail before journal write.
+- Describe orchestration as task-shaped company organization: simple work stays
+  one layer, complex work may add leads and executors, and staffing flows upward.
+- Preserve boundaries: no external model provider, SDK, API-key integration, or
+  change to open-finding/main-acceptance completion gates is introduced.
+
 ## 0.7.17 - 2026-08-01
 
 Same-revision cumulative review-inventory correction release.
