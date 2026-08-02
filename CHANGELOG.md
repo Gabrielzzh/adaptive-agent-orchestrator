@@ -15,8 +15,8 @@ Durable-review recovery and exact correction-identity release.
   lookalikes now fail before journal write.
 - Describe orchestration as task-shaped company organization: simple work stays
   one layer, complex work may add leads and executors, and staffing flows upward.
-- Preserve boundaries: no external model provider, SDK, API-key integration, or
-  change to open-finding/main-acceptance completion gates is introduced.
+- Preserve boundaries: only public Codex GPT routes are documented, and no
+  open-finding or main-acceptance completion gate is changed.
 
 ## 0.7.17 - 2026-08-01
 
