@@ -1,6 +1,6 @@
 ---
 name: adaptive-agent-orchestrator
-description: Dynamically organize the current task into an appropriate company-style hierarchy, roles, and model choices while keeping context and ownership bounded. Use before creating any agent, or when the user asks for subagents, background tasks, parallel work, agent roles, independent verification, reusable project knowledge, or durable cross-turn ownership.
+description: Understand a user's project or complex goal, decide whether to complete it directly or organize independent work, and keep context and ownership bounded. Use when the user describes a project, multi-step goal, or potentially complex outcome, or asks for parallel work, independent verification, reusable project knowledge, or durable cross-turn ownership. Always understand the goal before deciding whether delegation is useful.
 ---
 
 # Adaptive Agent Orchestrator
@@ -15,6 +15,23 @@ The host model already decomposes work, chooses tools, and summarizes results.
 Do not add generic reasoning rituals or repeat model-native instructions. Add
 only controls that prevent duplicated context, ownership conflicts, runaway
 delegation, unverifiable completion, or lost recovery state.
+
+## Start with the user's goal
+
+Start with the user's goal, not orchestration terminology. First understand the
+desired outcome, scope, constraints, and acceptance boundary. Then decide
+whether the responsible Agent can complete the work directly. For a simple,
+narrow, or strongly sequential request, do not propose delegation: acknowledge
+the goal briefly and proceed with the work.
+
+When separation would materially help, the first user-facing explanation says
+only what work would be separated, why separation helps, and how many
+confirmations are needed (normally one). Use plain-language work descriptions.
+Do not expose `agent`, `worker`, `subagent`, `thread`, `worktree`, `model`,
+`effort`, `receipt`, or `hash` unless the user asks for technical details or one
+of those details is necessary for a permission, risk, or blocking decision.
+Keep the exact internal role, routing, ownership, recovery, and evidence records
+required by the sections below; the plain-language layer does not weaken them.
 
 A non-lead executor may not create an unlimited descendant chain or invoke this
 Skill to self-expand. If it needs more people or capacity, it submits a bounded
@@ -82,12 +99,14 @@ responsible Agent or an in-scope project lead may adopt a role itself, defer it,
 or skip it when the work overlaps. Never fill available seats merely because
 roles exist.
 
-Before every direct or durable executor, show its role, necessity versus the
-current owner or project lead executing it, execution form (`native subagent` or
-`independent background agent`) and why that form fits the task lifecycle, bounded task ownership,
-input references, deliverable, and permissions. Add dependencies, exclusions,
-or evidence detail only when they affect the decision. If the user has not
-explicitly authorized automatic teaming, wait for approval or a requested
+Before every direct or durable executor, prepare its exact internal role,
+necessity versus the current owner or project lead executing it, execution form
+(`native subagent` or `independent background agent`) and why that form fits the
+task lifecycle, bounded task ownership, input references, deliverable, and
+permissions. Add dependencies, exclusions, or evidence detail only when they
+affect the decision. Present the plain-language summary from "Start with the
+user's goal" unless the user asks for the technical preview. If the user has
+not explicitly authorized automatic teaming, wait for approval or a requested
 change. Durable
 nodes record `user:<message-or-request>` for explicit approval or
 `policy:path:<project-relative-policy-file>` for automatic authorization;
@@ -102,9 +121,10 @@ pwsh -File scripts/New-RoleActivationPreview.ps1 `
   -OutputPath <run>/receipts/<node>-role-preview.md
 ```
 
-Show that preview in commentary before invoking any creation tool. The preview
-file is evidence that the explanation was prepared, not proof that the user
-saw it; the responsible Agent must still present it. Durable background reservations
+Use that preview to prepare the user-facing summary before invoking any creation
+tool. Show the exact preview only when the user requests technical details. The
+preview file is evidence that the explanation was prepared, not proof that the
+user saw the summary; the responsible Agent must still present it. Durable background reservations
 must bind this exact file and its hash. For direct native subagents, do not
 create a run merely for this evidence, but the same user-facing explanation
 must precede `spawn_agent`.
