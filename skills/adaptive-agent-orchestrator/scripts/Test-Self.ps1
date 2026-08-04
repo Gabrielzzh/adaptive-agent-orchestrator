@@ -2066,6 +2066,42 @@ try {
         'The launch contract must forbid model inference from routing policy ' +
         'without the platform-bound resolver.'
     )
+    $readmeZhText = Get-Content -LiteralPath (
+        Join-Path (Split-Path $skillRoot -Parent | Split-Path -Parent) 'README.zh-CN.md'
+    ) -Raw
+    $openAiMetadata = Get-Content -LiteralPath (
+        Join-Path $skillRoot 'agents/openai.yaml'
+    ) -Raw
+    $quickStartMatch = [regex]::Match(
+        $readmeZhText,
+        '(?s)## 快速开始\s+(?<body>.*?)(?=\s+## )'
+    )
+    Assert-True (
+        $quickStartMatch.Success -and
+        $quickStartMatch.Groups['body'].Value -like '*直接描述你想完成的目标*' -and
+        $quickStartMatch.Groups['body'].Value -notlike '*$adaptive-agent-orchestrator*'
+    ) 'The Chinese quick start must begin with the user goal, not a Skill command.'
+    Assert-True (
+        $skillPolicyText -like '*Start with the user''s goal, not orchestration terminology*' -and
+        $skillPolicyText -like '*do not propose delegation*'
+    ) 'Skill entry must understand the goal before deciding whether to delegate.'
+    Assert-True (
+        $skillPolicyText -match (
+            '(?s)what work would be separated.*why separation helps.*' +
+            'how many\s+confirmations are needed'
+        )
+    ) 'Complex-task previews must use a short plain-language confirmation summary.'
+    Assert-True (
+        $skillPolicyText -match (
+            '(?s)Do not expose.*thread.*worktree.*model.*effort.*receipt.*hash'
+        ) -and
+        $skillPolicyText -like '*unless the user asks for technical details*'
+    ) 'Default user-facing previews must hide internal orchestration vocabulary.'
+    Assert-True (
+        $openAiMetadata -like '*Describe the outcome you want*' -and
+        $openAiMetadata -notlike '*keep the main agent productive*' -and
+        $openAiMetadata -notlike '*isolate only independent work*'
+    ) 'UI metadata must address user goals without requiring orchestration knowledge.'
     Assert-True ($packet -like '*Maximum questions: 2*') (
         'Rendered packets should contain the role question limit.'
     )

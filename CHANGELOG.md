@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.19 - 2026-08-04
+
+Goal-first user experience update.
+
+- Let users start by describing the outcome they want instead of naming the
+  Skill or knowing orchestration concepts.
+- Complete simple, narrow work directly and propose separation only when it
+  materially helps a complex goal.
+- Present any proposed split in plain language: what separates, why it helps,
+  and how many confirmations are needed. Keep internal execution and evidence
+  details hidden unless the user asks or a decision requires them.
+- Preserve all existing ownership, worktree, recovery, receipt, hash, review,
+  and completion contracts unchanged.
+
 ## 0.7.18 - 2026-08-02
 
 Durable-review recovery and exact correction-identity release.

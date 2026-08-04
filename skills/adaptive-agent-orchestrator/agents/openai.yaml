@@ -1,7 +1,7 @@
 interface:
   display_name: "Adaptive Agent Orchestrator"
-  short_description: "Reduce context, duplication, and elapsed task time"
-  default_prompt: "Use $adaptive-agent-orchestrator to keep the main agent productive, isolate only independent work, and minimize repeated context."
+  short_description: "Turn goals into the right amount of organized work"
+  default_prompt: "Use $adaptive-agent-orchestrator. Describe the outcome you want; handle simple work directly and explain any useful split in plain language."
 
 policy:
   allow_implicit_invocation: true

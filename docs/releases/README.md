@@ -7,6 +7,7 @@ release records.
 
 | Version | Channel | Focus | Details |
 | --- | --- | --- | --- |
+| `v0.7.19` | Stable | Goal-first user experience and plain-language work previews | [Notes](v0.7.19.md) |
 | `v0.7.18` | Stable | Durable-review recovery and exact correction identity | [Notes](v0.7.18.md) |
 | `v0.7.17` | Stable | Same-revision cumulative review-inventory supersession | [Notes](v0.7.17.md) |
 | `v0.7.16` | Stable | Consecutive same-milestone durable-review revisions | [Notes](v0.7.16.md) |

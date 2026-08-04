@@ -1,6 +1,6 @@
 # Adaptive Agent Orchestrator
 
-[English](README.md) · [v0.7.18 正式版说明](docs/releases/v0.7.18.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
+[English](README.md) · [v0.7.19 正式版说明](docs/releases/v0.7.19.md) · [版本历史](docs/releases/README.md) · [安装](#安装) · [工作原理](#工作原理) · [当前限制](#当前限制)
 
 ![Adaptive Agent Orchestrator v0.7.0 发布图](docs/assets/adaptive-agent-orchestrator-v0.7.0-launch.png)
 
@@ -175,27 +175,20 @@ PowerShell 7.5 或更高版本。
 
 ## 快速开始
 
+直接描述你想完成的目标，不需要先了解 Skill、Agent、Worker、线程、模型或
+工作树。例如：
+
 ```text
-只有当这个迁移任务包含真正独立的工作流时，才使用
-$adaptive-agent-orchestrator。由当前 Agent 选择所需层级，Worker 只拿引用，
-并且渐进派遣。
+修改这个工作簿里“余额”列的公式，让它等于收入减支出。
 ```
 
 ```text
-使用 $adaptive-agent-orchestrator 创建一个需求预测 Reviewer 角色。派遣前
-协助我定义身份、非目标、证据规则、提问条件和升级条件。
+帮我开发个人财务管理网页，包含收入、支出、分类统计和 Excel 导出。
 ```
 
-```text
-使用 $adaptive-agent-orchestrator 完成这个供应链研究。先展示精简角色图，
-说明任务负责人和项目负责人的职责；没有自动组队授权的 Worker 必须先征得
-我同意。
-```
-
-```text
-使用 $adaptive-agent-orchestrator 从计划和事件日志恢复中断的工作流，不要
-重放失败上下文。
-```
+简单任务会直接完成。只有复杂目标确实适合拆开时，Codex 才会先用人话说明
+准备拆哪些工作、为什么分开更合适，以及需要你确认几次；默认只需一次确认。
+技术细节默认隐藏，你主动询问时再展示。
 
 ## 与官方 Codex subagent 的区别
 

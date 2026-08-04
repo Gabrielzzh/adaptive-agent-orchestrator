@@ -1,35 +1,34 @@
 # Release validation receipt
 
-Release: `0.7.18`
+Release: `0.7.19`
 Policy version: `0.7.6` (unchanged)
-Date: `2026-08-02`
+Date: `2026-08-04`
 
 ## Scope
 
-v0.7.18 closes append-only durable-review recovery gaps accumulated after
-v0.7.17 and makes structured lifecycle-correction mode/source identity exact.
-The final case fix changes PowerShell comparisons from case-insensitive matching
-to ordinal case-sensitive matching across authorization, correction event,
-receipt readback, and revision selection.
-
-The release also documents a task-shaped company organization. The invoking
-Agent leads the current task; simple work stays one layer, while complex or
-multi-project work may add project leads and isolated executors. Executors ask
-upward for staffing. Luna is the ordinary execution tier, Sol handles complex
-leadership and formal review, Terra is non-default, and Ultra needs explicit
-per-node approval. Writers use isolated worktrees and are retired after safe
-integration.
+v0.7.19 adds a goal-first, plain-language user layer. Users describe the
+outcome they want; simple work stays direct, while a useful complex split is
+explained without requiring orchestration vocabulary. Internal ownership,
+worktree, recovery, receipt, hash, review, and completion controls are unchanged.
 
 ## Fixed candidate
 
-- Case-fix parent: `66c5f06be775ccf79d0229bf0eef7323e67ebdc6`
-- Case-fix commit: `5deda9151ef5f5303d278fe417330c2950bbcb5d`
-- Dynamic-organization docs commit: `9c5622106b2b783b488d64f84d0a41b0a38ef3c8`
-- Release archive: `adaptive-agent-orchestrator-v0.7.18.zip`
+- Functional candidate: `983a9d83619247ae261ca2b9bd83ddef2bd37310`
+- Release-preparation commit: `75110a9f067baa2741152867265e4baf3e60c3cf`
+- Release archive: `adaptive-agent-orchestrator-v0.7.19.zip`
 - Release archive SHA-256:
-  `4c64b83155f9e833d8fbfa8e60d9791209f9f1f83a7ff4bab7a3c8e042a929d5`
+  `207cd873a09082ef74b7526fdc63f9c7e0b99b262002fb5fc2452b5b329bb366`
 - Installable Skill files: 76
-- Source/install comparison: 76/76; missing/extra/different = 0/0/0
+- Git/archive path comparison: 76/76; missing/extra = 0/0
+
+## User validation
+
+- ChatGPT Pro ordinary-user simulation: PASS; P0/P1 = 0/0.
+- Isolated simple Excel-formula first response: passed without delegation.
+- Isolated personal-finance web first response: passed with a plain-language
+  two-part proposal and one confirmation.
+- Deferred P2: the README first screen remains engineering-oriented. It does
+  not block this goal-first quick-start update.
 
 ## Gates
 
@@ -38,32 +37,19 @@ integration.
 - Recovery assertions: 91 passed
 - Materialization assertions: 45 passed; 13 negative cases passed
 - Run-policy assertions: 15 passed
-- Self-test assertions: 1100 passed
+- Thread-capture assertions: 13 passed
+- Self-test assertions: 1105 passed
 - Intentional invalid cases: 60 rejected
 - Reference JSON files: 8/8 parsed
 - Skill Creator: `Skill is valid!`
 - `git diff --check`: passed
+- Source, staged-diff, and archive prohibited-provider/key scans: 0/0/0
 - Symbolic-link fixture: skipped because this Windows session denied creation
-
-The exact lowercase `single_source_omission` path and its selection continue to
-pass. Case variants, surrounding whitespace, and Unicode lookalikes for mode or
-omission source are rejected before write while journal count, head, file SHA,
-and correction-receipt inventory stay unchanged.
-
-## Installed copy
-
-- Install path:
-  `C:\Users\Administrator\.codex\skills\adaptive-agent-orchestrator`
-- Backup:
-  `C:\Users\Administrator\Documents\skills设计\backups\adaptive-agent-orchestrator-before-v0718-20260802-225104`
-- Source/install comparison: 76/76; missing/extra/different = 0/0/0
-- Installed parse57, JSON8, Skill Creator, Milestone359, Recovery91,
-  Materialization45/negative13, Policy15, and Self1100/invalid60 passed.
 
 ## Boundaries
 
 - Only public Codex GPT routes are documented.
-- This release does not repair platform `systemError` or make business findings.
-- It does not weaken open P0/P1 or final main-owner acceptance gates.
-- It does not embed a fixed two-project hierarchy.
+- No lifecycle, recovery, receipt, hash, ownership, review, or completion gate
+  changed.
+- No multi-divination file or workflow changed.
 - Linux/macOS were not dynamically validated.
